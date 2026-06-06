@@ -1,0 +1,6 @@
+flask>=3.0
+mplfinance>=0.12.10
+matplotlib>=3.9.0
+dash>=2.0
+plotly>=5.0
+pandas>=2.0

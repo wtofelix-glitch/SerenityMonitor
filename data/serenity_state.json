@@ -1,0 +1,55 @@
+{
+  "last_seen_tweet": "2061704502076747781",
+  "last_check": "2026-06-02 15:05",
+  "last_successful_check": "2026-06-02 15:05",
+  "fetch_status": "success",
+  "fetch_note": "2026-06-02 15:05| Data from GitHub yan-labs/serenity-aleabitoreddit repo (commit 36493dc, 2026-06-02T07:50:23Z). 5 new tweets found.",
+  "known_tickers": [
+    "AXTI", "SIVE", "AAOI", "LITE", "IQE", "AEHR", "SOI", "SNDK", "MU",
+    "NBIS", "ARM", "MRVL", "INTC", "LPK", "TSEM", "SIMO", "VPG", "OSS",
+    "EWY", "CRCL", "NVTS", "WOLF", "AEVA", "COHR", "JBL", "HIMX", "NVDA",
+    "MTRN", "LPTH", "RPI", "POET", "RKLB", "PL", "LASR", "TSLA", "3105.TW",
+    "6451.TW", "8147.TW", "SLOIF", "6324.T", "MTSI", "XFAB", "POWI", "AMD",
+    "NOK", "GFS", "IREN", "AMZN", "ALRIB", "HOOD", "YSS", "AAPL", "AVGO",
+    "GOOGL", "META", "MSFT", "HPS.A", "DELL", "3363.TWO", "APH", "ASPI",
+    "4092.T", "BITF", "KRKNF", "CCCX", "CRWV", "APLD", "RIOT", "CIFR",
+    "WULF", "HUT", "CLSK", "HIVE", "WYFI", "VIRT", "UPWK",
+    "FLNC", "TSM", "BRK"
+  ],
+  "newly_added_tickers": [],
+  "tweet_history": [
+    {
+      "id": "2061704502076747781",
+      "date": "2026-06-02 15:00",
+      "type": "high_conviction",
+      "summary": "The most consequential event of an entire company's history. Got released today with a photonics player. Making them the functional standard laser for CPO, Pluggables, and SiPH. For companies like $NVDA, $AVGO, $AMD, to $MRVL using the foundry.",
+      "thesis": "SIVE as default laser standard for CPO/SiPH across entire industry, integrated into GFS silicon photonics reference designs",
+      "tickers": ["SIVE", "GFS", "NVDA", "AVGO", "AMD", "MRVL"]
+    },
+    {
+      "id": "2061695297315876875",
+      "date": "2026-06-02 14:23",
+      "type": "thesis_escalation",
+      "summary": "I'm not sure people realize the gravity of this news with $GFS yet. It's probably more fundamentally groundbreaking than $SIVE + $JBL. As $AVGO, $MRVL, $NVDA or anyone who goes through GFS silicon photonics has $SIVE embedded in the reference as default.",
+      "thesis": "GFS silicon photonics foundry thesis upgrade — more groundbreaking than SIVE+JBL alone",
+      "tickers": ["GFS", "SIVE", "JBL", "AVGO", "MRVL", "NVDA"]
+    },
+    {
+      "id": "2061691323242148281",
+      "date": "2026-06-02 14:08",
+      "type": "news",
+      "summary": "\"Sivers Semiconductors' laser arrays will be integrated into reference designs built on GF's silicon photonics platform.\" Woah that's structurally massive news with $SIVE and $GFS.",
+      "thesis": "SIVE laser arrays integrated into GFS silicon photonics platform reference designs",
+      "tickers": ["SIVE", "GFS"]
+    },
+    {
+      "id": "2061671824388403368",
+      "date": "2026-06-02 12:50",
+      "type": "conviction_signal",
+      "summary": "$NVDA Jensen Huang: \"$MRVL the next $1T company ladies and gentlemen\". Marvell is currently trading at $191B. I have positions in Marvell... but how much faith do we have in Jensen for the 5x?",
+      "thesis": "MRVL as next $1T company per Jensen Huang, Serenity holds position but questions 5x",
+      "tickers": ["MRVL", "NVDA"]
+    }
+  ],
+  "status_note": "2026-06-02| UPDATE FOUND. SIVE laser arrays integrated into GFS silicon photonics reference designs — Serenity calls it 'the most consequential event' of the company's history and the functional standard for CPO/SiPH across NVDA/AVGO/AMD/MRVL. GFS thesis upgraded as 'more fundamentally groundbreaking than SIVE+JBL'. MRVL called next $1T by Jensen Huang. No new tickers."
+}

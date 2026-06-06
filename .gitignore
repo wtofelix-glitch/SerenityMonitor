@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.intraday_state.json
+logs/
+reports/
+.adjusted_weights.json
+launchd.log
+serenity.log
+.codex/
+.claude/
+.codegraph/
+.mcp.json
+mnemosyne/
+performance_report.png

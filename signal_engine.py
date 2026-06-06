@@ -1,0 +1,644 @@
+"""
+统一信号引擎 — 融合多因子评分 + Alpha 因子 + 技术分析 + 价格行为
+输出明确的 BUY / SELL / HOLD / STOP 信号
+"""
+from datetime import date, datetime
+from typing import Optional
+import numpy as np
+
+from config import (
+    SIGNAL_CONFIG, STOCK_MAP, STOCK_DETAILS, ALL_CODES,
+    compute_serenity_score, CAPITAL_CONFIG, RISK_CONFIG, STRATEGY_CONFIG,
+)
+from data_engine import fetch_realtime, fetch_single
+from db import get_price_history
+from factor_engine import AlphaFactorEngine
+try:
+    from fundamental_engine import FundamentalEngine
+    _FUNDAMENTAL_AVAILABLE = True
+except ImportError:
+    _FUNDAMENTAL_AVAILABLE = False
+    FundamentalEngine = None
+from portfolio import PortfolioManager, get_portfolio
+
+# ============================================================
+# 信号级别定义
+# ============================================================
+SIGNAL_LEVELS = {
+    "STRONG_BUY":   {"score": 85, "icon": "🟢🟢🟢", "desc": "强力买入",      "max_weight": 0.50},
+    "BUY":          {"score": 75, "icon": "🟢🟢",   "desc": "买入",          "max_weight": 0.40},
+    "CAUTION_BUY":  {"score": 65, "icon": "🟢",     "desc": "谨慎买入",      "max_weight": 0.25},
+    "STRONG_HOLD":  {"score": 62, "icon": "🟢⚪",   "desc": "强劲持仓",      "max_weight": 0.0},
+    "HOLD":         {"score": 50, "icon": "⚪",     "desc": "持有观望",      "max_weight": 0.0},
+    "WEAK_HOLD":    {"score": 45, "icon": "🟡",     "desc": "弱持仓/关注",    "max_weight": 0.0},
+    "CONSIDER_ADD": {"score": 60, "icon": "🟢+",    "desc": "可考虑加仓",     "max_weight": 0.15},
+    "WATCH":        {"score": 40, "icon": "🟡",     "desc": "关注",          "max_weight": 0.0},
+    "SELL":         {"score": 30, "icon": "🔴🔴",   "desc": "卖出",          "max_weight": 0.0},
+    "STOP_LOSS":    {"score": 0,  "icon": "🔴🔴🔴", "desc": "止损",          "max_weight": 0.0},
+}
+
+
+def get_signal_level(score: float) -> str:
+    """根据综合评分返回信号级别"""
+    if score >= SIGNAL_CONFIG["strong_buy_threshold"]:
+        return "STRONG_BUY"
+    elif score >= SIGNAL_CONFIG["buy_threshold"]:
+        return "BUY"
+    elif score >= SIGNAL_CONFIG["hold_high"]:
+        return "CAUTION_BUY"
+    elif score >= SIGNAL_CONFIG["hold_low"]:
+        return "HOLD"
+    elif score >= SIGNAL_CONFIG["sell_threshold"]:
+        return "WATCH"
+    else:
+        return "SELL"
+
+
+def get_position_signal(score: float, profit_pct: float, is_holding: bool) -> str:
+    """持仓标的具体信号级别"
+    在 get_signal_level 基础上增加持仓专属级别
+    """
+    base = get_signal_level(score)
+
+    if not is_holding:
+        return base
+
+    # 持仓专属调整
+    if profit_pct > 5 and score >= 62:
+        return "STRONG_HOLD"
+    elif profit_pct > 5 and score >= 55:
+        return "CONSIDER_ADD"
+    elif score < 48:
+        return "WEAK_HOLD"
+    elif base in ("BUY", "CAUTION_BUY"):
+        return "STRONG_HOLD"
+    else:
+        return base if base in ("HOLD",) else "HOLD"
+
+
+# ============================================================
+# 因子引擎适配器
+# ============================================================
+
+_factor_engine = AlphaFactorEngine(use_db=True)
+_fund_engine = FundamentalEngine() if FundamentalEngine is not None else None
+
+
+def compute_technical_factors(code: str) -> dict:
+    """
+    计算技术面因子指标
+    - MA5/MA20 趋势
+    - RSI 超买超卖
+    - 布林带位置
+    - 成交量变化
+    - ATR 波动率
+    """
+    rows = get_price_history(code, 60)
+    if len(rows) < 21:
+        return {}
+
+    # 时间正序
+    closes = np.array([r["close"] for r in reversed(rows)], dtype=float)
+    highs = np.array([r["high"] for r in reversed(rows)], dtype=float)
+    lows = np.array([r["low"] for r in reversed(rows)], dtype=float)
+    volumes = np.array([r["volume"] for r in reversed(rows)], dtype=float)
+    n = len(closes)
+
+    cfg = STRATEGY_CONFIG
+    ma_s = cfg["ma_short"]
+    ma_l = cfg["ma_long"]
+    rsi_p = cfg["rsi_period"]
+    bb_p = cfg["bb_period"]
+    bb_std = cfg["bb_std"]
+    atr_p = cfg["atr_period"]
+
+    result = {}
+
+    # MA 趋势
+    if n >= ma_l:
+        ma5 = closes[-ma_s:].mean() if n >= ma_s else closes.mean()
+        ma20 = closes[-ma_l:].mean()
+        result["ma5"] = round(ma5, 2)
+        result["ma20"] = round(ma20, 2)
+        result["ma5_above_ma20"] = ma5 > ma20
+        result["price_above_ma5"] = closes[-1] > ma5
+        result["price_above_ma20"] = closes[-1] > ma20
+
+    # RSI
+    if n >= rsi_p + 1:
+        deltas = np.diff(closes[-(rsi_p + 1):])
+        gains = deltas[deltas > 0].sum()
+        losses = abs(deltas[deltas < 0].sum())
+        avg_gain = gains / rsi_p
+        avg_loss = losses / rsi_p
+        if avg_loss == 0:
+            rsi = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+        result["rsi"] = round(rsi, 1)
+        result["rsi_oversold"] = rsi <= cfg["rsi_oversold"]
+        result["rsi_overbought"] = rsi >= cfg["rsi_overbought"]
+
+    # 布林带
+    if n >= bb_p:
+        bb_mid = closes[-bb_p:].mean()
+        bb_std_val = closes[-bb_p:].std(ddof=1)
+        bb_upper = bb_mid + bb_std * bb_std_val
+        bb_lower = bb_mid - bb_std * bb_std_val
+        last_close = closes[-1]
+        result["bb_position"] = round((last_close - bb_lower) / (bb_upper - bb_lower) * 100, 1) if bb_upper > bb_lower else 50
+        result["bb_lower"] = round(bb_lower, 2)
+        result["bb_upper"] = round(bb_upper, 2)
+        result["bb_mid"] = round(bb_mid, 2)
+        result["at_bb_lower"] = last_close <= bb_lower * 1.02
+        result["at_bb_upper"] = last_close >= bb_upper * 0.98
+
+    # 成交量变化
+    if n >= 21:
+        vol_ma20 = volumes[-20:].mean()
+        vol_ma5 = volumes[-5:].mean()
+        latest_vol = volumes[-1]
+        result["volume_ratio"] = round(latest_vol / vol_ma20, 2) if vol_ma20 > 0 else 1
+        result["volume_surge"] = latest_vol >= vol_ma20 * SIGNAL_CONFIG["volume_surge_ratio"]
+        result["volume_dry"] = latest_vol <= vol_ma20 * SIGNAL_CONFIG["volume_dry_ratio"]
+        result["volume_trend"] = "increasing" if vol_ma5 > vol_ma20 * 1.2 else ("decreasing" if vol_ma5 < vol_ma20 * 0.8 else "normal")
+
+    # ATR 波动率
+    if n >= atr_p + 1:
+        true_ranges = []
+        for i in range(1, atr_p + 1):
+            tr = max(
+                highs[-i] - lows[-i],
+                abs(highs[-i] - closes[-i-1]),
+                abs(lows[-i] - closes[-i-1])
+            )
+            true_ranges.append(tr)
+        atr = np.mean(true_ranges)
+        result["atr"] = round(atr, 2)
+        result["atr_pct"] = round(atr / closes[-1] * 100, 2) if closes[-1] > 0 else 0
+
+    return result
+
+
+def get_dynamic_stop_loss(code: str, buy_price: float) -> dict:
+    """
+    根据 ATR 计算动态止损价
+
+    Parameters
+    ----------
+    code      : 股票代码
+    buy_price : 买入价格
+
+    Returns
+    -------
+    dict with:
+        stop_price : float  # 止损价
+        stop_pct   : float  # 止损百分比（负值）
+        method     : str    # "atr_dynamic" 或 "fixed"
+        atr_pct    : float  # ATR百分比
+    """
+    if not RISK_CONFIG.get("use_atr_stop", True):
+        return {
+            "stop_price": round(buy_price * (1 + RISK_CONFIG["stop_loss_pct"]), 2),
+            "stop_pct": RISK_CONFIG["stop_loss_pct"],
+            "method": "fixed",
+            "atr_pct": 0,
+        }
+
+    tech = compute_technical_factors(code)
+    atr_pct = tech.get("atr_pct", 0)
+
+    if atr_pct <= 0:
+        # ATR 数据不足，回退到固定止损
+        return {
+            "stop_price": round(buy_price * (1 + RISK_CONFIG["stop_loss_pct"]), 2),
+            "stop_pct": RISK_CONFIG["stop_loss_pct"],
+            "method": "fixed",
+            "atr_pct": 0,
+        }
+
+    mult = RISK_CONFIG["atr_stop_multiplier"]
+    # atr_pct 已经是百分比格式（如 2.5 表示 2.5%），转为小数负值
+    dynamic_pct = -(atr_pct * mult / 100)
+
+    # 夹在 min/max 之间
+    # min_pct = -0.05（最紧），max_pct = -0.15（最宽）
+    # 负值情况下：min > max，所以用 max 做下限，min 做上限
+    dynamic_pct = max(
+        RISK_CONFIG["atr_stop_max_pct"],
+        min(RISK_CONFIG["atr_stop_min_pct"], dynamic_pct)
+    )
+
+    return {
+        "stop_price": round(buy_price * (1 + dynamic_pct), 2),
+        "stop_pct": round(dynamic_pct, 4),
+        "method": "atr_dynamic",
+        "atr_pct": round(atr_pct, 2),
+    }
+
+
+def compute_trend_score(tech: dict) -> float:
+    """技术面评分 0-100"""
+    score = 50.0  # 中性
+
+    if not tech:
+        return score
+
+    # 均线趋势 (+-15)
+    if tech.get("ma5_above_ma20"):
+        score += 10
+        if tech.get("price_above_ma5"):
+            score += 5
+    else:
+        score -= 10
+        if not tech.get("price_above_ma20"):
+            score -= 5
+
+    # RSI (+-10)
+    rsi = tech.get("rsi", 50)
+    if 40 <= rsi <= 60:
+        score += 5  # 中性偏强
+    elif 30 <= rsi < 40:
+        score += 8  # 超卖反弹机会
+    elif rsi < 30:
+        score += 5  # 深度超卖
+    elif 60 < rsi <= 70:
+        score -= 3  # 接近超买
+    elif rsi > 70:
+        score -= 8  # 超买
+
+    # 布林带 (+-10)
+    bb_pos = tech.get("bb_position", 50)
+    if bb_pos < 20:
+        score += 10  # 下轨附近，买入机会
+    elif bb_pos > 80:
+        score -= 10  # 上轨附近，卖出风险
+    elif bb_pos < 40:
+        score += 5
+    elif bb_pos > 60:
+        score -= 5
+
+    # 成交量 (+-5)
+    vol_ratio = tech.get("volume_ratio", 1)
+    if tech.get("volume_surge"):
+        score -= 5  # 异常放量警惕
+    elif tech.get("volume_dry"):
+        score -= 3  # 缩量
+    elif 0.8 <= vol_ratio <= 1.5:
+        score += 3  # 正常量能
+
+    return max(0, min(100, score))
+
+
+def compute_multi_factor_score(tech_score: float, serenity_score: float,
+                                alpha_signals: dict, zone_info: dict,
+                                fund_signal: float = None,
+                                fourteen_factor_score: float = None) -> float:
+    """
+    综合多维度评分 (v2 — 加入14因子独立维度)
+
+    权重分配:
+    - 技术面: 20% (原25%)
+    - Serenity适配: 20%
+    - Alpha因子: 25% (原20%)
+    - 14因子独立维度: 10% (新增)
+    - 基本面: 15%
+    - 价格位置: 15% (原20%)
+    """
+    # Alpha 因子信号（来自 factor_engine）
+    alpha_val = _compute_alpha_composite(alpha_signals)
+
+    # 价格位置: 是否在买入区间
+    price = zone_info.get("price", 0)
+    buy_low = zone_info.get("buy_zone_low", 0)
+    buy_high = zone_info.get("buy_zone_high", 0)
+    if buy_low > 0 and buy_high > 0 and price > 0:
+        if price < buy_low:
+            zone_score = 90  # 低于买入区 = 折扣机会
+        elif price <= buy_high:
+            zone_score = 75  # 在买入区内
+        elif price <= buy_high * 1.15:
+            zone_score = 50  # 略高
+        elif price <= buy_high * 1.3:
+            zone_score = 30  # 偏高
+        else:
+            zone_score = 15  # 远超
+    else:
+        zone_score = 50
+
+    # 加权综合
+    # 基本面信号: [-1, 1] → [0, 100]
+    fund_score = 50 + (fund_signal or 0) * 50 if fund_signal is not None else 50
+
+    total = (
+        tech_score * 0.20 +          # 技术面 25%→20%
+        serenity_score * 0.20 +      # Serenity 不变
+        alpha_val * 0.25 +           # Alpha因子 20%→25%
+        fund_score * 0.15 +          # 基本面 不变
+        zone_score * 0.15 +          # 价格位置 20%→15%
+        fourteen_factor_score * 0.10 # 新增14因子独立维度
+    ) if fourteen_factor_score is not None else (
+        tech_score * 0.25 +
+        serenity_score * 0.20 +
+        alpha_val * 0.20 +
+        fund_score * 0.15 +
+        zone_score * 0.20
+    )
+    return round(total, 1)
+
+
+def _compute_alpha_composite(alpha_signals: dict) -> float:
+    """Alpha因子综合评分 (0-100) — 放大1.8倍增强信号区分度"""
+    if not alpha_signals:
+        return 50
+
+    vals = [v for v in alpha_signals.values() if v is not None]
+    if not vals:
+        return 50
+
+    avg = sum(vals) / len(vals)  # 范围 [-1, 1]
+    # 放大1.8倍增强区分度，映射到 [0, 100]
+    return round(50 + np.clip(avg * 1.8, -1, 1) * 40, 1)
+
+
+# ============================================================
+# 买入确认检查
+# ============================================================
+
+def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
+    """
+    买入信号多条件确认
+
+    Returns
+    -------
+    dict with: confirmed (bool), reasons (list), confidence (float)
+    """
+    reasons = []
+    confirm_count = 0
+    total_checks = 0
+
+    # 条件1: 价格在 MA5 上方（短线强势）
+    total_checks += 1
+    if tech.get("price_above_ma5"):
+        confirm_count += 1
+        reasons.append("✓ 价格站上MA5")
+    else:
+        reasons.append("✗ 价格在MA5下方")
+
+    # 条件2: 均线多头排列
+    total_checks += 1
+    if tech.get("ma5_above_ma20"):
+        confirm_count += 1
+        reasons.append("✓ MA5 > MA20 多头排列")
+    else:
+        reasons.append("✗ 均线空头排列")
+
+    # 条件3: RSI 不超买
+    total_checks += 1
+    rsi = tech.get("rsi", 50)
+    if rsi is not None and rsi < 70:
+        confirm_count += 1
+        reasons.append(f"✓ RSI={rsi:.0f} 未超买")
+    else:
+        reasons.append(f"✗ RSI={rsi:.0f} 超买区")
+
+    # 条件4: 布林带不在上轨外
+    total_checks += 1
+    if not tech.get("at_bb_upper", False):
+        confirm_count += 1
+        reasons.append("✓ 布林带未触及上轨")
+    else:
+        reasons.append("✗ 价格在布林上轨外")
+
+    # 条件5: 成交量正常或温和放大
+    total_checks += 1
+    vol_ratio = tech.get("volume_ratio", 1)
+    if not tech.get("volume_surge", False) and not tech.get("volume_dry", False):
+        confirm_count += 1
+        reasons.append(f"✓ 成交量正常 ({vol_ratio:.1f}x)")
+    elif tech.get("volume_surge"):
+        reasons.append(f"✗ 异常放量 ({vol_ratio:.1f}x)")
+    else:
+        reasons.append(f"✗ 缩量 ({vol_ratio:.1f}x)")
+
+    # 条件6: Alpha因子不负面
+    total_checks += 1
+    if alpha_signals:
+        avg_alpha = sum(v for v in alpha_signals.values() if v is not None) / max(1, len(alpha_signals))
+        if avg_alpha >= SIGNAL_CONFIG["factor_signal_confirm"]:
+            confirm_count += 1
+            reasons.append(f"✓ Alpha因子积极 ({avg_alpha:+.2f})")
+        elif avg_alpha <= SIGNAL_CONFIG["factor_signal_reject"]:
+            reasons.append(f"✗ Alpha因子负面 ({avg_alpha:+.2f})")
+        else:
+            confirm_count += 1
+            reasons.append(f"○ Alpha因子中性 ({avg_alpha:+.2f})")
+            total_checks -= 1  # 中性不计入
+    else:
+        reasons.append("○ 无Alpha因子数据")
+
+    confidence = confirm_count / max(1, total_checks) if total_checks > 0 else 0.5
+    confirmed = confidence >= 0.35  # 至少 1/3 条件满足（放宽确认门槛）
+
+    return {
+        "confirmed": confirmed,
+        "confidence": round(confidence, 2),
+        "confirm_count": confirm_count,
+        "total_checks": total_checks,
+        "reasons": reasons,
+    }
+
+
+# ============================================================
+# 主信号生成
+# ============================================================
+
+def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None) -> list[dict]:
+    """
+    为所有标的生产完整的交易信号
+
+    Parameters
+    ----------
+    codes     : 标的列表, 默认全部
+    portfolio : PortfolioManager 实例, 用于计算仓位建议
+
+    Returns
+    -------
+    list[dict] — 每个信号含 action / score / 建议仓位等
+    """
+    if codes is None:
+        codes = ALL_CODES
+    if portfolio is None:
+        portfolio = get_portfolio()
+
+    # 获取实时数据
+    realtime = fetch_realtime(codes)
+    rt_map = {r["code"]: r for r in realtime}
+
+    # 获取持仓列表
+    position_codes = set(portfolio.position_codes)
+
+    signals = []
+    for code in codes:
+        try:
+            sig = _generate_single_signal(code, rt_map.get(code, {}), position_codes, portfolio)
+            if sig:
+                signals.append(sig)
+        except Exception as e:
+            signals.append({
+                "code": code,
+                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "action": "ERROR",
+                "total_score": 0,
+                "error": str(e),
+            })
+
+    # 按评分排序
+    signals.sort(key=lambda s: s.get("total_score", 0), reverse=True)
+    return signals
+
+
+def _generate_single_signal(code: str, realtime_data: dict,
+                             position_codes: set, portfolio: PortfolioManager) -> Optional[dict]:
+    """单个标的的信号生成"""
+    name = STOCK_MAP.get(code, {}).get("name", code)
+    price = realtime_data.get("price", 0)
+    if price <= 0:
+        rows = get_price_history(code, 1)
+        price = float(rows[0]["close"]) if rows else 0
+        if price <= 0:
+            return None
+
+    is_holding = code in position_codes
+
+    # 1. 技术面因子
+    tech = compute_technical_factors(code)
+
+    # 2. Alpha 因子
+    alpha_factors = _factor_engine.compute_all_factors(code)
+    alpha_signals = alpha_factors.get("signals", {})
+
+    # 2.5 基本面因子
+    fund_signal = _fund_engine.get_fundamental_signal(code) if _fund_engine else None
+
+    # 3. Serenity 评分
+    serenity_score = compute_serenity_score(code)
+
+    # 4. 基本面 + 买入区间
+    detail = STOCK_DETAILS.get(code, {})
+    zone_info = {
+        "price": price,
+        "buy_zone_low": detail.get("buy_zone_low", 0),
+        "buy_zone_high": detail.get("buy_zone_high", 0),
+        "target_sell": detail.get("target_sell", 0),
+        "score": detail.get("score", 50),
+    }
+
+    # 5. 技术面评分
+    tech_score = compute_trend_score(tech)
+
+    # 6. 综合评分
+    # 从 alpha_signals 中提取14因子值计算独立维度评分
+    ff_signals = alpha_signals or {}
+    ff_vals = [v for v in ff_signals.values() if v is not None]
+    if ff_vals:
+        ff_avg = sum(ff_vals) / len(ff_vals)
+        fourteen_factor_score = np.clip(ff_avg * 2, -1, 1) * 50 + 50  # 映射到 0-100
+    else:
+        fourteen_factor_score = None
+
+    total_score = compute_multi_factor_score(tech_score, serenity_score, alpha_signals, zone_info, fund_signal, fourteen_factor_score)
+
+    # 7. 信号级别（持仓/非持仓分开处理）
+    action = get_position_signal(total_score, 
+                                 ((price - zone_info['target_sell'])/zone_info['target_sell']*100) if zone_info['target_sell'] > 0 else 0,
+                                 is_holding) if is_holding else get_signal_level(total_score)
+
+    # 7.5 已达目标价 → 强制卖出
+    if is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0:
+        action = "SELL"
+
+    # 8. 如果是持仓，检查止盈止损
+    stop_actions = portfolio.check_stop_conditions()
+    for sa in stop_actions:
+        if sa["code"] == code:
+            if "STOP" in sa["action"]:
+                action = "STOP_LOSS"
+                total_score = 10
+            elif "SELL" in sa["action"]:
+                action = "SELL"
+                total_score = 25
+
+    # 9. 买入确认（仅对非持仓标的）
+    buy_confirm = None
+    suggested_amount = 0
+    suggested_shares = 0
+    if not is_holding and action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+        buy_confirm = confirm_buy_signal(code, tech, alpha_signals)
+        if not buy_confirm["confirmed"]:
+            # 降级
+            if action == "STRONG_BUY":
+                action = "BUY"
+            elif action == "BUY":
+                action = "CAUTION_BUY"
+            elif action == "CAUTION_BUY":
+                action = "HOLD"
+
+        # 仓位建议
+        if action in ("STRONG_BUY", "BUY"):
+            sizing = portfolio.calc_position_size(code, buy_confirm["confidence"] if buy_confirm else 0.5)
+            suggested_amount = sizing["amount"]
+            suggested_shares = sizing["shares"]
+
+    # 10. 构建结果
+    buy_zone_str = f"{zone_info['buy_zone_low']:.0f}-{zone_info['buy_zone_high']:.0f}" if zone_info['buy_zone_low'] > 0 else "N/A"
+
+    result = {
+        "code": code,
+        "name": name,
+        "price": price,
+        "action": action,
+        "signal_desc": SIGNAL_LEVELS.get(action, {}).get("desc", action),
+        "total_score": total_score,
+        "tech_score": round(tech_score, 1),
+        "serenity_score": serenity_score,
+        "alpha_score": _compute_alpha_composite(alpha_signals),
+        "fundamental_score": round(fund_signal, 4) if fund_signal is not None else None,
+        "is_holding": is_holding,
+        "buy_zone": buy_zone_str,
+        "target_sell": f"{zone_info['target_sell']:.0f}" if zone_info['target_sell'] > 0 else "N/A",
+        "reason": detail.get("reason", ""),
+        "tech_indicators": {
+            "ma5": tech.get("ma5", 0),
+            "ma20": tech.get("ma20", 0),
+            "rsi": tech.get("rsi", 50),
+            "bb_position": tech.get("bb_position", 50),
+            "volume_ratio": tech.get("volume_ratio", 1),
+            "ma5_above_ma20": tech.get("ma5_above_ma20", False),
+        },
+        "alpha_signals": alpha_signals,
+        "change_pct": realtime_data.get("change_pct", 0) if realtime_data else 0,
+    }
+
+    if buy_confirm:
+        result["buy_confirm"] = buy_confirm
+        result["suggested_amount"] = suggested_amount
+        result["suggested_shares"] = suggested_shares
+
+    # 记录信号日志（用于绩效追踪）
+    try:
+        from db import save_signal_log
+        save_signal_log(
+            code=code, action=action, total_score=total_score, price=price,
+            is_holding=is_holding, tech_score=round(tech_score, 1),
+            serenity_score=serenity_score,
+            alpha_score=_compute_alpha_composite(alpha_signals),
+            fundamental_score=round(fund_signal, 4) if fund_signal is not None else None,
+            details={"rsi": tech.get("rsi", 50), "volume_ratio": tech.get("volume_ratio", 1),
+                     "bb_position": tech.get("bb_position", 50)}
+        )
+    except Exception:
+        pass  # 日志失败不影响信号输出
+
+    return result
