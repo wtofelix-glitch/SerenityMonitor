@@ -18,6 +18,48 @@ STOCK_MAP = {
     "002428": {"name": "云南锗业", "market": "sz", "tier": 3},
     "600460": {"name": "士兰微", "market": "sh", "tier": 3},
     "603986": {"name": "兆易创新", "market": "sh", "tier": 3},
+    # 防御组合
+    "600036": {
+        "score": 75,
+        "buy_zone_low": 35.0,
+        "buy_zone_high": 42.0,
+        "target_sell": 55.0,
+        "reason": "零售银行龙头，高股息防御 — 震荡市资金避风港，ROE行业领先",
+        "serenity_tag": "defensive_dividend",
+    },
+    "600585": {
+        "score": 68,
+        "buy_zone_low": 22.0,
+        "buy_zone_high": 28.0,
+        "target_sell": 38.0,
+        "reason": "水泥龙头+高分红 — 基建稳增长受益，低估值防御属性强",
+        "serenity_tag": "infra_dividend",
+    },
+    "600900": {
+        "score": 80,
+        "buy_zone_low": 25.0,
+        "buy_zone_high": 30.0,
+        "target_sell": 38.0,
+        "reason": "水电绝对龙头，现金流稳定 — 类债券属性，极端行情避险首选",
+        "serenity_tag": "utility_defensive",
+    },
+    "601398": {
+        "score": 78,
+        "buy_zone_low": 5.5,
+        "buy_zone_high": 7.0,
+        "target_sell": 9.0,
+        "reason": "全球最大银行，股息率5%+ — 国家队护盘标的，系统性重要",
+        "serenity_tag": "bank_defensive",
+    },
+    "601006": {
+        "score": 65,
+        "buy_zone_low": 6.5,
+        "buy_zone_high": 8.0,
+        "target_sell": 10.5,
+        "reason": "煤炭运输专线，稳定现金流 — 高股息+低波动，红利策略核心",
+        "serenity_tag": "railway_dividend",
+    },
+
     "600176": {"name": "中国巨石", "market": "sh", "tier": 3},
     # 防御组合 (银行/公用事业/红利 — 震荡市对冲)
     "600036": {"name": "招商银行", "market": "sh", "tier": 4},
@@ -107,6 +149,48 @@ STOCK_DETAILS = {
         "reason": "功率半导体IDM龙头，800VDC数据中心供电架构受益 — 映射Serenity NVTS/POWI功率半主题",
         "serenity_tag": "power_semiconductor",
     },
+    # 防御组合
+    "600036": {
+        "score": 75,
+        "buy_zone_low": 35.0,
+        "buy_zone_high": 42.0,
+        "target_sell": 55.0,
+        "reason": "零售银行龙头，高股息防御 — 震荡市资金避风港，ROE行业领先",
+        "serenity_tag": "defensive_dividend",
+    },
+    "600585": {
+        "score": 68,
+        "buy_zone_low": 22.0,
+        "buy_zone_high": 28.0,
+        "target_sell": 38.0,
+        "reason": "水泥龙头+高分红 — 基建稳增长受益，低估值防御属性强",
+        "serenity_tag": "infra_dividend",
+    },
+    "600900": {
+        "score": 80,
+        "buy_zone_low": 25.0,
+        "buy_zone_high": 30.0,
+        "target_sell": 38.0,
+        "reason": "水电绝对龙头，现金流稳定 — 类债券属性，极端行情避险首选",
+        "serenity_tag": "utility_defensive",
+    },
+    "601398": {
+        "score": 78,
+        "buy_zone_low": 5.5,
+        "buy_zone_high": 7.0,
+        "target_sell": 9.0,
+        "reason": "全球最大银行，股息率5%+ — 国家队护盘标的，系统性重要",
+        "serenity_tag": "bank_defensive",
+    },
+    "601006": {
+        "score": 65,
+        "buy_zone_low": 6.5,
+        "buy_zone_high": 8.0,
+        "target_sell": 10.5,
+        "reason": "煤炭运输专线，稳定现金流 — 高股息+低波动，红利策略核心",
+        "serenity_tag": "railway_dividend",
+    },
+
     "600176": {
         "score": 55,
         "buy_zone_low": 35.0,
@@ -135,7 +219,56 @@ SERENITY_DIMENSIONS = {
     "600141": {"cpo_alignment": 55, "bottleneck_position": 60, "ai_capex_exposure": 60, "defensive_moat": 65, "momentum_fit": 65},
     "603986": {"cpo_alignment": 35, "bottleneck_position": 30, "ai_capex_exposure": 70, "defensive_moat": 60, "momentum_fit": 65},
     "600460": {"cpo_alignment": 25, "bottleneck_position": 40, "ai_capex_exposure": 50, "defensive_moat": 45, "momentum_fit": 60},
+    # 防御组合
+    "600036": {
+        "score": 75,
+        "buy_zone_low": 35.0,
+        "buy_zone_high": 42.0,
+        "target_sell": 55.0,
+        "reason": "零售银行龙头，高股息防御 — 震荡市资金避风港，ROE行业领先",
+        "serenity_tag": "defensive_dividend",
+    },
+    "600585": {
+        "score": 68,
+        "buy_zone_low": 22.0,
+        "buy_zone_high": 28.0,
+        "target_sell": 38.0,
+        "reason": "水泥龙头+高分红 — 基建稳增长受益，低估值防御属性强",
+        "serenity_tag": "infra_dividend",
+    },
+    "600900": {
+        "score": 80,
+        "buy_zone_low": 25.0,
+        "buy_zone_high": 30.0,
+        "target_sell": 38.0,
+        "reason": "水电绝对龙头，现金流稳定 — 类债券属性，极端行情避险首选",
+        "serenity_tag": "utility_defensive",
+    },
+    "601398": {
+        "score": 78,
+        "buy_zone_low": 5.5,
+        "buy_zone_high": 7.0,
+        "target_sell": 9.0,
+        "reason": "全球最大银行，股息率5%+ — 国家队护盘标的，系统性重要",
+        "serenity_tag": "bank_defensive",
+    },
+    "601006": {
+        "score": 65,
+        "buy_zone_low": 6.5,
+        "buy_zone_high": 8.0,
+        "target_sell": 10.5,
+        "reason": "煤炭运输专线，稳定现金流 — 高股息+低波动，红利策略核心",
+        "serenity_tag": "railway_dividend",
+    },
+
     "600176": {"cpo_alignment": 30, "bottleneck_position": 35, "ai_capex_exposure": 55, "defensive_moat": 75, "momentum_fit": 60},
+    # 防御组合 — 低CPO/瓶颈暴露，高护城河/动量
+    "600036": {"cpo_alignment": 10, "bottleneck_position": 5, "ai_capex_exposure": 5, "defensive_moat": 95, "momentum_fit": 65},
+    "600585": {"cpo_alignment": 15, "bottleneck_position": 10, "ai_capex_exposure": 10, "defensive_moat": 80, "momentum_fit": 60},
+    "600900": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 98, "momentum_fit": 70},
+    "601398": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 95, "momentum_fit": 65},
+    "601006": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 85, "momentum_fit": 60},
+
 }
 
 SUGGESTED_TARGETS = {
