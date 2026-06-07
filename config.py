@@ -269,3 +269,15 @@ MARKET_ADJUSTMENTS = {
     "震荡市": {"dividend_weight": 0, "quant_weight": 0, "etf_weight": 0, "description": "震荡市维持默认权重"},
     "结构性牛市": {"dividend_weight": -0.03, "quant_weight": +0.03, "description": "结构性牛市适当增量化减红利"},
 }
+
+# ============================================================
+# 参考标的 (指数/ETF — 仅用于基准对比，不参与评分/交易)
+# ============================================================
+REFERENCE_SYMBOLS = {
+    "sh000001": {"name": "上证指数", "market": "sh", "type": "index"},
+    "sh512010": {"name": "医药ETF", "market": "sh", "type": "etf"},
+    "sh512100": {"name": "1000ETF", "market": "sh", "type": "etf"},
+    "sh512480": {"name": "半导体ETF", "market": "sh", "type": "etf"},
+    "sh515050": {"name": "AI智能ETF", "market": "sh", "type": "etf"},
+    "sh563000": {"name": "中国A50ETF", "market": "sh", "type": "etf"},
+}
