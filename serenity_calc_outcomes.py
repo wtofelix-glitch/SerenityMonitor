@@ -20,7 +20,7 @@ def calculate_outcomes():
             continue
 
         # 获取信号日期之后的行情
-        rows = get_price_history(code, 30)
+        rows = get_price_history(code, 90)
         rows_sorted = sorted(rows, key=lambda r: r["date"])
         # 找到信号日期的索引
         idx = None

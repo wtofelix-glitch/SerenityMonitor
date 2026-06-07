@@ -10,10 +10,10 @@ A股市场多因子评分系统 — CPO对齐/瓶颈/AIcapex/护城河/动量五
 
 **Tech stack:** Python 3.12+, Flask, SQLite, numpy, Sina Finance API
 **Package manager:** pip / uv
-**Key commands:** `python3 cli.py status`, `python3 cli.py rescore`, `python3 cli.py monitor`, `python3 app.py`
-**Cron:** 每日评分 16:00, 盘中监控每 30 分, 每日收报告 15:30
-**UI:** 毛玻璃移动端仪表盘，涨红跌绿
-**Ports:** app.py → 8400, dash_dashboard.py → 8050
+**Key commands:** `python3 cli.py status`, `python3 cli.py rescore`, `python3 cli.py monitor`, `python3 cli.py health`
+**Cron:** 每日评分 16:00, 盘中监控每 10 分, 每日收报告 15:30 (均由 Hermes Gateway 管理)
+**UI:** 毛玻璃移动端仪表盘 (Flask, monitoring_dashboard.py)，涨红跌绿
+**Ports:** monitoring_dashboard.py → 8401
 
 ## Scope Constraints
 
@@ -21,4 +21,4 @@ A股市场多因子评分系统 — CPO对齐/瓶颈/AIcapex/护城河/动量五
 - 不修改交易/仓位计算逻辑。
 - CLI 命令在 `cli.py` 的 commands dict 中注册。
 - 新因子添加到 `scorer.py`。
-- 数据库操作通过 `db.py` 封装的函数.
+- 数据库操作通过 `db.py` 封装的函数。
