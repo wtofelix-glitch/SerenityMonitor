@@ -14,3 +14,8 @@ serenity.log
 .mcp.json
 mnemosyne/
 performance_report.png
+serenity.db
+data/serenity.db
+data/serenity_state.json
+*.db-journal
+*.db-wal

@@ -681,7 +681,7 @@ def cmd_dashboard():
         if resp.status == 200:
             print("✅ 监控仪表盘已在运行 → http://localhost:8401/monitor")
             return
-    except Exception:
+    except (OSError, ValueError):
         pass
     # 未运行 → 后台启动（launchd 会自动接管）
     print("📱 启动监控仪表盘 → http://localhost:8401/monitor")
@@ -1094,7 +1094,7 @@ def _quick_query(code: str):
         composite = rating_info["score"]
         factor_signal = rating_info["factors"]["factor_signal"]
         fund_signal = rating_info["factors"]["fundamental_signal"]
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         rating = "N/A"
         rating_emoji = "❓"
         signal_label = "N/A"
@@ -1113,7 +1113,7 @@ def _quick_query(code: str):
         pe_str = f"{pe:.1f}" if pe else "N/A"
         pb_str = f"{pb:.1f}" if pb else "N/A"
         roe_str = f"{roe:.1f}%" if isinstance(roe, (int, float)) else "N/A"
-    except Exception:
+    except (TypeError, ValueError):
         pe_str = pb_str = roe_str = "N/A"
 
     # 第一行
