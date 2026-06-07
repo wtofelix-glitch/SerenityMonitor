@@ -19,3 +19,5 @@ data/serenity.db
 data/serenity_state.json
 *.db-journal
 *.db-wal
+*.db-shm
+*.db-wal
