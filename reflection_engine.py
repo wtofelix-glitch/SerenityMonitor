@@ -67,15 +67,13 @@ DIMENSION_KEYS = [
 def compute_dimension_ic(days: int = 20) -> dict:
     """
     计算各评分维度与次日收益的 Rank IC。
-    
+
     方法：对每个交易日，取各维度评分与次日涨跌幅的 Spearman rank correlation，
     然后对最近N天取均值。
-    
+
     Returns:
         {dimension: mean_ic, ...}
     """
-    from datetime import date, timedelta
-    
     today = date.today()
     dim_ic_sums = defaultdict(float)
     dim_ic_counts = defaultdict(int)
@@ -251,8 +249,6 @@ def generate_all_reflections() -> list[dict]:
 
 def fill_outcomes(days_back: int = 10):
     """补填尚未完成的实际收益"""
-    from datetime import date, timedelta
-    
     today = date.today()
     unfilled = get_unfilled_reflections(since_days=days_back)
 
