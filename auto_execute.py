@@ -419,7 +419,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         zone_label = details.get("zone_label", "")
 
         # 买入条件
-        if signal not in ("STRONG_BUY", "BUY"):
+        if signal not in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
             continue
         if score < enter_threshold:
             continue

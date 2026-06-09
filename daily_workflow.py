@@ -6,6 +6,7 @@ Serenity 每日工作流 — 一站式运行全部子系统
     python3 daily_workflow.py              # 评分 + 反思 + 自动调仓建议
     python3 daily_workflow.py --push       # 同上 + 微信推送
     python3 daily_workflow.py --full       # 含回测快照 + IC评估
+    python3 daily_workflow.py --execute    # 🚀 生成计划并自动执行交易
 
 步骤:
   0. 参考数据拉取 (fetch_reference) → price_history
@@ -17,6 +18,7 @@ Serenity 每日工作流 — 一站式运行全部子系统
   6. 自动调仓 (auto_execute) → 行动计划
   7. [可选] T1 回补检查
   8. [可选] 回测快照
+  🚀 [--execute] 自动执行交易 + 更新 NAV
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,6 +35,7 @@ def step(name: str):
 def main():
     do_push = '--push' in sys.argv
     do_full = '--full' in sys.argv
+    do_execute = '--execute' in sys.argv
     today = date.today().isoformat()
 
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
@@ -75,7 +78,6 @@ def main():
     try:
         from serenity_calc_outcomes import calculate_outcomes
         calculate_outcomes()
-        # 验证填充率
         from db import get_conn
         _c = get_conn()
         _filled = _c.execute(
@@ -107,12 +109,46 @@ def main():
 
     # ── 6. 自动调仓 ──────────────────────────────────
     step('6/7 自动调仓建议')
+    plan = {"sells": [], "buys": [], "swaps": [], "summary": ""}
     try:
         from auto_execute import generate_execution_plan
         plan = generate_execution_plan()
         print(plan['summary'])
     except Exception as e:
         print(f"  ⚠️ 自动调仓失败: {e}")
+
+    # ── 🚀 自动执行（--execute 模式）──────────────────
+    if do_execute and (plan.get('sells') or plan.get('buys')):
+        step('🚀 自动执行交易')
+        try:
+            from auto_execute import _record_execution_orders, _retry_pending_executions
+            _record_execution_orders(plan)
+            total_orders = len(plan["sells"]) + len(plan["buys"])
+            print(f"  📝 记录 {total_orders} 笔待执行订单")
+            executed = _retry_pending_executions(dry_run=False)
+            print(f"  ✅ 执行完成: {executed}/{total_orders} 笔")
+        except Exception as e:
+            print(f"  ❌ 自动执行失败: {e}")
+
+        # 执行后重算 NAV
+        try:
+            from portfolio import PortfolioManager
+            from db import get_conn
+            pm = PortfolioManager()
+            val = pm.get_portfolio_value()
+            conn = get_conn()
+            conn.execute(
+                "INSERT INTO nav_history "
+                "(date, total_value, cash, holdings_value, profit_pct, positions_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (today, round(val["total_value"], 2), round(val["cash"], 2),
+                 round(val["holdings_value"], 2), round(val["total_profit_pct"], 2),
+                 str(val["position_count"])))
+            conn.commit()
+            conn.close()
+            print(f"  📊 NAV 已更新: {val['total_value']:.0f} 元 ({val['total_profit_pct']:+.1f}%)")
+        except Exception as e:
+            print(f"  ⚠️ NAV 更新失败: {e}")
 
     # ── 7. T1 回补检查 ────────────────────────────────
     try:
@@ -149,7 +185,8 @@ def main():
         step('+ 回测快照')
         try:
             import subprocess
-            subprocess.run([sys.executable, 'quick_backtest.py'], cwd=os.path.dirname(__file__))
+            subprocess.run([sys.executable, 'quick_backtest.py'],
+                           cwd=os.path.dirname(__file__))
         except Exception as e:
             print(f"  ⚠️ 回测快照失败: {e}")
 
@@ -161,7 +198,8 @@ def main():
             print(f"  ⚠️ IC 评估失败: {e}")
 
     print(f"\n{'='*50}")
-    print(f"  ✅ 每日工作流完成 | {datetime.now().strftime('%H:%M')}")
+    mode = "执行" if do_execute else "分析"
+    print(f"  ✅ 每日工作流完成 [{mode}模式] | {datetime.now().strftime('%H:%M')}")
     print(f"{'='*50}")
 
 
