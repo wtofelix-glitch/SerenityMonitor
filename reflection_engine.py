@@ -192,7 +192,7 @@ def generate_reflection(code: str) -> dict:
             lines.append("⚠️ 评分方向偏误，需纠偏")
 
     if dim_ic_filtered:
-        lines.append(f"\n有效维度(IC>|0.05|):")
+        lines.append(f"\n全市场有效维度(IC>|0.05|):")
         for dim, ic in sorted(dim_ic_filtered.items(), key=lambda x: -abs(x[1])):
             icon = "🟢" if ic > 0 else "🔴"
             lines.append(f"  {icon} {dim}: IC={ic:.3f}")
@@ -357,7 +357,7 @@ def show_reflections(days: int = 7):
 
 def show_dimension_ic(days: int = 20):
     """显示维度IC报告"""
-    print(f"📊 维度 IC 报告 — 最近 {days} 天")
+    print(f"📊 全市场维度 IC 报告 — 最近 {days} 天")
     print("=" * 70)
     dim_ic = compute_dimension_ic(days=days)
     print(f"  {'维度':<20} {'IC':>8} {'有效性':>10}")
