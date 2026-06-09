@@ -206,9 +206,9 @@ class TestPositionLimits:
     def test_single_weight_too_high(self):
         rm = _fresh_rm()
         result = rm.check_position_limits(
-            [{"code": "a"}], new_amount=40000, total_value=60000
+            [{"code": "a"}], new_amount=55000, total_value=60000
         )
-        # 40k/60k = 67% > 60% → triggered
+        # 55k/60k = 92% > 85% → triggered
         critical = [r for r in result if r.get("triggered") and "权重" in r["reason"]]
         assert len(critical) > 0
 

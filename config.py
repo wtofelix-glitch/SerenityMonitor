@@ -280,11 +280,11 @@ CAPITAL_CONFIG = {
     "target_capital": 102133.0,        # 目标翻倍 → 102133
     "target_months": 3,                # 3 个月
     "max_positions": 2,                # 最多同时持仓 2 只（高集中度→翻倍目标）
-    "max_single_weight": 0.60,         # 单只最大仓位 60%
+    "max_single_weight": 0.85,         # 单只最大仓位 85%（翻倍目标→重仓集中）
     "min_single_weight": 0.30,         # 单只最小仓位 30%
-    "enter_threshold": 72,             # 买入最低评分（仅BUY级别以上）
+    "enter_threshold": 68,             # 买入最低评分（放宽至68→抓更多机会）
     "exit_threshold": 48,              # 持仓评分跌破此值建议卖出
-    "reserve_cash_ratio": 0.10,        # 保留 10% 现金
+    "reserve_cash_ratio": 0.03,        # 保留 3% 现金（翻倍目标→现金=浪费）
     "commission_rate": 0.00025,        # 佣金万2.5
     "stamp_tax_rate": 0.001,           # 印花税千1（卖出时）
 }
@@ -293,7 +293,7 @@ CAPITAL_CONFIG = {
 # 🆕 风控参数
 # ============================================================
 RISK_CONFIG = {
-    "stop_loss_pct": -0.05,            # 硬止损 -5%（翻倍目标下从-8%收紧）
+    "stop_loss_pct": -0.04,            # 硬止损 -4%（翻倍路径不允许大回撤）
     "use_atr_stop": True,              # 是否启用 ATR 动态止损
     "atr_stop_multiplier": 1.5,        # ATR 倍数（从2.5收紧至1.5）
     "atr_stop_min_pct": -0.04,         # 最小止损百分比（从-5%收紧至-4%）

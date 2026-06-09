@@ -259,7 +259,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
 
         # 最短持有天数：防止买入当日即触发目标价卖出
         buy_date_str = h.get("buy_date", "")
-        min_hold_days = 2
+        min_hold_days = 1
         held_days = 999
         if buy_date_str:
             try:
