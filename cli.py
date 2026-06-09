@@ -535,8 +535,13 @@ def cmd_sell(code: str):
 
     today = date.today().isoformat()
     clear_active(code)
-    add_trade(code, "sell", price, 0, today,
-              f"卖出 (买入{stock['buy_price']:.2f})")
+    # 计算实际股数和卖出金额（修复 quantity=0 bug）
+    buy_price = stock["buy_price"]
+    amount = stock.get("trade_amount", 0) or 0
+    shares = int(amount / buy_price / 100) * 100 if buy_price > 0 and amount > 0 else 0
+    sell_value = shares * price
+    add_trade(code, "sell", price, shares, today,
+              f"卖出 (买入{buy_price:.2f})", trade_amount=sell_value)
 
     profit = ((price - stock["buy_price"]) / stock["buy_price"] * 100) if stock["buy_price"] else 0
     print(f"✅ 已标记卖出 {stock['name']}({code}) 价格 {price:.2f} 盈亏 {profit:+.2f}%")
