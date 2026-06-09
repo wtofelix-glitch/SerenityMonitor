@@ -1,5 +1,12 @@
 #!/bin/bash
-# Serenity Monitor — 移动端监控看板 启动脚本
-# 端口 8401，使用 Hermes venv Python（arm64 numpy 兼容）
-cd /Users/mac/workspace/SerenityMonitor
-exec /Users/mac/.hermes/hermes-agent/.venv/bin/python monitoring_dashboard.py
+# Serenity Monitor — 手动启动（看板 + Cloudflare Tunnel）
+# 自动启动由 Hermes cron “Serenity 看板守护”负责
+
+bash "$(dirname "$0")/dashboard_daemon.sh"
+
+if [ -f "$(dirname "$0")/.serenity_public_url" ]; then
+    URL="$(cat "$(dirname "$0")/.serenity_public_url")"
+    echo ""
+    echo "✅ Serenity 看板已启动"
+    echo "   手机访问: $URL/monitor"
+fi

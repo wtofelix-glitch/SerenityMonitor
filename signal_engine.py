@@ -22,6 +22,115 @@ except ImportError:
 from portfolio import PortfolioManager, get_portfolio
 
 # ============================================================
+# Conviction 动态调参引擎
+# ============================================================
+# 缓存避免每次调用从DB读
+_conviction_thresholds_cache = {"regime": None, "thresholds": {}, "date": None}
+
+def _fetch_conviction_thresholds() -> dict:
+    """从 conviction_log 获取最新的辩论结果，返回动态阈值修正量
+    
+    Returns:
+        dict with regime, buy_adjust (买入门槛偏移), sell_adjust (卖出门槛偏移)
+    """
+    global _conviction_thresholds_cache
+    from datetime import date
+    today = date.today().isoformat()
+    
+    # 缓存命中（同一天）
+    if _conviction_thresholds_cache.get("date") == today:
+        return _conviction_thresholds_cache["thresholds"]
+    
+    try:
+        from db import get_latest_conviction
+        cv = get_latest_conviction()
+    except Exception:
+        cv = None
+    
+    if not cv or cv.get("date") != today:
+        # 没有今日的辩论数据 → 使用默认
+        _conviction_thresholds_cache = {
+            "date": today,
+            "thresholds": {"regime": "震荡", "buy_adjust": 0, "sell_adjust": 0},
+            "regime": "震荡",
+        }
+        return _conviction_thresholds_cache["thresholds"]
+    
+    regime = cv.get("regime", "震荡")
+    weights = cv.get("debated_weights", {})
+    m = weights.get("moat", 0.10)
+    momentum = weights.get("momentum", 0.12)
+    sentiment = weights.get("sentiment", 0.08)
+    technical = weights.get("technical", 0.10)
+    
+    # 买入门槛调整：弱势→收紧（+5），强势→放宽（-5），震荡→微调
+    # 再根据防守 vs 进攻因子比例二次修正
+    defense_ratio = (m + weights.get("base", 0.12)) / max(momentum + sentiment, 0.01)
+    
+    if regime == "弱势":
+        base_buy = 5  # +5: 更严
+        base_sell = -3  # -3: 卖出门槛更敏感（提前卖出）
+        if defense_ratio > 1.5:
+            base_buy += 3  # 防御偏好 → 更严
+    elif regime == "强势":
+        base_buy = -5  # -5: 放宽买入
+        base_sell = 3  # +3: 卖出更保守
+        if momentum > 0.18:
+            base_buy -= 2  # 动量强 → 再放宽
+    else:  # 震荡
+        # 震荡市场：根据防守vs进攻偏向来微调
+        if defense_ratio > 1.2:
+            base_buy = 2  # 防御偏好 → 稍严
+            base_sell = -1
+        else:
+            base_buy = -2  # 均衡/进攻偏好 → 稍宽
+            base_sell = 1
+    
+    result = {
+        "regime": regime,
+        "buy_adjust": base_buy,
+        "sell_adjust": base_sell,
+        "defense_ratio": round(defense_ratio, 2),
+        "moat_weight": m,
+        "momentum_weight": momentum,
+    }
+    
+    _conviction_thresholds_cache = {
+        "date": today,
+        "thresholds": result,
+        "regime": regime,
+    }
+    return result
+
+
+def _apply_conviction_to_signal_config() -> dict:
+    """生成一份被 conviction 调整后的 SIGNAL_CONFIG 副本"""
+    import copy
+    cfg = copy.deepcopy(SIGNAL_CONFIG)
+    cv = _fetch_conviction_thresholds()
+    
+    regime = cv["regime"]
+    buy_adjust = cv["buy_adjust"]
+    sell_adjust = cv["sell_adjust"]
+    
+    # 调整买入/卖出阈值
+    cfg["buy_threshold"] = max(50, min(85, SIGNAL_CONFIG["buy_threshold"] + buy_adjust))
+    cfg["strong_buy_threshold"] = max(60, min(90, SIGNAL_CONFIG["strong_buy_threshold"] + buy_adjust))
+    cfg["sell_threshold"] = max(25, min(55, SIGNAL_CONFIG["sell_threshold"] + sell_adjust))
+    cfg["hold_low"] = max(35, min(60, SIGNAL_CONFIG["hold_low"] + sell_adjust))
+    cfg["pos_exit_threshold"] = max(35, min(60, SIGNAL_CONFIG["pos_exit_threshold"] + sell_adjust))
+    
+    # 震荡市场特有：hold_high 也微调
+    if regime == "震荡":
+        if buy_adjust < 0:  # 稍宽
+            cfg["hold_high"] = max(55, SIGNAL_CONFIG["hold_high"] + buy_adjust)
+    
+    cfg["_conviction_regime"] = regime
+    cfg["_conviction_adjust"] = cv
+    
+    return cfg
+
+# ============================================================
 # 信号级别定义
 # ============================================================
 SIGNAL_LEVELS = {
@@ -33,32 +142,44 @@ SIGNAL_LEVELS = {
     "WEAK_HOLD":    {"score": 45, "icon": "🟡",     "desc": "弱持仓/关注",    "max_weight": 0.0},
     "CONSIDER_ADD": {"score": 60, "icon": "🟢+",    "desc": "可考虑加仓",     "max_weight": 0.15},
     "WATCH":        {"score": 40, "icon": "🟡",     "desc": "关注",          "max_weight": 0.0},
+    "TAKE_PROFIT":  {"score": 65, "icon": "🟢💰",   "desc": "止盈提示",      "max_weight": 0.0},
     "SELL":         {"score": 30, "icon": "🔴🔴",   "desc": "卖出",          "max_weight": 0.0},
     "STOP_LOSS":    {"score": 0,  "icon": "🔴🔴🔴", "desc": "止损",          "max_weight": 0.0},
 }
 
 
-def get_signal_level(score: float) -> str:
-    """根据综合评分返回信号级别"""
-    if score >= SIGNAL_CONFIG["strong_buy_threshold"]:
+def get_signal_level(score: float, conviction_override: dict = None) -> str:
+    """根据综合评分返回信号级别（支持 conviction 动态阈值）"""
+    if conviction_override:
+        # 使用 conviction 调整后的阈值
+        target = conviction_override
+    else:
+        # 尝试从DB读取今日 conviction
+        try:
+            target = _apply_conviction_to_signal_config()
+        except Exception:
+            target = SIGNAL_CONFIG
+    
+    if score >= target["strong_buy_threshold"]:
         return "STRONG_BUY"
-    elif score >= SIGNAL_CONFIG["buy_threshold"]:
+    elif score >= target["buy_threshold"]:
         return "BUY"
-    elif score >= SIGNAL_CONFIG["hold_high"]:
+    elif score >= target["hold_high"]:
         return "CAUTION_BUY"
-    elif score >= SIGNAL_CONFIG["hold_low"]:
+    elif score >= target["hold_low"]:
         return "HOLD"
-    elif score >= SIGNAL_CONFIG["sell_threshold"]:
+    elif score >= target["sell_threshold"]:
         return "WATCH"
     else:
         return "SELL"
 
 
-def get_position_signal(score: float, profit_pct: float, is_holding: bool) -> str:
-    """持仓标的具体信号级别"
+def get_position_signal(score: float, profit_pct: float, is_holding: bool,
+                        conviction_override: dict = None) -> str:
+    """持仓标的具体信号级别
     在 get_signal_level 基础上增加持仓专属级别
     """
-    base = get_signal_level(score)
+    base = get_signal_level(score, conviction_override)
 
     if not is_holding:
         return base
@@ -550,10 +671,31 @@ def _generate_single_signal(code: str, realtime_data: dict,
 
     total_score = compute_multi_factor_score(tech_score, serenity_score, alpha_signals, zone_info, fund_signal, fourteen_factor_score)
 
-    # 7. 信号级别（持仓/非持仓分开处理）
+    # 优先使用 scorer 的最新评分（确保 rescore 和 signal 显示一致）
+    try:
+        from db import get_conn as _get_conn
+        from datetime import date as _date
+        _conn = _get_conn()
+        _row = _conn.execute(
+            'SELECT total_score, serenity_score FROM scoring_history WHERE code=? AND date=? ORDER BY total_score DESC LIMIT 1',
+            (code, _date.today().isoformat())
+        ).fetchone()
+        if _row and _row[0] is not None:
+            total_score = _row[0]
+        if _row and len(_row) > 1 and _row[1] is not None:
+            serenity_score = _row[1]
+    except Exception:
+        pass
+
+    # 7. 信号级别（持仓/非持仓分开处理，带 conviction 动态调参）
+    try:
+        _conv_target = _apply_conviction_to_signal_config()
+    except Exception:
+        _conv_target = None
+    
     action = get_position_signal(total_score, 
                                  ((price - zone_info['target_sell'])/zone_info['target_sell']*100) if zone_info['target_sell'] > 0 else 0,
-                                 is_holding) if is_holding else get_signal_level(total_score)
+                                 is_holding, _conv_target) if is_holding else get_signal_level(total_score, _conv_target)
 
     # 7.5 已达目标价 → 强制卖出
     if is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0:
@@ -566,9 +708,10 @@ def _generate_single_signal(code: str, realtime_data: dict,
             if "STOP" in sa["action"]:
                 action = "STOP_LOSS"
                 total_score = 10
-            elif "SELL" in sa["action"]:
-                action = "SELL"
-                total_score = 25
+            elif "SELL_PARTIAL" in sa["action"]:
+                # 止盈：保留原始评分，独立信号级别
+                action = "TAKE_PROFIT"
+                # total_score 不变（止盈不降分）
 
     # 9. 买入确认（仅对非持仓标的）
     buy_confirm = None

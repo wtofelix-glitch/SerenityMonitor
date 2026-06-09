@@ -43,9 +43,15 @@ Serenity Monitor CLI
      python3 cli.py trade-log [--compare]  # 🆕 查看交易记录 / 对比系统信号
      python3 cli.py health                 # 🔬 系统健康诊断
      python3 cli.py auto                  # 🆕 自动调仓计划
+     python3 cli.py auto-exec             # 🚀 强制信号执行（含重试）
+     python3 cli.py auto-stats            # 📊 信号执行统计
+     python3 cli.py auto-premarket        # ⏰ 盘前简报推送
      python3 cli.py auto-push             # 🆕 自动调仓 + 微信推送
      python3 cli.py backtest-quick        # 🆕 快速回测快照
      python3 cli.py workflow              # 🆕 一站式每日工作流
+     python3 cli.py tier1-reentry         # 🔄 T1 回补检查
+     python3 cli.py tier1-reentry --push  # 🔄 检查+微信推送
+     python3 cli.py tier1-reentry --status # 🔄 查看当前状态
 """
 import sys
 import os
@@ -90,7 +96,10 @@ from backtest_engine import (
 )
 from dividend_engine import DividendEngine
 from etf_momentum import ETFMomentumStrategy
-from signal_push import build_signal_brief, format_push_message
+try:
+    from signal_push import build_signal_brief, format_push_message
+except ImportError:
+    build_signal_brief = format_push_message = None
 
 # 板块分组
 SECTORS = {
@@ -299,6 +308,195 @@ def cmd_report():
     print(generate_daily_report())
 
 
+def cmd_llm_report():
+    """生成 LLM 文字研报（基于 9 维评分 + 数据注入）"""
+    print(_generate_llm_report_text())
+    print()
+    print("> 提示：文字研报通过已生成的 prompt 数据 + Hermes 自身能力生成。")
+
+
+def _generate_llm_report_text() -> str:
+    """生成 LLM 文字研报"""
+    from datetime import date
+    today = date.today().isoformat()
+
+    # 1. 获取今日评分
+    from scorer import score_all
+    scores = score_all()
+
+    # 2. 构建研报数据
+    from llm_report import generate_llm_report
+    report_data = generate_llm_report(scores)
+
+    # 3. 输出结构化研报
+    lines = []
+    lines.append(f"\U0001f4ca **Serenity LLM 研报 | {today}**")
+    lines.append("=" * 40)
+    lines.append("")
+
+    ranked = report_data["ranked"]
+
+    # TOP3
+    lines.append("\U0001f3c6 评分 TOP3")
+    lines.append("\u2500" * 30)
+    for r in ranked[:3]:
+        lines.append(
+            f"{r['name']}({r.get('code','?')}) {r['total_score']:.0f}分 | "
+            f"基{r.get('base_score',0):.0f} 动{r.get('momentum_score',0):.0f} "
+            f"量{r.get('volume_score',0):.0f} 护{r.get('moat_score',50):.0f} | "
+            f"{r['zone_label']}"
+        )
+    lines.append("")
+
+    # 评分区间分布
+    score_brackets = {"强势(90+)": 0, "良好(75-89)": 0, "中性(60-74)": 0, "弱势(<60)": 0}
+    for r in ranked:
+        s = r["total_score"]
+        if s >= 90: score_brackets["强势(90+)"] += 1
+        elif s >= 75: score_brackets["良好(75-89)"] += 1
+        elif s >= 60: score_brackets["中性(60-74)"] += 1
+        else: score_brackets["弱势(<60)"] += 1
+
+    lines.append("\U0001f4c8 评分分布")
+    lines.append("\u2500" * 30)
+    for k, v in score_brackets.items():
+        bar = "\u2588" * v + "\u2591" * max(0, 7 - v)
+        lines.append(f"  {k}: {bar} {v}只")
+    lines.append("")
+
+    # 信号分布
+    actions = {}
+    for r in ranked:
+        a = r.get("signal_action", "?")
+        actions[a] = actions.get(a, 0) + 1
+    lines.append("\U0001f4e1 信号分布")
+    lines.append("\u2500" * 30)
+    for k in ["BUY", "CAUTION_BUY", "HOLD", "CAUTION", "SELL"]:
+        if k in actions:
+            e = {"BUY": "\U0001f7e2", "CAUTION_BUY": "\U0001f7e1", "HOLD": "\u26aa", "CAUTION": "\U0001f7e0", "SELL": "\U0001f534"}.get(k, "\u26aa")
+            lines.append(f"  {e} {k}: {actions[k]}只")
+    lines.append("")
+
+    # 护城河 TOP3
+    lines.append("\U0001f3db\ufe0f 护城河 TOP3")
+    lines.append("\u2500" * 30)
+    for r in sorted(ranked, key=lambda x: x.get("moat_score", 50), reverse=True)[:3]:
+        lines.append(f"  {r['name']}: {r.get('moat_score', 50):.0f}分")
+    lines.append("")
+
+    # AI 总结
+    lines.append("\U0001f9e0 AI 解读")
+    lines.append("\u2500" * 30)
+
+    top_name = report_data["top_name"]
+    top_score = report_data["top_score"]
+    buy_c = report_data["buy_count"]
+    sell_c = report_data["sell_count"]
+
+    avg_score = sum(r["total_score"] for r in ranked) / max(len(ranked), 1)
+    strong_count = score_brackets["强势(90+)"] + score_brackets["良好(75-89)"]
+    weak_count = score_brackets["中性(60-74)"] + score_brackets["弱势(<60)"]
+
+    if avg_score >= 75:
+        market_note = "市场情绪偏强，整体评分处于高位"
+    elif avg_score >= 65:
+        market_note = "市场中性偏正面，标的之间分化明显"
+    elif avg_score >= 55:
+        market_note = "市场偏弱，整体评分中枢下行"
+    else:
+        market_note = "市场弱势显著，建议控制仓位"
+
+    lines.append(f"今日 {len(ranked)} 只标的综合均分 {avg_score:.0f} 分。{market_note}。")
+    lines.append(f"TOP1 {top_name}({top_score:.0f}分)领跑，买入信号 {buy_c} 只，卖出 {sell_c} 只。")
+    moat_top_name = report_data["moat_top"]
+    if moat_top_name == ranked[0]["name"]:
+        lines.append("高分优势集中于护城河赛道。")
+    else:
+        lines.append("高分优势集中于动量/技术赛道。")
+    if sell_c > buy_c:
+        lines.append("低分标的受困于情绪转弱。")
+    else:
+        lines.append("低分标的受困于基本面转弱。")
+
+    return "\n".join(lines)
+
+
+def cmd_conviction():
+    """运行权重辩论 + 多周期共识（支持 --history / -h 查看历史记录）"""
+    from conviction_cli import _run_conviction_analysis
+    
+    if "--history" in sys.argv or "-h" in sys.argv:
+        # 查历史
+        days = 30
+        for i, arg in enumerate(sys.argv):
+            if arg in ("--days", "-d") and i + 1 < len(sys.argv):
+                try:
+                    days = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+        cmd_conviction_history(days)
+        return
+    
+    print(_run_conviction_analysis())
+
+
+def cmd_conviction_history(days: int = 30):
+    """查看历史权重辩论记录"""
+    from db import get_conviction_history
+    
+    records = get_conviction_history(days)
+    if not records:
+        print(f"📭 近 {days} 天无 conviction 记录")
+        return
+    
+    lines = []
+    lines.append(f"📊 **Serenity 权重辩论历史 | 近 {days} 天**")
+    lines.append("")
+    lines.append(f"{'日期':<12} {'市场':<6} {'均分':>4} {'护城河':>7} {'动量':>7} {'情绪':>7} {'仓位建议'}")
+    lines.append("─" * 70)
+    
+    for r in records:
+        weights = r.get("debated_weights", {})
+        m = weights.get("moat", 0)
+        momentum = weights.get("momentum", 0.12)
+        sentiment = weights.get("sentiment", 0.08)
+        regime_emoji = {"强势": "🟢", "震荡": "🟡", "弱势": "🔴"}.get(r["regime"], "⚪")
+        
+        lines.append(
+            f"{r['date']:<12} "
+            f"{regime_emoji}{r['regime']:<4} "
+            f"{r['score_avg']:>4.0f} "
+            f"{m:>6.1%} "
+            f"{momentum:>6.1%} "
+            f"{sentiment:>6.1%} "
+            f"{r.get('position_advice', '')[:20]}"
+        )
+    
+    lines.append("")
+    
+    # 趋势分析
+    if len(records) >= 3:
+        trends = []
+        m_vals = [r.get("debated_weights", {}).get("moat", 0.10) for r in records]
+        if m_vals:
+            m_trend = (m_vals[-1] - m_vals[0]) / max(m_vals[0], 0.01) * 100
+            trends.append(f"护城河权重 {m_vals[0]:.1%}→{m_vals[-1]:.1%} ({m_trend:+.0f}%)")
+        lines.append("📈 **趋势分析**")
+        lines.append(f"  {' | '.join(trends)}")
+    
+    print("\n".join(lines))
+
+
+def cmd_analyze_discount(code: str):
+    """深度折扣诊断：分析评分vs Serenity匹配度的分化原因"""
+    if not code:
+        print("用法: python3 cli.py analyze <code>")
+        print("示例: python3 cli.py analyze 600585")
+        return
+    from discount_analyzer import analyze_discount
+    print(analyze_discount(code))
+
+
 def cmd_buy(code: str, price: float, amount: float = 0):
     """买入标的"""
     stock = get_stock(code)
@@ -427,7 +625,8 @@ def cmd_rescore():
             r.get("signal_action", ""), "⚪")
         print(f"#{r['rank']} {r['name']:6s} | 总分 {r['total_score']:5.1f} | "
               f"{signal_icon} {r['signal_action']:<12} | "
-              f"技{r['technical_score']:.0f} 因{r['factor_score']:.0f} 位{r['zone_score']:.0f} | "
+              f"技{r['technical_score']:.0f} 因{r['factor_score']:.0f} 位{r['zone_score']:.0f} "
+              f"护{r.get('moat_score', 50):.0f} 匹{r['serenity_score']:.0f} | "
               f"{r['zone_label']}")
     print("=" * 70)
 
@@ -551,6 +750,24 @@ def cmd_backtest_viz(code: str = ""):
         print(f"📎 相对路径: {rel}")
     else:
         print(f"❌ 数据不足，无法生成报告（{code}）")
+
+
+def cmd_backtest_report(code: str = ""):
+    """生成综合回测报告 (HTML)"""
+    from backtest_report import generate_report
+    if not code:
+        code = "002281"
+    path = generate_report(code)
+    if path:
+        print(f"📄 文件: {path}")
+
+
+def cmd_backtest_comparison():
+    """生成全策略对比报告 (HTML)"""
+    from backtest_report import generate_comparison_report
+    path = generate_comparison_report()
+    if path:
+        print(f"📄 文件: {path}")
 
 
 def cmd_test_push():
@@ -688,6 +905,23 @@ def cmd_dashboard():
     pid = os.fork()
     if pid == 0:  # 子进程
         os.system("arch -arm64 /usr/bin/python3 monitoring_dashboard.py &")
+        sys.exit(0)
+
+
+def cmd_dash_dashboard():
+    """启动 Dash 交互看板 (Plotly Dash, port 8050)"""
+    import urllib.request
+    try:
+        resp = urllib.request.urlopen("http://localhost:8050", timeout=3)
+        if resp.status == 200:
+            print("✅ Dash 看板已在运行 → http://localhost:8050")
+            return
+    except (OSError, ValueError):
+        pass
+    print("📊 启动 Dash 看板 → http://localhost:8050")
+    pid = os.fork()
+    if pid == 0:
+        os.system("arch -arm64 /usr/bin/python3 dash_dashboard.py &")
         sys.exit(0)
 
 
@@ -1404,6 +1638,21 @@ def cmd_health():
     """🔬 系统健康诊断"""
     from health_check import main as health_main
     health_main()
+
+def cmd_tier1_reentry():
+    """🔄 T1 回补检查 — Tier 1 标的回调至买入区提醒"""
+    from tier1_reentry import check_tier1_reentry, cmd_status
+    do_push = "--push" in sys.argv
+    do_status = "--status" in sys.argv
+    if do_status:
+        cmd_status()
+    else:
+        results = check_tier1_reentry(push=do_push)
+        if results:
+            print(f"\n✅ {len(results)} 个回补提醒")
+        else:
+            print("\n✅ 暂无回补机会")
+
 def cmd_strategy():
     """查看当前策略配置（红利/ETF动量/量化因子）"""
     from db import get_conn
@@ -1473,6 +1722,9 @@ def main():
         "init": lambda: cmd_init(force="--force" in sys.argv),
         "status": lambda: cmd_status(),
         "report": lambda: cmd_report(),
+        "llm-report": lambda: cmd_llm_report(),
+        "conviction": lambda: cmd_conviction(),
+        "analyze": lambda: cmd_analyze_discount(sys.argv[2] if len(sys.argv) > 2 else ""),
         "top": lambda: cmd_top(),
         "list": lambda: cmd_list(),
         "alerts": lambda: cmd_alerts(),
@@ -1489,6 +1741,8 @@ def main():
         "compare": lambda: cmd_compare(),
         "backtest-factors": lambda: cmd_backtest_factor(sys.argv[2] if len(sys.argv) > 2 else ""),
         "backtest-viz": lambda: cmd_backtest_viz(sys.argv[2] if len(sys.argv) > 2 else ""),
+        "backtest-report": lambda: cmd_backtest_report(sys.argv[2] if len(sys.argv) > 2 else ""),
+        "backtest-compare": lambda: cmd_backtest_comparison(),
         "test-push": lambda: cmd_test_push(),
         "push-report": lambda: cmd_push_report(),
         "push-guide": lambda: cmd_push_guide(),
@@ -1533,12 +1787,16 @@ def main():
         "council": cmd_council,
         "council-report": cmd_council_report,
         "health": cmd_health,
+        "tier1-reentry": cmd_tier1_reentry,
         "auto": lambda: cmd_auto_execute(),
+        "auto-exec": lambda: (__import__('sys').argv.append('--force-execute'), cmd_auto_execute())[1],
+        "auto-stats": lambda: (__import__('sys').argv.append('--stats'), cmd_auto_execute())[1],
+        "auto-premarket": lambda: (__import__('sys').argv.append('--premarket'), cmd_auto_execute())[1],
         "auto-push": lambda: (__import__('sys').argv.append('--push'), cmd_auto_execute())[1],
-        "backtest-quick": lambda: quick_backtest.main() if hasattr(quick_backtest, 'main') else exec(open('quick_backtest.py').read()),
+        "backtest-quick": lambda: quick_backtest.main(),
         "workflow": lambda: (__import__('daily_workflow').main()),
         "advise": lambda: (__import__('portfolio_advisor').main()),
-        "dash": lambda: (__import__('dashboard').main()),
+        "dash": lambda: cmd_dash_dashboard(),
     }
 
     if cmd in commands:

@@ -8,13 +8,15 @@ Serenity 每日工作流 — 一站式运行全部子系统
     python3 daily_workflow.py --full       # 含回测快照 + IC评估
 
 步骤:
+  0. 参考数据拉取 (fetch_reference) → price_history
   1. 评分 (score_all) → scoring_history
   2. 信号 (generate_signals) → signal_log
   3. Outcome 补填 (fill_outcomes) → signal_log.outcome_*
   4. 反思 (generate_reflections) → score_reflections
   5. 反思收益补填 (reflection fill_outcomes)
   6. 自动调仓 (auto_execute) → 行动计划
-  7. [可选] 回测快照
+  7. [可选] T1 回补检查
+  8. [可选] 回测快照
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,8 +35,16 @@ def main():
     do_full = '--full' in sys.argv
     today = date.today().isoformat()
 
-    # ── 1. 评分 ──────────────────────────────────────
-    step('1/6 多因子评分')
+    # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
+    step('0/7 参考数据拉取')
+    try:
+        from fetch_reference import main as fetch_ref
+        fetch_ref()
+    except Exception as e:
+        print(f"  ⚠️ 参考数据拉取失败: {e}")
+
+    # ── 1. 多因子评分 ──────────────────────────────────────
+    step('1/7 多因子评分')
     try:
         from scorer import score_all
         results = score_all()
@@ -45,7 +55,7 @@ def main():
         print(f"  ⚠️ 评分失败: {e}")
 
     # ── 2. 信号 ──────────────────────────────────────
-    step('2/6 交易信号')
+    step('2/7 交易信号')
     try:
         from signal_engine import generate_signals
         from config import ALL_CODES
@@ -61,15 +71,24 @@ def main():
         print(f"  ⚠️ 信号生成失败: {e}")
 
     # ── 3. Outcome 补填 ──────────────────────────────
-    step('3/6 信号绩效补填')
+    step('3/7 信号绩效补填')
     try:
         from serenity_calc_outcomes import calculate_outcomes
         calculate_outcomes()
+        # 验证填充率
+        from db import get_conn
+        _c = get_conn()
+        _filled = _c.execute(
+            "SELECT COUNT(*) FROM signal_log WHERE outcome_1d IS NOT NULL"
+        ).fetchone()[0]
+        _total = _c.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+        _c.close()
+        print(f"  📊 Outcome 填充率: {_filled}/{_total} ({_filled/_total*100:.1f}%)")
     except Exception as e:
         print(f"  ⚠️ Outcome 补填失败: {e}")
 
     # ── 4. 反思生成 ──────────────────────────────────
-    step('4/6 评分反思')
+    step('4/7 评分反思')
     try:
         from reflection_engine import generate_all_reflections
         refs = generate_all_reflections()
@@ -79,7 +98,7 @@ def main():
         print(f"  ⚠️ 反思生成失败: {e}")
 
     # ── 5. 反思收益补填 ──────────────────────────────
-    step('5/6 反思收益补填')
+    step('5/7 反思收益补填')
     try:
         from reflection_engine import fill_outcomes
         fill_outcomes(days_back=30)
@@ -87,13 +106,22 @@ def main():
         print(f"  ⚠️ 反思收益补填失败: {e}")
 
     # ── 6. 自动调仓 ──────────────────────────────────
-    step('6/6 自动调仓建议')
+    step('6/7 自动调仓建议')
     try:
         from auto_execute import generate_execution_plan
         plan = generate_execution_plan()
         print(plan['summary'])
     except Exception as e:
         print(f"  ⚠️ 自动调仓失败: {e}")
+
+    # ── 7. T1 回补检查 ────────────────────────────────
+    try:
+        from tier1_reentry import check_tier1_reentry
+        results = check_tier1_reentry()
+        if results:
+            print(f"  🔄 T1 回补机会: {len(results)} 只")
+    except Exception as e:
+        print(f"  ⚠️ T1 回补检查失败: {e}")
 
     # ── 推送 ─────────────────────────────────────────
     if do_push and (plan.get('sells') or plan.get('buys') or plan.get('swaps')):
@@ -107,6 +135,14 @@ def main():
             print("\n📡 已推送")
         except Exception as e:
             print(f"\n⚠️ 推送失败: {e}")
+
+    # ── Telegram 推送执行计划 ────────────────────────
+    try:
+        from signal_push import push_execution_plan
+        push_execution_plan(plan)
+        print("\n📡 Telegram 已推送")
+    except Exception as e:
+        print(f"\n⚠️ Telegram 推送失败: {e}")
 
     # ── 完整模式：回测快照 + IC ──────────────────────
     if do_full:

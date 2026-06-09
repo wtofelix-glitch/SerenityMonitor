@@ -24,6 +24,7 @@ IC_DIMENSIONS = [
     "serenity_score",
     "factor_score",
     "technical_score",
+    "moat_score",       # v2.0 护城河因子
 ]
 
 DIMENSION_LABELS = {
@@ -35,6 +36,7 @@ DIMENSION_LABELS = {
     "serenity_score": "Serenity",
     "factor_score": "因子引擎",
     "technical_score": "技术面",
+    "moat_score": "护城河",        # v2.0 护城河因子
 }
 
 # ── 相关性计算 ────────────────────────────────────────────

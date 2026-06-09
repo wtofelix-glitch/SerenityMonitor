@@ -17,6 +17,12 @@ import hashlib as _hashlib
 
 logger = logging.getLogger(__name__)
 
+try:
+    from metrics import API_CALLS, API_ERRORS, CACHE_HITS, CACHE_MISSES, SENTIMENT_LLM_USED, SENTIMENT_SCORE
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+
 # ── LLM 配置 ──────────────────────────────────────────
 LLM_API_KEY = _os.environ.get("SERENITY_LLM_API_KEY", "")
 LLM_API_BASE = _os.environ.get("SERENITY_LLM_API_BASE", "https://api.deepseek.com/v1")
@@ -71,10 +77,15 @@ def _build_news_url(code: str) -> str:
 
 
 def _fetch_page(url: str) -> Optional[str]:
-    """带超时的 HTTP GET 请求，返回 UTF-8 文本"""
+    """带超时的 HTTP GET 请求，返回 UTF-8 文本
+    A股数据不走代理（与 data_engine.py 一致）"""
+    import urllib.request
     req = Request(url, headers=FETCH_HEADERS)
+    # 绕过系统代理
+    _no_proxy = urllib.request.ProxyHandler({})
+    _opener = urllib.request.build_opener(_no_proxy)
     try:
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with _opener.open(req, timeout=REQUEST_TIMEOUT) as resp:
             raw = resp.read()
             # 尝试检测编码，回退 GBK（新浪常见）
             content_type = resp.headers.get("Content-Type", "")
@@ -234,7 +245,9 @@ def _analyze_sentiment_llm(code: str, name: str, titles: list[str]) -> float:
         score = max(0.0, min(100.0, score))
         
         _llm_cache[cache_key] = score
-        logger.info(f"LLM sentiment {code}: {score:.0f} ({result.get('summary', '')[:40]})")
+        if METRICS_AVAILABLE:
+            SENTIMENT_LLM_USED.inc()
+        logger.info("LLM sentiment %s: %.0f (%s)", code, score, result.get('summary', '')[:40])
         return score
     except Exception as e:
         logger.debug(f"LLM sentiment failed for {code}: {e}")
@@ -244,6 +257,59 @@ def _analyze_sentiment_llm(code: str, name: str, titles: list[str]) -> float:
 # ============================================================
 # 公开 API
 # ============================================================
+
+_SENTIMENT_CACHE: dict[str, tuple[float, str]] = {}  # code → (score, date)
+
+
+def compute_sentiment_scores_batch(codes: list[str]) -> dict[str, float]:
+    """
+    批量计算多只股票的情绪得分（并行 HTTP 请求，显著加速）
+
+    Parameters
+    ----------
+    codes : list[str]
+        股票代码列表
+
+    Returns
+    -------
+    dict[str, float]
+        {code: score, ...}
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from datetime import date as _dt
+    today = _dt.today().isoformat()
+
+    results = {}
+    # 先用缓存
+    uncached = []
+    for code in codes:
+        cached = _SENTIMENT_CACHE.get(code)
+        if cached and cached[1] == today:
+            results[code] = cached[0]
+            if METRICS_AVAILABLE:
+                CACHE_HITS.labels(cache="sentiment").inc()
+        else:
+            uncached.append(code)
+            if METRICS_AVAILABLE:
+                CACHE_MISSES.labels(cache="sentiment").inc()
+
+    if not uncached:
+        return results
+
+    with ThreadPoolExecutor(max_workers=min(8, len(uncached))) as executor:
+        futures = {executor.submit(compute_sentiment_score, c): c for c in uncached}
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                score = future.result()
+                _SENTIMENT_CACHE[code] = (score, today)
+                results[code] = score
+                if METRICS_AVAILABLE:
+                    SENTIMENT_SCORE.labels(code=code).set(score)
+            except Exception:
+                results[code] = 50.0
+    return results
 
 def fetch_sentiment_data(code: str) -> list[dict]:
     """
@@ -261,9 +327,13 @@ def fetch_sentiment_data(code: str) -> list[dict]:
         网络异常时返回空列表
     """
     try:
+        if METRICS_AVAILABLE:
+            API_CALLS.labels(source="sentiment").inc()
         url = _build_news_url(code)
         html = _fetch_page(url)
         if html is None:
+            if METRICS_AVAILABLE:
+                API_ERRORS.labels(source="sentiment").inc()
             return []
         items = _parse_news_items(html)
         # 去重（新浪页面有时会重复）
@@ -276,6 +346,8 @@ def fetch_sentiment_data(code: str) -> list[dict]:
                 unique.append(item)
         return unique
     except Exception:
+        if METRICS_AVAILABLE:
+            API_ERRORS.labels(source="sentiment").inc()
         logger.debug("fetch_sentiment_data failed for %s", code, exc_info=True)
         return []
 

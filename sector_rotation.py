@@ -230,11 +230,11 @@ class SectorRotationEngine:
         for item in ranked:
             change = item["change"]
             if change > 2:
-                emoji = "🟢"
+                emoji = "🔴"
             elif change >= 0:
                 emoji = "⚪"
             else:
-                emoji = "🔴"
+                emoji = "🟢"
 
             rank_str = f"rank:{item['rank']}"
             # 相对位置箭头
@@ -290,11 +290,11 @@ def get_sector_rotation_detail() -> str:
         momentum = item["momentum"]
 
         if change > 2:
-            emoji = "🟢"
+            emoji = "🔴"
         elif change >= 0:
             emoji = "⚪"
         else:
-            emoji = "🔴"
+            emoji = "🟢"
 
         momentum_map = {"strong": "强势", "neutral": "中性", "weak": "弱势"}
         out.append(f"\n{emoji} #{rank} {sector} | {change:+.2f}% | {momentum_map[momentum]}")
@@ -304,7 +304,7 @@ def get_sector_rotation_detail() -> str:
         for code, sinfo in sector_stocks.items():
             if sinfo.get("change") is not None:
                 sc = sinfo["change"]
-                se = "🟢" if sc >= 0 else "🔴"
+                se = "🔴" if sc >= 0 else "🟢"
                 out.append(f"  {se} {sinfo['name']}({code}) {sinfo['price']:.2f} {sc:+.2f}%")
             else:
                 out.append(f"  ⚪ {sinfo['name']}({code}) 数据不足")

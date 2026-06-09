@@ -195,20 +195,60 @@ def generate_daily_report() -> str:
         lines.append("- 空仓观望，等待合适买点")
         lines.append("- 参考候选标的行情，择机建仓")
 
+    # ====== 权重辩论 + 市场状态 ======
+    try:
+        from conviction_cli import _run_conviction_analysis
+        conviction_text = _run_conviction_analysis()
+        # 只取关键摘要行（图表区域压缩）
+        conv_lines = conviction_text.split("\n")
+        regime_line = [l for l in conv_lines if "市场状态:" in l]
+        weight_lines = []
+        for l in conv_lines:
+            if "护城河" in l or "情绪" in l or "动量" in l:
+                weight_lines.append(l.strip())
+        # 仓位建议
+        advice_line = [l.strip() for l in conv_lines if "黄色" in l or "仓位≤" in l or "仓位" in l and "建议" in l]
+        
+        lines.append("⚖️ **权重辩论摘要**")
+        if regime_line:
+            lines.append(f"  {regime_line[0].strip()}")
+        for wl in weight_lines[:3]:  # 只取3条变化明显的
+            lines.append(f"  {wl}")
+        # 仓位建议
+        if "📋 **仓位建议**" in conviction_text:
+            # 找到仓位建议下方几行
+            advice_start = False
+            for l in conv_lines:
+                if "📋 **仓位建议**" in l:
+                    advice_start = True
+                    continue
+                if advice_start and l.strip() and not l.startswith("建议："):
+                    lines.append(f"  {l.strip()}")
+                    break
+        lines.append("")
+    except Exception:
+        pass
+
     # ====== 信号汇总 ======
     try:
         from signal_engine import generate_signals
         from portfolio import get_portfolio
         signals = generate_signals(portfolio=get_portfolio())
         buy_signals = [s for s in signals if s.get("action") in ("STRONG_BUY", "BUY")]
+        tp_signals = [s for s in signals if s.get("action") == "TAKE_PROFIT"]
         sell_signals = [s for s in signals if s.get("action") in ("SELL", "STOP_LOSS")]
         if buy_signals:
             lines.append("🟢 **买入信号**")
             for s in buy_signals[:3]:
                 lines.append(f"  - {s['name']}({s['code']}) 评分 {s['total_score']:.0f}")
             lines.append("")
+        if tp_signals:
+            lines.append("🟢💰 **止盈提示**（持仓盈利达标）")
+            for s in tp_signals[:3]:
+                lines.append(f"  - {s['name']}({s['code']}) 当前评分 {s['total_score']:.0f}")
+            lines.append("")
         if sell_signals:
-            lines.append("🔴 **卖出信号**")
+            lines.append("🔴 **止损/卖出信号**")
             for s in sell_signals[:3]:
                 lines.append(f"  - {s['name']}({s['code']}) 评分 {s['total_score']:.0f}")
             lines.append("")

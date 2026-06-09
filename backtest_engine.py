@@ -437,8 +437,151 @@ def run_backtest(code: str, strategy: BaseStrategy,
     }
 
 
+def calc_max_drawdown(equity_curve: list) -> dict:
+    """计算最大回撤及持续时间"""
+    if not equity_curve:
+        return {"max_drawdown_pct": 0, "max_drawdown_duration": 0}
+    values = [v for _, v in equity_curve]
+    peak = values[0]
+    peak_idx = 0
+    max_dd = 0
+    max_dd_start = 0
+    max_dd_end = 0
+    drawdown_start = 0
+
+    for i, v in enumerate(values):
+        if v > peak:
+            peak = v
+            peak_idx = i
+        dd = (v - peak) / peak * 100 if peak > 0 else 0
+        if dd < max_dd:
+            max_dd = dd
+            max_dd_start = peak_idx
+            max_dd_end = i
+
+    # Duration
+    duration = max(max_dd_end - max_dd_start, 0)
+    return {
+        "max_drawdown_pct": round(abs(max_dd), 2),
+        "max_drawdown_start": equity_curve[max_dd_start][0] if equity_curve else "",
+        "max_drawdown_end": equity_curve[max_dd_end][0] if equity_curve else "",
+        "max_drawdown_duration_days": duration,
+    }
+
+
+def calc_sharpe_ratio(equity_curve: list, risk_free_rate: float = 0.02) -> float:
+    """年化夏普比率"""
+    if len(equity_curve) < 10:
+        return 0.0
+    values = [v for _, v in equity_curve]
+    returns = [(values[i] - values[i - 1]) / values[i - 1] for i in range(1, len(values))]
+    if not returns or np.std(returns) < 1e-10:
+        return 0.0
+    excess = [r - risk_free_rate / 252 for r in returns]
+    return round(np.mean(excess) / np.std(returns) * np.sqrt(252), 2)
+
+
+def calc_sortino_ratio(equity_curve: list, risk_free_rate: float = 0.02) -> float:
+    """年化索提诺比率（仅下行波动）"""
+    if len(equity_curve) < 10:
+        return 0.0
+    values = [v for _, v in equity_curve]
+    returns = [(values[i] - values[i - 1]) / values[i - 1] for i in range(1, len(values))]
+    if not returns:
+        return 0.0
+    excess = [r - risk_free_rate / 252 for r in returns]
+    downside = np.std([r for r in returns if r < 0]) if any(r < 0 for r in returns) else 0
+    if downside < 1e-10:
+        return 0.0
+    return round(np.mean(excess) / downside * np.sqrt(252), 2)
+
+
+def calc_calmar_ratio(total_return_pct: float, max_drawdown_pct: float) -> float:
+    """卡尔玛比率（年化收益 / 最大回撤）"""
+    if max_drawdown_pct <= 0:
+        return 0.0
+    return round(total_return_pct / max_drawdown_pct, 2)
+
+
+def calc_profit_factor(trades: list) -> float:
+    """盈亏比（总盈利 / 总亏损）"""
+    gross_profit = sum(t.profit_pct for t in trades if t.profit_pct > 0)
+    gross_loss = abs(sum(t.profit_pct for t in trades if t.profit_pct <= 0))
+    if gross_loss < 0.01:
+        return float("inf") if gross_profit > 0 else 0.0
+    return round(gross_profit / gross_loss, 2)
+
+
+def calc_performance_metrics(result: dict) -> dict:
+    """扩展回测结果 — 添加全面绩效指标"""
+    if "error" in result:
+        return result
+
+    equity_curve = result.get("equity_curve", [])
+    trades = result.get("trade_log", [])
+    total_return = result.get("total_return_pct", 0)
+
+    # 最大回撤
+    dd_info = calc_max_drawdown(equity_curve)
+
+    # 风险调整收益
+    sharpe = calc_sharpe_ratio(equity_curve)
+    sortino = calc_sortino_ratio(equity_curve)
+    calmar = calc_calmar_ratio(total_return, dd_info["max_drawdown_pct"])
+    profit_factor = calc_profit_factor(trades)
+
+    # 平均持仓天数
+    avg_hold = round(np.mean([t.hold_days for t in trades]), 1) if trades else 0
+
+    # 每月收益率（按equity_curve分组）
+    monthly_returns = {}
+    for date_str, val in equity_curve:
+        month = date_str[:7]
+        if month not in monthly_returns:
+            monthly_returns[month] = []
+        monthly_returns[month].append(val)
+
+    monthly_pct = {}
+    prev_val = None
+    for month in sorted(monthly_returns.keys()):
+        vals = monthly_returns[month]
+        if prev_val is not None and vals:
+            monthly_pct[month] = round((vals[-1] - prev_val) / prev_val * 100, 2)
+        prev_val = vals[-1] if vals else prev_val
+
+    result.update({
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
+        "profit_factor": profit_factor,
+        "max_drawdown_pct": dd_info["max_drawdown_pct"],
+        "max_drawdown_duration_days": dd_info["max_drawdown_duration_days"],
+        "avg_hold_days": avg_hold,
+        "monthly_returns": monthly_pct,
+    })
+    return result
+
+
+def _calc_monthly_from_curve(equity_curve: list) -> dict:
+    """从净值曲线计算月度收益"""
+    monthly = {}
+    for date_str, val in equity_curve:
+        month = date_str[:7]
+        if month not in monthly:
+            monthly[month] = []
+        monthly[month].append(val)
+    result = {}
+    prev = None
+    for month in sorted(monthly.keys()):
+        vals = monthly[month]
+        if prev is not None and vals:
+            result[month] = round((vals[-1] - prev) / prev * 100, 2)
+        prev = vals[-1] if vals else prev
+    return result
+
+
 def format_backtest_result(result: dict) -> str:
-    """格式化单个回测结果"""
+    """格式化单个回测结果（含增强指标）"""
     if "error" in result:
         return f"❌ {result['error']}"
 
@@ -450,6 +593,13 @@ def format_backtest_result(result: dict) -> str:
         f"  平均盈利: {result['avg_win_pct']:+.1f}% | 平均亏损: {result['avg_loss_pct']:+.1f}%",
         f"  最大单笔盈利: +{result['max_single_win_pct']}% | 最大亏损: {result['max_single_loss_pct']}%",
     ]
+    # Check if enhanced metrics are available
+    if "sharpe_ratio" in result:
+        lines += [
+            f"  Sharpe: {result['sharpe_ratio']} | Sortino: {result['sortino_ratio']} | Calmar: {result['calmar_ratio']}",
+            f"  最大回撤: {result['max_drawdown_pct']:.1f}% | 盈亏比: {result['profit_factor']:.2f}",
+            f"  平均持仓: {result['avg_hold_days']}天 | 回撤持续: {result['max_drawdown_duration_days']}天",
+        ]
     return "\n".join(lines)
 
 

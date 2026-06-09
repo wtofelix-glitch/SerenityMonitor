@@ -1,7 +1,7 @@
 #!/bin/bash
 # 交易日志 cron 脚本 — 每日收盘后沉淀到 gbrain/本地
 cd /Users/mac/workspace/SerenityMonitor
-arch -arm64 python3 -c "
+arch -arm64 python3.13 -c "
 from trading_log_sync import sync_today
 result = sync_today()
 data = result.get('data', result)

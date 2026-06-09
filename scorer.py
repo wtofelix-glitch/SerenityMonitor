@@ -9,8 +9,21 @@ from data_engine import get_all_today_snapshots
 from config import STOCK_DETAILS, STOCK_MAP, ALL_CODES, compute_serenity_score
 from db import save_score_history, save_price_history, get_price_history, get_avg_volume
 from factor_engine import AlphaFactorEngine
+from moat_factor import compute_moat_score  # v2.0 护城河因子
 from signal_engine import generate_signals, compute_technical_factors, compute_trend_score, confirm_buy_signal, get_signal_level, get_position_signal
 from sentiment_engine import compute_sentiment_score
+from serenity_logger import get_logger
+
+log = get_logger(__name__)
+
+try:
+    from metrics import observe_score_duration, SCORE_COUNT, SCORE_ERRORS, SIGNAL_ACTIONS
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    # metrics 不可用时，装饰器降级为空操作
+    def observe_score_duration(f):
+        return f
 
 # 因子引擎
 try:
@@ -44,10 +57,11 @@ except Exception:
         "sentiment": 0.10,  # 🆕 新闻情绪评分
     }
 
-# 非侵入式 fallback：确保所有 7 个维度都有默认值
+# 非侵入式 fallback：确保所有 9 个维度都有默认值
 _SCORE_WEIGHT_DEFAULTS = {
-    "base": 0.15, "zone": 0.15, "momentum": 0.15, "volume": 0.05,
-    "serenity": 0.15, "factor": 0.15, "technical": 0.10, "sentiment": 0.10,
+    "base": 0.14, "zone": 0.14, "momentum": 0.14, "volume": 0.04,
+    "serenity": 0.14, "factor": 0.14, "technical": 0.09, "sentiment": 0.09,
+    "moat": 0.08,
 }
 for k, v in _SCORE_WEIGHT_DEFAULTS.items():
     score_weight.setdefault(k, v)
@@ -123,10 +137,19 @@ def compute_volume_score(code: str, current_volume: float) -> float:
         return 40
 
 
+@observe_score_duration
 def score_all() -> list[dict]:
     """对所有候选标的进行评分 + 生成交易信号"""
     today = date.today().isoformat()
     snapshots = get_all_today_snapshots()
+
+    # ── 批量并行计算情绪分（14 个 HTTP → 并行加速） ──
+    try:
+        from sentiment_engine import compute_sentiment_scores_batch
+        codes_batch = [s["code"] for s in snapshots]
+        batch_sentiment = compute_sentiment_scores_batch(codes_batch)
+    except Exception:
+        batch_sentiment = {}
 
     # 市场风格感知
     _label = "震荡市"
@@ -159,7 +182,25 @@ def score_all() -> list[dict]:
         zone_score, zone_label, zone_class = compute_zone_score(price, detail)
         momentum_score = compute_momentum_score(change_pct, price, detail)
         volume_score = compute_volume_score(code, volume)
-        serenity_score = compute_serenity_score(code)
+
+        # Serenity 匹配分 — T4 防御组合在弱势/震荡市场使用补偿权重
+        # 解决传统蓝筹因旧五维偏重 CPO/AI 导致的系统性低分
+        from config import TIER_4_CODES, compute_serenity_score_compensated
+        is_defensive = code in TIER_4_CODES
+        is_defensive_market = "震荡" in _label or "弱势" in _label or "熊" in _label
+        if is_defensive and is_defensive_market:
+            serenity_score = compute_serenity_score_compensated(code)
+        else:
+            serenity_score = compute_serenity_score(code)
+
+        # 护城河因子评分 (v2.0 新增 — 基于巴菲特框架的量化实现)
+        try:
+            moat_result = compute_moat_score(code)
+            moat_score = moat_result["moat_score"]
+        except Exception as e:
+            log.warning(f"[scorer] {code}: moat_factor 计算异常: {e}")
+            moat_score = 50.0
+            moat_result = {"moat_score": 50, "data_available": False, "signals": ["护城河因子计算异常"]}
 
         # 因子引擎评分
         factor_score = 50
@@ -209,10 +250,16 @@ def score_all() -> list[dict]:
         tech = compute_technical_factors(code)
         technical_score = compute_trend_score(tech)
 
-        # 🆕 新闻情绪评分
-        sentiment_score = compute_sentiment_score(code)
+        # 🆕 新闻情绪评分（优先用批量并行结果，带 fallback）
+        if batch_sentiment and code in batch_sentiment:
+            sentiment_score = batch_sentiment[code]
+        else:
+            try:
+                sentiment_score = compute_sentiment_score(code)
+            except Exception:
+                sentiment_score = 50.0
 
-        # 加权总分（8维度 → 含情绪）
+        # 加权总分（9维度 → 含情绪 + 护城河（巴菲特框架））
         total = (
             base_score * score_weight["base"] +
             zone_score * score_weight["zone"] +
@@ -221,10 +268,11 @@ def score_all() -> list[dict]:
             serenity_score * score_weight["serenity"] +
             factor_score * score_weight["factor"] +
             technical_score * score_weight["technical"] +
-            sentiment_score * score_weight["sentiment"]
+            sentiment_score * score_weight["sentiment"] +
+            moat_score * score_weight["moat"]   # v2.0 护城河因子（巴菲特框架量化）
         )
 
-        # 🆕 信号集成 — 使用 scorer 统一 8 维度评分体系
+        # 🆕 信号集成 — 使用 scorer 统一 9 维度评分体系
         signal_info = signal_map.get(code, {})
         buy_confirm = signal_info.get("buy_confirm", {})
         signal_confidence = buy_confirm.get("confidence", 0) if buy_confirm else 0.5
@@ -271,6 +319,7 @@ def score_all() -> list[dict]:
             "factor_score": round(factor_score, 1),
             "technical_score": round(technical_score, 1),  # 🆕
             "sentiment_score": round(sentiment_score, 1),  # 🆕 情绪
+            "moat_score": moat_score,                      # v2.0 护城河因子
             "multi_cycle_factor": round(multi_cycle_score, 1),  # 🅱 三周期融合分
             "cycle_factors": cycle_factors_raw,  # 🅱 三周期原始值
             "details": {
@@ -279,7 +328,7 @@ def score_all() -> list[dict]:
                 "volume": volume,
                 "zone_label": zone_label,
                 "target_sell": detail.get("target_sell", 0),
-                "growth": round(((detail.get("target_sell", 0) - price) / price * 100), 1) if detail.get("target_sell", 0) > 0 else 0,
+                "growth": round(((detail.get("target_sell", 0) - price) / price * 100), 1) if price > 0 and detail.get("target_sell", 0) > 0 else 0,
                 "signal_action": signal_action,
                 "signal_confidence": signal_confidence,
                 "tech_ma5": tech.get("ma5", 0),
@@ -312,6 +361,7 @@ def score_all() -> list[dict]:
             "factor_score": round(factor_score, 1),
             "technical_score": round(technical_score, 1),
             "sentiment_score": round(sentiment_score, 1),  # 🆕 情绪
+            "moat_score": round(moat_score, 1),            # v2.0 护城河因子
             "multi_cycle_factor": round(multi_cycle_score, 1),  # 🅱 三周期融合分
             "cycle_factors": cycle_factors_raw,  # 🅱 三周期原始值
             "zone_label": zone_label,
@@ -348,6 +398,15 @@ def score_all() -> list[dict]:
                 save_reflection(r["code"], ref)
     except Exception:
         pass  # 反思失败不影响主评分
+
+    # ── 更新 Prometheus 指标 ──
+    if METRICS_AVAILABLE:
+        try:
+            SCORE_COUNT.inc(len(results))
+            for r in results:
+                SIGNAL_ACTIONS.labels(action=r.get("signal_action", "HOLD")).inc()
+        except Exception:
+            pass
 
     return results
 

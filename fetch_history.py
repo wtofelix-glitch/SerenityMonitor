@@ -14,6 +14,7 @@ import json
 import urllib.request
 import sys
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import STOCK_MAP
 from db import save_price_history
@@ -147,7 +148,16 @@ def main():
     print(f"  时间:     {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
 
-    results = [fetch_and_save(c) for c in codes]
+    # 并行拉取（I/O 密集，ThreadPoolExecutor 显著加速）
+    with ThreadPoolExecutor(max_workers=min(8, len(codes))) as executor:
+        futures = {executor.submit(fetch_and_save, c): c for c in codes}
+        results = []
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                code = futures[future]
+                results.append({"code": code, "status": "fail", "reason": str(e)})
 
     ok = [r for r in results if r.get("status") == "ok"]
     fail = [r for r in results if r.get("status") != "ok"]

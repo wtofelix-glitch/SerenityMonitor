@@ -110,7 +110,7 @@ def init_db():
         )
     """)
     # 迁移：增加评分维度列
-    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score"]:
+    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score", "moat_score"]:
         try:
             conn.execute(f"ALTER TABLE scoring_history ADD COLUMN {col} REAL DEFAULT 0")
         except sqlite3.OperationalError:
@@ -270,6 +270,42 @@ def init_db():
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_reflections_date
         ON score_reflections(date)
+    """)
+
+    # 🆕 执行日志表（force-execute 记录）
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS execution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            action TEXT NOT NULL,        -- BUY/SELL
+            status TEXT NOT NULL DEFAULT 'pending',  -- pending/executed/failed
+            price REAL DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            amount REAL DEFAULT 0,
+            reason TEXT DEFAULT '',
+            attempt INTEGER DEFAULT 1,   -- 第几次重试
+            max_attempts INTEGER DEFAULT 3,
+            error_msg TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    # 🆕 权重辩论日志表（conviction_engine 持久化）
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS conviction_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            regime TEXT NOT NULL DEFAULT '',
+            debated_weights TEXT DEFAULT '{}',
+            regime_weights TEXT DEFAULT '{}',
+            score_avg REAL DEFAULT 0,
+            high_count INTEGER DEFAULT 0,
+            low_count INTEGER DEFAULT 0,
+            position_advice TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(date)
+        )
     """)
     conn.commit()
     conn.close()
@@ -467,15 +503,17 @@ def save_score_history(code: str, scores: dict):
     conn.execute("""
         INSERT INTO scoring_history (code, date, total_score, base_score,
             zone_score, momentum_score, volume_score, details,
-            serenity_score, factor_score, technical_score, sentiment_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            serenity_score, factor_score, technical_score, sentiment_score,
+            moat_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(code, date) DO UPDATE SET
             total_score=excluded.total_score, base_score=excluded.base_score,
             zone_score=excluded.zone_score, momentum_score=excluded.momentum_score,
             volume_score=excluded.volume_score, details=excluded.details,
             serenity_score=excluded.serenity_score, factor_score=excluded.factor_score,
             technical_score=excluded.technical_score,
-            sentiment_score=excluded.sentiment_score
+            sentiment_score=excluded.sentiment_score,
+            moat_score=excluded.moat_score
     """, (
         code, scores["date"], scores["total_score"],
         scores.get("base_score", 0), scores.get("zone_score", 0),
@@ -483,7 +521,8 @@ def save_score_history(code: str, scores: dict):
         _safe_json_dumps(scores.get("details", {})),
         scores.get("serenity_score", 0), scores.get("factor_score", 0),
         scores.get("technical_score", 0),
-        scores.get("sentiment_score", 0)
+        scores.get("sentiment_score", 0),
+        scores.get("moat_score", 50)
     ))
     conn.commit()
     conn.close()
@@ -652,24 +691,35 @@ def save_signal_log(code: str, action: str, total_score: float, price: float,
                     is_holding: bool = False, tech_score: float = 0,
                     serenity_score: float = 0, alpha_score: float = 0,
                     fundamental_score: float = None, details: dict = None):
-    """记录一次信号发出（含去重: 5分钟窗内同评分不重复写入）"""
+    """记录一次信号发出（每天每标仅保留最新一条，UPSERT 模式）"""
     from datetime import date, datetime
     today = date.today().isoformat()
     now = datetime.now().strftime("%H:%M")
     conn = get_conn()
-    dup = conn.execute(
-        "SELECT id FROM signal_log WHERE code=? AND date=? AND total_score=?"
-        " AND created_at >= datetime('now','localtime','-5 minutes')",
-        (code, today, total_score)
-    ).fetchone()
-    if dup:
-        conn.close()
-        return
+
+    # 确保唯一约束（先删后建，防 "IF NOT EXISTS 跳过非唯一索引" 问题）
+    try:
+        conn.execute("DROP INDEX IF EXISTS idx_signal_log_code_date")
+        conn.execute("CREATE UNIQUE INDEX idx_signal_log_code_date ON signal_log(code, date)")
+    except Exception:
+        pass
+
     conn.execute("""
         INSERT INTO signal_log (code, date, time, action, total_score, price,
             is_holding, tech_score, serenity_score, alpha_score,
             fundamental_score, details)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, date) DO UPDATE SET
+            time=excluded.time,
+            action=excluded.action,
+            total_score=excluded.total_score,
+            price=excluded.price,
+            is_holding=excluded.is_holding,
+            tech_score=excluded.tech_score,
+            serenity_score=excluded.serenity_score,
+            alpha_score=excluded.alpha_score,
+            fundamental_score=excluded.fundamental_score,
+            details=excluded.details
     """, (code, today, now, action, total_score, price,
           int(is_holding), tech_score, serenity_score, alpha_score,
           fundamental_score, str(details or {})))
@@ -894,5 +944,80 @@ def get_reflection_dimension_ic(days: int = 30) -> dict:
                 ic_sums[dim] += float(val)
                 ic_counts[dim] += 1
 
-    return {dim: round(ic_sums[dim] / ic_counts[dim], 4) if ic_counts[dim] > 0 else 0.0
-            for dim in ic_sums}
+# ---------- 权重辩论日志 ----------
+
+def save_conviction_log(entry: dict):
+    """保存一次权重辩论结果（每天一条，UPSERT）"""
+    import json
+    conn = get_conn()
+    conn.execute("""
+        INSERT INTO conviction_log (date, regime, debated_weights, regime_weights,
+            score_avg, high_count, low_count, position_advice)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            regime=excluded.regime,
+            debated_weights=excluded.debated_weights,
+            regime_weights=excluded.regime_weights,
+            score_avg=excluded.score_avg,
+            high_count=excluded.high_count,
+            low_count=excluded.low_count,
+            position_advice=excluded.position_advice
+    """, (
+        entry.get("date", ""),
+        entry.get("regime", ""),
+        json.dumps(entry.get("debated_weights", {})),
+        json.dumps(entry.get("regime_weights", {})),
+        entry.get("score_avg", 0),
+        entry.get("high_count", 0),
+        entry.get("low_count", 0),
+        entry.get("position_advice", ""),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_conviction_history(days: int = 30) -> list[dict]:
+    """获取历史权重辩论记录"""
+    from datetime import date, timedelta
+    since = (date.today() - timedelta(days=days)).isoformat()
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT * FROM conviction_log
+        WHERE date>=?
+        ORDER BY date DESC
+    """, (since,)).fetchall()
+    conn.close()
+    result = []
+    import json
+    for r in rows:
+        d = dict(r)
+        try:
+            d["debated_weights"] = json.loads(d.get("debated_weights", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            d["debated_weights"] = {}
+        try:
+            d["regime_weights"] = json.loads(d.get("regime_weights", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            d["regime_weights"] = {}
+        result.append(d)
+    return result
+
+
+def get_latest_conviction() -> Optional[dict]:
+    """获取最新一条权重辩论记录"""
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT * FROM conviction_log
+        ORDER BY date DESC LIMIT 1
+    """).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    import json
+    for field in ["debated_weights", "regime_weights"]:
+        try:
+            d[field] = json.loads(d.get(field, "{}"))
+        except (json.JSONDecodeError, TypeError):
+            d[field] = {}
+    return d

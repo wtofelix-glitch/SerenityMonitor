@@ -5,3 +5,4 @@ dash>=2.0
 plotly>=5.0
 pandas>=2.0
 scipy>=1.10
+prometheus_client>=0.20

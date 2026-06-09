@@ -1,4 +1,5 @@
 .venv/
+venv/
 __pycache__/
 *.pyc
 .DS_Store
@@ -20,4 +21,12 @@ data/serenity_state.json
 *.db-journal
 *.db-wal
 *.db-shm
-*.db-wal
+.cache/
+.moat_cache/
+.risk_state/
+.serenity_public_url
+.signal_state.json
+.tier1_reentry_state.json
+investor_reviews_*.json
+data/*_游资评审_*.json
+reviews/

@@ -9,6 +9,9 @@ import json
 from config import CAPITAL_CONFIG, RISK_CONFIG, STOCK_MAP, STOCK_DETAILS
 from db import get_conn, add_trade, load_all_stocks, set_active, clear_active, get_price_history
 from data_engine import fetch_realtime
+from serenity_logger import get_logger
+
+log = get_logger(__name__)
 
 
 class PortfolioManager:
@@ -33,6 +36,8 @@ class PortfolioManager:
         # 浮动盈亏峰值追踪（用于移动止盈）
         self._peak_prices = {}  # code -> highest_price_since_entry
         self._entry_prices = {}  # code -> entry_price
+        # 从 DB 加载持久化的峰值价格
+        self._load_peaks_from_db()
         self.profit_take_levels = [
             (RISK_CONFIG["profit_take_level1"], RISK_CONFIG["partial_exit_level1"]),
             (RISK_CONFIG["profit_take_level2"], RISK_CONFIG["partial_exit_level2"]),
@@ -53,23 +58,31 @@ class PortfolioManager:
 
     def get_cash(self) -> float:
         """计算可用现金: 初始资金 - sum(买入金额) + sum(卖出金额)
-           fallback: 若 trade_amount=0，用 price * quantity 计算"""
+           fallback: 若 trade_amount=0，用 price * quantity 计算
+           健壮版：忽略 trade_amount=0 且 quantity=0 的无效记录"""
         conn = get_conn()
-        rows = conn.execute(
-            "SELECT action, price, quantity, trade_amount FROM trades"
-        ).fetchall()
-        conn.close()
+        try:
+            rows = conn.execute(
+                "SELECT action, price, quantity, trade_amount FROM trades"
+            ).fetchall()
+        except Exception:
+            return self.initial_capital
+        finally:
+            conn.close()
         bought = 0.0
         sold = 0.0
         for r in rows:
             amt = r["trade_amount"] or 0
             if amt == 0 and r["price"] and r["quantity"]:
                 amt = r["price"] * r["quantity"]
+            if amt == 0:
+                continue  # 跳过无效记录
             if r["action"] == "buy":
                 bought += amt
             elif r["action"] == "sell":
                 sold += amt
-        return self.initial_capital - bought + sold
+        cash = self.initial_capital - bought + sold
+        return max(cash, 0.0)  # 现金不可能为负，数据不全时截断到0
 
     def get_portfolio_value(self) -> dict:
         """计算当前组合总价值 = 现金 + 持仓市值 + 移动止盈追踪"""
@@ -129,7 +142,7 @@ class PortfolioManager:
 
     # ── 仓位计算 ──────────────────────────────────────────
 
-    def calc_position_size(self, code: str, signal_confidence: float) -> dict:
+    def calc_position_size(self, code: str, signal_confidence: float, skip_limit_check: bool = False) -> dict:
         """
         基于 Kelly 公式计算仓位大小
 
@@ -137,6 +150,7 @@ class PortfolioManager:
         ----------
         code              : 股票代码
         signal_confidence : 信号置信度 [0, 1]
+        skip_limit_check  : 跳过最大持仓数限制（用于计算已有持仓的Kelly）
 
         Returns
         -------
@@ -149,8 +163,8 @@ class PortfolioManager:
         total = self.get_portfolio_value()["total_value"]
         positions = self.positions
 
-        # 已有仓位数量限制
-        if len(positions) >= self.max_positions:
+        # 已有仓位数量限制（仅对新买入候选人）
+        if not skip_limit_check and len(positions) >= self.max_positions:
             return {"shares": 0, "amount": 0, "cash_used_pct": 0, "reason": f"已达最大持仓数 {self.max_positions}"}
 
         # 保留现金
@@ -195,6 +209,24 @@ class PortfolioManager:
     def execute_buy(self, code: str, signal_confidence: float = 0.5, force_amount: float = 0) -> dict:
         """执行买入，返回执行结果"""
         from data_engine import fetch_single
+
+        # 风控检查
+        try:
+            from risk_manager import get_risk_manager
+            risk = get_risk_manager()
+            pv = self.get_portfolio_value()
+            risk_check = risk.is_trade_allowed(
+                code=code, action="BUY",
+                holdings=self.positions,
+                current_total_value=pv["total_value"],
+                initial_capital=self.initial_capital,
+                new_amount=force_amount or pv["total_value"] * self.max_single_weight,
+            )
+            if not risk_check["allowed"]:
+                log.warning("风控拦截买入 %s: %s", code, "; ".join(risk_check["reasons"]))
+                return {"status": "blocked", "reason": "; ".join(risk_check["reasons"])}
+        except Exception:
+            pass  # 风险模块异常不阻断执行
 
         # 计算仓位
         if force_amount > 0:
@@ -284,6 +316,19 @@ class PortfolioManager:
 
         today = date.today().isoformat()
         clear_active(code)
+
+        # 记录风险事件：亏损卖出 → 连续亏损计数 + 黑名单
+        try:
+            from risk_manager import get_risk_manager
+            risk = get_risk_manager()
+            if profit_pct < 0:
+                risk.record_loss(code, profit_pct)
+                risk.record_stop_loss(code)
+            else:
+                risk.reset_consecutive_losses()
+        except Exception:
+            pass
+
         add_trade(code, "sell", price, shares, today,
                   f"卖出: {reason} (买入{buy_price:.2f})",
                   trade_amount=sell_value)
@@ -370,6 +415,33 @@ class PortfolioManager:
 
     # ── 移动止盈追踪 ──────────────────────────────────────
 
+    def _load_peaks_from_db(self):
+        """从数据库加载持久化的峰值价格"""
+        try:
+            from db import get_conn
+            conn = get_conn()
+            rows = conn.execute(
+                'SELECT code, buy_price, peak_price FROM stocks WHERE is_active = 1'
+            ).fetchall()
+            conn.close()
+            for r in rows:
+                self._entry_prices[r["code"]] = r["buy_price"]
+                db_peak = r["peak_price"] or 0
+                self._peak_prices[r["code"]] = max(db_peak, r["buy_price"])
+        except Exception:
+            pass
+
+    def _save_peak_to_db(self, code: str, peak: float):
+        """持久化单只标的的峰值价格"""
+        try:
+            from db import get_conn
+            conn = get_conn()
+            conn.execute('UPDATE stocks SET peak_price = ? WHERE code = ?', (peak, code))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
     def update_peaks(self, price_map: dict[str, float]):
         """更新持仓的最高价记录（每日调价时调用）"""
         positions = self.positions
@@ -384,6 +456,8 @@ class PortfolioManager:
                 self._peak_prices[code] = current
             else:
                 self._peak_prices[code] = max(self._peak_prices[code], current)
+            # 持久化峰值价格，防止进程重启丢失
+            self._save_peak_to_db(code, self._peak_prices[code])
 
     def get_trailing_stop_levels(self) -> list[dict]:
         """计算所有持仓的移动止盈位"
@@ -535,8 +609,8 @@ class PortfolioManager:
         time_pct = min(100, days_elapsed / days_total * 100) if days_total > 0 else 0
 
         # 所需月收益率
-        if remaining > 0 and days_elapsed > 0:
-            months_left = max(0.5, (days_total - days_elapsed) / 30)
+        if remaining > 0:
+            months_left = max(0.5, (days_total - max(days_elapsed, 1)) / 30)
             required_monthly_return = ((self.target_capital / current) ** (1 / months_left) - 1) * 100
         else:
             required_monthly_return = 0

@@ -18,6 +18,10 @@ echo "🧪 系统健康检查..."
 cd "$SCRIPT_DIR" && $PYTHON health_check.py 2>/dev/null
 
 echo ""
+echo "🔄 T1 回补检查:"
+cd "$SCRIPT_DIR" && $PYTHON tier1_reentry.py --status 2>/dev/null
+
+echo ""
 echo "📡 看板状态:"
 if lsof -i :8401 -sTCP:LISTEN > /dev/null 2>&1; then
     echo "  ✅ 看板运行中 → http://localhost:8401/monitor"

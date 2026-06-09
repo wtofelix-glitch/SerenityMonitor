@@ -19,16 +19,17 @@ import sys
 import os
 from pathlib import Path
 
-# 默认权重（与 scorer.py 保持一致）
+# 默认权重（与 scorer.py 保持一致，9维度含护城河）
 DEFAULT_WEIGHTS = {
-    "base": 0.15,
-    "zone": 0.15,
-    "momentum": 0.15,
-    "volume": 0.05,
-    "serenity": 0.15,
-    "factor": 0.15,
-    "technical": 0.10,
-    "sentiment": 0.10,
+    "base": 0.14,
+    "zone": 0.14,
+    "momentum": 0.14,
+    "volume": 0.04,
+    "serenity": 0.14,
+    "factor": 0.14,
+    "technical": 0.09,
+    "sentiment": 0.09,
+    "moat": 0.10,       # v2.0 护城河因子（50 评委交叉验证支持上调）
 }
 
 # IC 维度 → score_weight 键 映射
@@ -41,6 +42,7 @@ IC_TO_WEIGHT = {
     "factor_score": "factor",
     "technical_score": "technical",
     "sentiment_score": "sentiment",
+    "moat_score": "moat",       # v2.0 护城河因子
 }
 
 # 保存路径

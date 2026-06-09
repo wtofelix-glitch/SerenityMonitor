@@ -8,6 +8,15 @@ from datetime import datetime, date
 from typing import Optional
 
 from config import STOCK_MAP, ALL_CODES, SINA_PREFIX
+from serenity_logger import get_logger
+
+log = get_logger(__name__)
+
+try:
+    from metrics import API_CALLS, API_ERRORS, CACHE_HITS, CACHE_MISSES
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
 
 
 def sina_fetch_raw(code_list: list[str]) -> str:
@@ -77,7 +86,15 @@ def fetch_realtime(code_list: Optional[list[str]] = None) -> list[dict]:
     if code_list is None:
         code_list = ALL_CODES
 
-    raw = sina_fetch_raw(code_list)
+    if METRICS_AVAILABLE:
+        API_CALLS.labels(source="sina").inc()
+    try:
+        raw = sina_fetch_raw(code_list)
+    except Exception:
+        if METRICS_AVAILABLE:
+            API_ERRORS.labels(source="sina").inc()
+        raise
+
     results = []
     for line in raw.strip().split("\n"):
         parsed = parse_sina_line(line)
@@ -121,8 +138,32 @@ def get_today_snapshot(code: str) -> Optional[dict]:
     }
 
 
-def get_all_today_snapshots() -> list[dict]:
-    """获取所有候选标的今日快照"""
+# ── 简单缓存（同分钟内不重复抓取） ────────────────────
+_SNAPSHOT_CACHE: dict[str, tuple[list[dict], str]] = {}  # key → (data, timestamp_minute)
+
+
+def _cache_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def get_all_today_snapshots(use_cache: bool = True) -> list[dict]:
+    """获取所有候选标的今日快照
+
+    Parameters
+    ----------
+    use_cache : bool
+        是否使用分钟级缓存（默认 True，同分钟不重复抓取）
+    """
+    if use_cache:
+        ck = _cache_key()
+        cached = _SNAPSHOT_CACHE.get("snapshots")
+        if cached and cached[1] == ck:
+            if METRICS_AVAILABLE:
+                CACHE_HITS.labels(cache="snapshot").inc()
+            return cached[0]
+        if METRICS_AVAILABLE:
+            CACHE_MISSES.labels(cache="snapshot").inc()
+
     results = fetch_realtime()
     snapshots = []
     for data in results:
@@ -147,4 +188,11 @@ def get_all_today_snapshots() -> list[dict]:
             "buy1": data.get("buy1"),
             "sell1": data.get("sell1"),
         })
+    if use_cache:
+        _SNAPSHOT_CACHE["snapshots"] = (snapshots, ck)
     return snapshots
+
+
+def invalidate_snapshot_cache():
+    """清除快照缓存（强制下次抓取最新数据）"""
+    _SNAPSHOT_CACHE.pop("snapshots", None)
