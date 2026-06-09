@@ -4,6 +4,9 @@
 import urllib.request
 import json
 import re
+import time
+import random
+from functools import wraps
 from datetime import datetime, date
 from typing import Optional
 
@@ -19,10 +22,43 @@ except ImportError:
     METRICS_AVAILABLE = False
 
 
+# ── 重试装饰器（指数退避 + 抖动） ──────────────────────
+
+def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0):
+    """
+    通用重试装饰器，捕获所有 Exception。
+
+    退避策略: base_delay * backoff^(attempt-1) + random(0, 0.5)
+    第1次重试等待 ~1s, 第2次 ~2s, 第3次 ~4s
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (backoff ** attempt) + random.uniform(0, 0.5)
+                        log.warning(
+                            "%s 失败(第%d/%d次): %s, %.1fs后重试",
+                            func.__name__, attempt + 1, max_attempts, e, delay,
+                        )
+                        time.sleep(delay)
+            log.error("%s %d次重试后仍失败: %s", func.__name__, max_attempts, last_exc)
+            raise last_exc
+        return wrapper
+    return decorator
+
+
+@retry(max_attempts=3, base_delay=1.0)
 def sina_fetch_raw(code_list: list[str]) -> str:
     """
     通过新浪 API 获取股票实时行情
     返回 CSV 格式原始数据
+    网络抖动时自动重试 3 次（1s → 2s 退避）
     """
     codes = []
     for c in code_list:

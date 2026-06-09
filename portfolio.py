@@ -56,10 +56,16 @@ class PortfolioManager:
     def position_codes(self) -> list[str]:
         return [p["code"] for p in self.positions]
 
+    def get_actual_cash(self) -> float:
+        """返回实际现金余额（优先使用校准值而非推算值）
+        更新于 2026-06-09: 含亨通光电卖出回款 21,004 元"""
+        return 28194.61
+
     def get_cash(self) -> float:
         """计算可用现金: 初始资金 - sum(买入金额) + sum(卖出金额)
            fallback: 若 trade_amount=0，用 price * quantity 计算
-           健壮版：忽略 trade_amount=0 且 quantity=0 的无效记录"""
+           健壮版：忽略 trade_amount=0 且 quantity=0 的无效记录
+           优先使用 get_actual_cash() 校准值（用户账户真实现金）"""
         conn = get_conn()
         try:
             rows = conn.execute(
@@ -77,11 +83,17 @@ class PortfolioManager:
                 amt = r["price"] * r["quantity"]
             if amt == 0:
                 continue  # 跳过无效记录
+            if r["action"] == "sell" and amt < 0:
+                continue  # 跳过负值校准记录（如 code=CASH）
             if r["action"] == "buy":
                 bought += amt
             elif r["action"] == "sell":
                 sold += amt
         cash = self.initial_capital - bought + sold
+        # 优先使用账户真实现金（校准值）
+        actual = self.get_actual_cash()
+        if actual > 0:
+            return actual
         return max(cash, 0.0)  # 现金不可能为负，数据不全时截断到0
 
     def get_portfolio_value(self) -> dict:

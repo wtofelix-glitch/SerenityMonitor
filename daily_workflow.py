@@ -12,12 +12,17 @@ Serenity 每日工作流 — 一站式运行全部子系统
   0. 参考数据拉取 (fetch_reference) → price_history
   1. 评分 (score_all) → scoring_history
   2. 信号 (generate_signals) → signal_log
-  3. Outcome 补填 (fill_outcomes) → signal_log.outcome_*
+  3. Outcome 补填 → signal_log.outcome_*
+  3b. 信号绩效统计 → signal_performance 表
   4. 反思 (generate_reflections) → score_reflections
   5. 反思收益补填 (reflection fill_outcomes)
   6. 自动调仓 (auto_execute) → 行动计划
-  7. [可选] T1 回补检查
+  7. T1 回补检查
+  7b. 净值简报 (portfolio)
+  7c. 行业轮动简报 (sector_rotation)
+  7d. 信号绩效简报 (signal_performance)
   8. [可选] 回测快照
+  📡 推送 (含净值 + 行业 + 绩效 + 执行计划)
   🚀 [--execute] 自动执行交易 + 更新 NAV
 """
 import sys, os
@@ -39,7 +44,7 @@ def main():
     today = date.today().isoformat()
 
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
-    step('0/7 参考数据拉取')
+    step('0/8 参考数据拉取')
     try:
         from fetch_reference import main as fetch_ref
         fetch_ref()
@@ -47,7 +52,7 @@ def main():
         print(f"  ⚠️ 参考数据拉取失败: {e}")
 
     # ── 1. 多因子评分 ──────────────────────────────────────
-    step('1/7 多因子评分')
+    step('1/8 多因子评分')
     try:
         from scorer import score_all
         results = score_all()
@@ -58,7 +63,7 @@ def main():
         print(f"  ⚠️ 评分失败: {e}")
 
     # ── 2. 信号 ──────────────────────────────────────
-    step('2/7 交易信号')
+    step('2/8 交易信号')
     try:
         from signal_engine import generate_signals
         from config import ALL_CODES
@@ -74,7 +79,7 @@ def main():
         print(f"  ⚠️ 信号生成失败: {e}")
 
     # ── 3. Outcome 补填 ──────────────────────────────
-    step('3/7 信号绩效补填')
+    step('3/8 信号绩效补填')
     try:
         from serenity_calc_outcomes import calculate_outcomes
         calculate_outcomes()
@@ -89,8 +94,17 @@ def main():
     except Exception as e:
         print(f"  ⚠️ Outcome 补填失败: {e}")
 
+    # ── 3b. 信号绩效分析 ────────────────────────────
+    step('3b/8 信号绩效统计')
+    try:
+        from signal_performance import update_signal_performance_table
+        result = update_signal_performance_table()
+        print(f"  ✅ {result['updated']} 条写入, {result['skipped']} 条跳过")
+    except Exception as e:
+        print(f"  ⚠️ 信号绩效统计失败: {e}")
+
     # ── 4. 反思生成 ──────────────────────────────────
-    step('4/7 评分反思')
+    step('4/8 评分反思')
     try:
         from reflection_engine import generate_all_reflections
         refs = generate_all_reflections()
@@ -100,7 +114,7 @@ def main():
         print(f"  ⚠️ 反思生成失败: {e}")
 
     # ── 5. 反思收益补填 ──────────────────────────────
-    step('5/7 反思收益补填')
+    step('5/8 反思收益补填')
     try:
         from reflection_engine import fill_outcomes
         fill_outcomes(days_back=30)
@@ -108,7 +122,7 @@ def main():
         print(f"  ⚠️ 反思收益补填失败: {e}")
 
     # ── 6. 自动调仓 ──────────────────────────────────
-    step('6/7 自动调仓建议')
+    step('6/8 自动调仓建议')
     plan = {"sells": [], "buys": [], "swaps": [], "summary": ""}
     try:
         from auto_execute import generate_execution_plan
@@ -159,18 +173,93 @@ def main():
     except Exception as e:
         print(f"  ⚠️ T1 回补检查失败: {e}")
 
-    # ── 推送 ─────────────────────────────────────────
-    if do_push and (plan.get('sells') or plan.get('buys') or plan.get('swaps')):
-        try:
-            from notifier import send_message
-            send_message(
-                f"📊 Serenity 每日简报 {today}",
-                plan['summary'],
-                content_type="markdown",
-            )
-            print("\n📡 已推送")
-        except Exception as e:
-            print(f"\n⚠️ 推送失败: {e}")
+    # ── 7b. 净值简报 ───────────────────────────────────
+    nav_summary_lines = []
+    try:
+        from portfolio import PortfolioManager
+        pm = PortfolioManager()
+        val = pm.get_portfolio_value()
+        nav_summary_lines = [
+            f"💰 组合净值概览",
+            f"  总资产: {val['total_value']:.0f} 元",
+            f"  现金: {val['cash']:.0f} 元",
+            f"  持仓市值: {val['holdings_value']:.0f} 元",
+            f"  总盈亏: {val['total_profit_pct']:+.2f}%",
+            f"  持仓数: {val['position_count']} 只",
+        ]
+        print(f"\n  💰 净值概览:")
+        for line in nav_summary_lines:
+            print(f"     {line}")
+    except Exception as e:
+        print(f"  ⚠️ 净值获取失败: {e}")
+
+    # ── 7c. 行业轮动简报 ──────────────────────────────
+    sector_brief = ""
+    sector_detail = ""
+    try:
+        from sector_rotation import get_sector_rotation_summary, get_sector_rotation_detail
+        sector_brief = get_sector_rotation_summary()
+        sector_detail = get_sector_rotation_detail()
+        print(f"\n  📊 行业轮动:")
+        for line in sector_brief.split("\n")[:4]:
+            print(f"     {line}")
+    except Exception as e:
+        print(f"  ⚠️ 行业轮动扫描失败: {e}")
+
+    # ── 7d. 信号绩效简报 ──────────────────────────────
+    perf_summary_lines = []
+    try:
+        from signal_performance import get_performance_report
+        perf = get_performance_report()
+        ps = perf["summary"]
+        perf_summary_lines = [
+            f"📊 信号绩效统计",
+            f"  信号总数: {ps['total_signals']} | 已结算: {ps['signals_with_outcome']}",
+        ]
+        if ps["overall_win_rate_1d"] is not None:
+            perf_summary_lines.append(f"  整体胜率: {ps['overall_win_rate_1d']*100:.1f}% | 均收益: {ps['overall_avg_return_1d']:+.2f}%")
+        if ps["best_action"]:
+            perf_summary_lines.append(f"  最佳信号: {ps['best_action']} ({ps['best_action_win_rate']*100:.1f}%)")
+        print(f"\n  📊 信号绩效:")
+        for line in perf_summary_lines:
+            print(f"     {line}")
+    except Exception as e:
+        print(f"  ⚠️ 信号绩效统计失败: {e}")
+
+    # ── 推送（含净值 + 行业简报 + 绩效摘要）─────────────────
+    if do_push:
+        push_lines = []
+        # 净值概览
+        if nav_summary_lines:
+            push_lines.append("```")
+            push_lines.extend(nav_summary_lines)
+            push_lines.append("```")
+            push_lines.append("")
+        # 调仓计划
+        if plan.get('sells') or plan.get('buys') or plan.get('swaps'):
+            push_lines.append(plan['summary'])
+            push_lines.append("")
+        # 行业简报
+        if sector_brief:
+            push_lines.append(sector_brief)
+            push_lines.append("")
+        # 绩效简报
+        if perf_summary_lines:
+            push_lines.append("\n".join(perf_summary_lines))
+            push_lines.append("")
+
+        if push_lines:
+            push_msg = "\n".join(push_lines)
+            try:
+                from notifier import send_message
+                send_message(
+                    f"📊 Serenity 每日简报 {today}",
+                    push_msg,
+                    content_type="markdown",
+                )
+                print("\n📡 推送成功")
+            except Exception as e:
+                print(f"\n⚠️ 推送失败: {e}")
 
     # ── Telegram 推送执行计划 ────────────────────────
     try:

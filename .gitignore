@@ -30,3 +30,6 @@ data/serenity_state.json
 investor_reviews_*.json
 data/*_游资评审_*.json
 reviews/
+
+# Runtime data
+data/

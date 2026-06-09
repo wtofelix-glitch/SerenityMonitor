@@ -11,6 +11,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from config import STOCK_MAP, ALL_CODES
+from data_engine import retry
 import json as _json
 import os as _os
 import hashlib as _hashlib
@@ -76,9 +77,11 @@ def _build_news_url(code: str) -> str:
     return f"http://vip.stock.finance.sina.com.cn/corp/go.php/vCB_AllNewsStock/symbol/{market}{code}.phtml"
 
 
+@retry(max_attempts=2, base_delay=0.5)
 def _fetch_page(url: str) -> Optional[str]:
     """带超时的 HTTP GET 请求，返回 UTF-8 文本
-    A股数据不走代理（与 data_engine.py 一致）"""
+    A股数据不走代理（与 data_engine.py 一致）
+    网络超时自动重试 2 次"""
     import urllib.request
     req = Request(url, headers=FETCH_HEADERS)
     # 绕过系统代理
@@ -99,7 +102,7 @@ def _fetch_page(url: str) -> Optional[str]:
             return html
     except (URLError, OSError, ValueError) as e:
         logger.debug("Failed to fetch %s: %s", url, e)
-        return None
+        raise  # 让 retry 装饰器捕获重试
 
 
 def _parse_news_items(html: str) -> list[dict]:

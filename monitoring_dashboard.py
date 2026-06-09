@@ -816,10 +816,24 @@ function render(d){
       <div class="card-title">📊 近7天买入信号绩效</div>
       <div id="signal-history-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
     </div>
+
+    <!-- 信号类型胜率 -->
+    <div class="card" id="signal-perf-card">
+      <div class="card-title">📊 信号类型绩效 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（全部历史）</span></div>
+      <div id="signal-perf-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
+    </div>
+
+    <!-- 维度有效性 -->
+    <div class="card" id="dimension-perf-card">
+      <div class="card-title">🔬 评分维度预测力 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（corr vs 1日收益）</span></div>
+      <div id="dimension-perf-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
+    </div>
   `;
 
   document.getElementById('root').innerHTML=html;
   loadSignalHistory();
+  loadSignalPerformance();
+  loadDimensionEffectiveness();
   loadFactorIC();
   if(data.position_advice)loadPositionAdvice(data.position_advice);
   loadNavHistory();
@@ -894,6 +908,80 @@ function loadSignalHistory(){
   });
 }
 
+
+function loadSignalPerformance(){
+  var el=document.getElementById('signal-perf-content');
+  fetch('/api/signal-performance').then(r=>r.json()).then(d=>{
+    if(!d.ok||!d.signal_actions||!d.signal_actions.length){
+      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
+      return;
+    }
+    var html='';
+    // Summary line
+    var s=d.summary;
+    html+='<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;color:rgba(255,255,255,0.5)">'
+      +'<span>信号 '+s.total_signals+' | 已结算 '+s.with_outcome+'</span>'
+      +'<span>胜率 '+(s.overall_win_rate!=null?fmt(s.overall_win_rate*100,1)+'%':'N/A')+'</span>'
+      +'<span>均收益 '+(s.overall_avg_return!=null?fmt(s.overall_avg_return,2)+'%':'N/A')+'</span>'
+      +'</div>';
+    // Header
+    html+='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
+      +'<span style="flex:2">信号</span>'
+      +'<span style="flex:1;text-align:right">次数</span>'
+      +'<span style="flex:1;text-align:right">1日收益</span>'
+      +'<span style="flex:1;text-align:right">1日胜率</span>'
+      +'<span style="flex:1;text-align:right">3日胜率</span>'
+      +'</div>';
+    d.signal_actions.forEach(function(sa){
+      var ar1=sa.avg_return_1d!=null?fmt(sa.avg_return_1d,2)+'%':'N/A';
+      var wr1=sa.win_rate_1d!=null?fmt(sa.win_rate_1d*100,1)+'%':'N/A';
+      var wr3=sa.win_rate_3d!=null?fmt(sa.win_rate_3d*100,1)+'%':'N/A';
+      var color=sa.win_rate_1d!=null?(sa.win_rate_1d>=0.4?'#00C853':sa.win_rate_1d>=0.3?'#FFD700':'#FF1744'):'rgba(255,255,255,0.3)';
+      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
+        +'<span style="flex:2;font-weight:500;font-size:11px">'+sa.action+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:11px">'+sa.total+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:11px;color:'+(sa.avg_return_1d!=null&&sa.avg_return_1d>0?'#FF1744':'#00C853')+'">'+ar1+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:11px;font-weight:600;color:'+color+'">'+wr1+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:11px;color:'+color+'">'+wr3+'</span>'
+        +'</div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(){
+    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
+  });
+}
+
+function loadDimensionEffectiveness(){
+  var el=document.getElementById('dimension-perf-content');
+  fetch('/api/signal-performance').then(r=>r.json()).then(d=>{
+    if(!d.ok||!d.dimensions||!d.dimensions.length){
+      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
+      return;
+    }
+    var html='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
+      +'<span style="flex:2">维度</span>'
+      +'<span style="flex:1;text-align:right">样本</span>'
+      +'<span style="flex:1;text-align:right">corr_1d</span>'
+      +'<span style="flex:1;text-align:right">正收益%</span>'
+      +'<span style="flex:1;text-align:right">强区间</span>'
+      +'</div>';
+    d.dimensions.forEach(function(dim){
+      var bestBin=dim.bins.reduce(function(a,b){return a.avg_return>b.avg_return?a:b;},dim.bins[0]);
+      var bbLabel=bestBin?bestBin.range:'';
+      var corrCls=Math.abs(dim.rank_corr_1d)>=0.1?'up':'neutral';
+      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
+        +'<span style="flex:2;font-size:11px;font-weight:500">'+dim.dimension.replace('_score','')+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:10px;color:rgba(255,255,255,0.4)">'+dim.samples+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:12px;font-weight:600" class="'+corrCls+'">'+(dim.rank_corr_1d>=0?'+':'')+fmt(dim.rank_corr_1d,3)+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:11px;color:'+(dim.positive_pct>=0.35?'#00C853':dim.positive_pct>=0.3?'#FFD700':'#FF1744')+'">'+fmt(dim.positive_pct*100,1)+'%</span>'
+        +'<span style="flex:1;text-align:right;font-size:10px;color:rgba(255,255,255,0.4)">'+bbLabel+'</span>'
+        +'</div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(){
+    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
+  });
+}
 
 function loadNavHistory(){
   fetch('/api/nav-history').then(r=>r.json()).then(d=>{
@@ -1027,6 +1115,9 @@ refresh();
 setInterval(refresh,30000);
 // 因子 IC 卡片独立刷新（60秒）
 setInterval(loadFactorIC,60000);
+// 信号绩效卡片独立刷新（60秒）
+setInterval(loadSignalPerformance,60000);
+setInterval(loadDimensionEffectiveness,60000);
 
 // ===== 调仓弹窗 =====
 function showTrade(){
@@ -1125,6 +1216,53 @@ def api_signal_history():
         })
     return jsonify({"ok": True, "data": result})
 
+
+@app.route("/api/signal-performance")
+def api_signal_performance():
+    """返回信号绩效与维度有效性分析数据"""
+    try:
+        from signal_performance import get_performance_report
+        report = get_performance_report()
+        summary = report["summary"]
+        signal_by_action = report["signal_by_action"]
+        dimensions = report["dimensions"]
+        return jsonify({
+            "ok": True,
+            "updated": datetime.now().isoformat(),
+            "summary": {
+                "total_signals": summary["total_signals"],
+                "with_outcome": summary["signals_with_outcome"],
+                "overall_win_rate": summary["overall_win_rate_1d"],
+                "overall_avg_return": summary["overall_avg_return_1d"],
+                "best_action": summary["best_action"],
+                "best_action_win_rate": summary["best_action_win_rate"],
+                "best_dimension": summary["best_dimension"],
+                "best_dimension_corr": summary["best_dimension_corr"],
+            },
+            "signal_actions": [
+                {
+                    "action": s["action"],
+                    "total": s["total"],
+                    "avg_return_1d": s["avg_return_1d"],
+                    "avg_return_3d": s["avg_return_3d"],
+                    "win_rate_1d": s["win_rate_1d"],
+                    "win_rate_3d": s["win_rate_3d"],
+                }
+                for s in signal_by_action
+            ],
+            "dimensions": [
+                {
+                    "dimension": d["dimension"],
+                    "samples": d["samples"],
+                    "positive_pct": d["positive_pct"],
+                    "rank_corr_1d": d["rank_corr_1d"],
+                    "bins": d["bins"],
+                }
+                for d in dimensions
+            ],
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ===== Prometheus 指标 =====
