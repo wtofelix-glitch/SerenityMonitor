@@ -78,7 +78,7 @@ def expand_pool(
         最多返回数量 (默认 9 = 全部)
     tiers : list[int] | None
         仅保留指定 tier 层级，如 [1, 2]
-    min_signal_strength : float | None
+    min_signal_strength : Optional[float]
         最低 Alpha 因子综合信号强度
 
     Returns

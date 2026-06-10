@@ -484,6 +484,185 @@ def _compute_alpha_composite(alpha_signals: dict) -> float:
 
 
 # ============================================================
+# 🆕 卖出触发条件增强
+# ============================================================
+
+def compute_sell_triggers(code: str, tech: dict, total_score: float) -> list[dict]:
+    """计算额外的卖出触发条件（除评分阈值外）
+
+    A股卖出信号常被忽视，本函数增加技术面卖出触发器，
+    让系统在评分尚可但技术面已转弱时提前预警。
+
+    Returns:
+        list of {trigger, weight, detail} — 空列表 = 无额外卖出信号
+    """
+    triggers = []
+
+    # 1. 均线死叉（MA5 < MA20）— 强卖出
+    if tech.get("ma5") and tech.get("ma20") and tech["ma5"] <= tech["ma20"]:
+        triggers.append({
+            "trigger": "ma_death_cross",
+            "weight": 2,
+            "detail": f"均线死叉 MA5({tech['ma5']:.1f})<MA20({tech['ma20']:.1f})",
+        })
+
+    # 2. 价格跌破 MA20 支撑 — 中强卖出
+    if not tech.get("price_above_ma20", True) and tech.get("ma5") and tech.get("ma20"):
+        triggers.append({
+            "trigger": "price_below_ma20",
+            "weight": 2,
+            "detail": f"价格跌破MA20支撑",
+        })
+
+    # 3. 布林带上轨遇阻回落（价格在上轨处但已跌破MA5）
+    bb_pos = tech.get("bb_position", 50)
+    if bb_pos > 80 and not tech.get("price_above_ma5", True):
+        triggers.append({
+            "trigger": "bb_upper_rejected",
+            "weight": 1,
+            "detail": f"上轨遇阻回落(布林位{bb_pos:.0f}%)",
+        })
+
+    # 4. RSI 从超买区回落（RSI > 70 且不在超买区了）
+    rsi = tech.get("rsi", 50)
+    if tech.get("rsi_overbought") is False and rsi < 65:
+        # 获取前几日 RSI 判断是否从超买回落
+        prev_rsi = _compute_prev_rsi(code)
+        if prev_rsi and prev_rsi >= 70:
+            triggers.append({
+                "trigger": "rsi_overbought_reversal",
+                "weight": 2,
+                "detail": f"RSI从{prev_rsi:.0f}回落至{rsi:.0f}(超买反转)",
+            })
+
+    # 5. 评分连续下降 >= 3 天 — 趋势转弱
+    prev_scores = _get_recent_scores(code, 5)
+    if len(prev_scores) >= 4:
+        # 最近 N 天每天评分都低于前一天
+        decline_days = 0
+        for i in range(min(3, len(prev_scores) - 1)):
+            if prev_scores[i] < prev_scores[i + 1]:
+                decline_days += 1
+            else:
+                break
+        if decline_days >= 3:
+            triggers.append({
+                "trigger": "score_decline_3d",
+                "weight": 1,
+                "detail": f"评分连降{decline_days}天({prev_scores[0]:.0f}→{prev_scores[-1]:.0f})",
+            })
+
+    # 6. 量价背离：缩量上涨（价格 > MA5 但成交量萎缩）
+    vol_ratio = tech.get("volume_ratio", 1)
+    if tech.get("volume_dry") and tech.get("price_above_ma5"):
+        triggers.append({
+            "trigger": "volume_price_divergence",
+            "weight": 1,
+            "detail": f"量价背离(缩量{vol_ratio:.1f}x)",
+        })
+
+    return triggers
+
+
+def _compute_prev_rsi(code: str, days_back: int = 5) -> Optional[float]:
+    """计算 N 天前的 RSI 值"""
+    try:
+        rows = get_price_history(code, 65)  # 60 + 5
+        if len(rows) < 25:
+            return None
+        closes = np.array([r["close"] for r in reversed(rows)], dtype=float)
+        rsi_p = STRATEGY_CONFIG["rsi_period"]
+        # 取 days_back 天前的数据计算 RSI
+        if len(closes) < rsi_p + 1 + days_back:
+            return None
+        segment = closes[days_back:days_back + rsi_p + 1]
+        deltas = np.diff(segment)
+        gains = deltas[deltas > 0].sum()
+        losses = abs(deltas[deltas < 0].sum())
+        avg_gain = gains / rsi_p
+        avg_loss = losses / rsi_p
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(100 - (100 / (1 + rs)), 1)
+    except Exception:
+        return None
+
+
+def _get_recent_scores(code: str, days: int = 5) -> list[float]:
+    """获取最近 N 天的评分序列（从新到旧）"""
+    try:
+        from db import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT total_score FROM scoring_history WHERE code = ? ORDER BY date DESC LIMIT ?",
+            (code, days)
+        ).fetchall()
+        conn.close()
+        return [r["total_score"] for r in rows if r["total_score"] is not None]
+    except Exception:
+        return []
+
+
+# ============================================================
+# 🆕 CAUTION_BUY 二次精筛
+# ============================================================
+
+def compute_caution_buy_filter(code: str, tech: dict, alpha_signals: dict,
+                                scores: dict = None) -> dict:
+    """CAUTION_BUY 信号二次精筛 — 过滤低质量信号
+
+    CAUTION_BUY 历史上 22 条信号胜率仅 30.8%，
+    加三道过滤提升信号质量：
+    1. 量能确认：成交量不低于 MA20 的 80%（无缩量）
+    2. 动量底线：momentum 分 >= 35（淘汰弱动量标的）
+    3. 趋势配合：价格在 MA20 上方（上升趋势确认）
+
+    Returns:
+        dict: {passed: bool, filters: [{name, passed, detail}]}
+    """
+    filters = []
+
+    # 过滤1: 量能确认（不缩量）
+    vol_ratio = tech.get("volume_ratio", 1)
+    vol_ok = vol_ratio >= 0.8 or tech.get("volume_surge", False)
+    filters.append({
+        "name": "量能确认",
+        "passed": vol_ok,
+        "detail": f"成交量{vol_ratio:.1f}x MA20" if vol_ok else f"缩量{vol_ratio:.1f}x MA20",
+    })
+
+    # 过滤2: 动量底线（momentum_score >= 35）
+    mom_score = None
+    if scores:
+        mom_score = scores.get("momentum_score", 0)
+    if mom_score is None:
+        mom_score = 50  # 无数据时放行
+    mom_ok = mom_score >= 35
+    filters.append({
+        "name": "动量底线",
+        "passed": mom_ok,
+        "detail": f"动量分{mom_score:.0f}" if mom_ok else f"动量分{mom_score:.0f}(<35)",
+    })
+
+    # 过滤3: 趋势配合（价格在 MA20 上方）
+    trend_ok = tech.get("price_above_ma20", False)
+    filters.append({
+        "name": "趋势配合",
+        "passed": trend_ok,
+        "detail": "价格在MA20上方" if trend_ok else "价格在MA20下方",
+    })
+
+    passed = all(f["passed"] for f in filters)
+
+    return {
+        "passed": passed,
+        "filters": filters,
+        "confidence": sum(1 for f in filters if f["passed"]) / len(filters),
+    }
+
+
+# ============================================================
 # 买入确认检查
 # ============================================================
 
@@ -693,9 +872,24 @@ def _generate_single_signal(code: str, realtime_data: dict,
     except Exception:
         _conv_target = None
     
-    action = get_position_signal(total_score, 
+    action = get_position_signal(total_score,
                                  ((price - zone_info['target_sell'])/zone_info['target_sell']*100) if zone_info['target_sell'] > 0 else 0,
                                  is_holding, _conv_target) if is_holding else get_signal_level(total_score, _conv_target)
+
+    # 7.3 🆕 技术面卖出触发器 — 均线死叉/上轨遇阻/连降等
+    sell_triggers = compute_sell_triggers(code, tech, total_score)
+    total_sell_weight = sum(t["weight"] for t in sell_triggers)
+    if total_sell_weight >= 3 and action not in ("SELL", "STOP_LOSS"):
+        action = "SELL"
+        log.info("  🔴 卖出触发器触发(%d点): %s", total_sell_weight,
+                 "; ".join(t["detail"] for t in sell_triggers))
+    elif total_sell_weight >= 2 and total_score < 60 and action not in ("SELL", "STOP_LOSS"):
+        if is_holding:
+            action = "WEAK_HOLD"
+        else:
+            action = "WATCH"
+        log.info("  🟡 卖出预警(%d点): %s", total_sell_weight,
+                 "; ".join(t["detail"] for t in sell_triggers))
 
     # 7.5 已达目标价 → 强制卖出
     if is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0:
@@ -727,6 +921,30 @@ def _generate_single_signal(code: str, realtime_data: dict,
                 action = "CAUTION_BUY"
             elif action == "CAUTION_BUY":
                 action = "HOLD"
+
+        # 🆕 CAUTION_BUY 二次精筛：通过初筛后额外过滤
+        if action == "CAUTION_BUY" and buy_confirm and buy_confirm["confirmed"]:
+            # 获取动量维度分（用于动量底线过滤）
+            dim_scores = {}
+            try:
+                from db import get_conn
+                _conn2 = get_conn()
+                _sc = _conn2.execute(
+                    "SELECT momentum_score FROM scoring_history WHERE code=? AND date=? ORDER BY date DESC LIMIT 1",
+                    (code, date.today().isoformat())
+                ).fetchone()
+                if _sc and _sc[0] is not None:
+                    dim_scores["momentum_score"] = _sc[0]
+                _conn2.close()
+            except Exception:
+                pass
+            cb_filter = compute_caution_buy_filter(code, tech, alpha_signals, dim_scores)
+            if not cb_filter["passed"]:
+                action = "HOLD"
+                log.info("  🟡 CAUTION_BUY 精筛拦截 %s: %s",
+                         name, "; ".join(f"{f['name']}:{f['detail']}" for f in cb_filter["filters"] if not f["passed"]))
+            # 保存过滤结果供显示
+            _caution_filter = cb_filter
 
         # 仓位建议
         if action in ("STRONG_BUY", "BUY"):
@@ -762,6 +980,7 @@ def _generate_single_signal(code: str, realtime_data: dict,
         },
         "alpha_signals": alpha_signals,
         "change_pct": realtime_data.get("change_pct", 0) if realtime_data else 0,
+        "sell_triggers": sell_triggers,
     }
 
     if buy_confirm:

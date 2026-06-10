@@ -319,7 +319,7 @@ def push_portfolio_summary(pv: dict, target: dict, trailing: list = None) -> lis
                         if t["trailing_triggered"]:
                             lines.append(f"  └ 🔴 移动止盈已触发！建议卖出")
                         elif t["exceeds_profit_take1"]:
-                            lines.append(f"  └ 🟢 已达一档止盈(+15%)，建议减半")
+                            lines.append(f"  └ 🟢 已达一档止盈(+10%)，建议减半（整百股）")
 
         # 止盈止损汇总
         lines.append("")

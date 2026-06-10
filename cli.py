@@ -1639,6 +1639,28 @@ def cmd_etf():
               f"短{r['momentum_short']:.0f} 中{r['momentum_medium']:.0f} "
               f"长{r['momentum_long']:.0f} 趋势{r['trend_strength']:.0f}")
 
+def cmd_journal():
+    """📝 交易日志"""
+    from trading_journal import cmd_journal as _j
+    _j()
+
+def cmd_reflect():
+    """💭 添加交易反思: python3 cli.py reflect <id> "<reflection>" """
+    from trading_journal import add_reflection
+    if len(sys.argv) < 4:
+        print("用法: python3 cli.py reflect <条目ID> \"<反思内容>\" [--profit <盈亏%>] [--score <退出评分>]")
+        return
+    entry_id = int(sys.argv[2])
+    reflection = sys.argv[3]
+    profit = None
+    score = None
+    for i, a in enumerate(sys.argv):
+        if a == "--profit" and i + 1 < len(sys.argv):
+            profit = float(sys.argv[i + 1])
+        if a == "--score" and i + 1 < len(sys.argv):
+            score = float(sys.argv[i + 1])
+    add_reflection(entry_id, reflection, profit_pct=profit, score_at_exit=score)
+
 def cmd_health():
     """🔬 系统健康诊断"""
     from health_check import main as health_main
@@ -1802,6 +1824,8 @@ def main():
         "workflow": lambda: (__import__('daily_workflow').main()),
         "advise": lambda: (__import__('portfolio_advisor').main()),
         "dash": lambda: cmd_dash_dashboard(),
+        "journal": lambda: cmd_journal(),
+        "reflect": lambda: cmd_reflect(),
     }
 
     if cmd in commands:

@@ -304,8 +304,8 @@ RISK_CONFIG = {
     "profit_take_level1": 0.10,        # 止盈一档 +15%→+10%
     "profit_take_level2": 0.20,        # 止盈二档 +30%→+20%
     "profit_take_level3": 0.35,        # 止盈三档 +50%→+35%
-    "partial_exit_level1": 0.33,       # 一档出 50%→33%
-    "partial_exit_level2": 0.33,       # 二档出 30%→33%
+    "partial_exit_level1": 0.50,       # 一档出50%（200股→出100股，与100股最小单位对齐）
+    "partial_exit_level2": 0.50,       # 二档出剩余持仓的50%（剩余100股→全部卖出）
     "optimizer_min_signal": 0.05,      # 组合优化器最小有效信号阈值
     "optimizer_max_position_pct": 0.60, # 组合优化器单只上限 40%→60%
     "optimizer_min_trade": 5000,       # 最小调仓金额

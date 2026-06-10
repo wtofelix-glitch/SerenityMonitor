@@ -818,7 +818,7 @@ def cmd_execution_stats():
 
 
 def cmd_premarket_push():
-    """盘前推送今日计划"""
+    """盘前推送今日计划 — 升级版：含风险等级/止损位/重点关注"""
     from db import get_conn, init_db
     init_db()
     from notifier import send_message
@@ -831,17 +831,116 @@ def cmd_premarket_push():
     """, (today,)).fetchall()
     conn.close()
 
+    # 获取大盘择时 + 市场信号
+    market_info = ""
+    risk_level = "中性"
+    try:
+        from market_timing import get_market_signal
+        sig = get_market_signal()
+        sh = sig.get("sh", {})
+        rsi = sh.get("rsi", 50)
+        ma20 = sh.get("ma20", 0)
+        ma60 = sh.get("ma60", 0)
+        bull = ma20 > ma60
+        if bull and rsi < 30:
+            risk_level = "超卖抄底🟢"
+        elif bull and rsi < 45:
+            risk_level = "回调机会🟢"
+        elif bull and rsi < 65:
+            risk_level = "正常持仓🟡"
+        elif bull:
+            risk_level = "高位警惕🟠"
+        elif rsi < 25:
+            risk_level = "熊市超卖🟢"
+        else:
+            risk_level = "熊市防守🔴"
+        market_info = f"大盘{'牛' if bull else '熊'}市 RSI={rsi:.0f} → {risk_level}"
+    except Exception:
+        pass
+
+    # 当前持仓止损位
+    stop_info = ""
+    try:
+        holdings = get_current_holdings()
+        if holdings:
+            from signal_engine import get_dynamic_stop_loss
+            stops = []
+            for h in holdings:
+                code = h["code"]
+                name = STOCK_MAP.get(code, {}).get("name", code)
+                buy_price = h.get("buy_price", 0)
+                ds = get_dynamic_stop_loss(code, buy_price)
+                amt = h.get("trade_amount", 0) or 0
+                shares = int(amt / buy_price / 100) * 100 if buy_price > 0 else 0
+                current = 0
+                try:
+                    from data_engine import fetch_single
+                    d = fetch_single(code)
+                    current = d.get("price", 0)
+                except Exception:
+                    pass
+                profit = (current - buy_price) / buy_price * 100 if buy_price > 0 and current > 0 else 0
+                stops.append(f"{name} {shares}股 成本{buy_price:.2f} "
+                             f"现{current:.2f}({profit:+.1f}%) 止损{ds['stop_price']:.2f}({ds['method']})")
+            if stops:
+                stop_info = "\n".join(f"  └ {s}" for s in stops)
+    except Exception:
+        pass
+
+    # 今日重点关注标的（前3非持仓）
+    focus_info = ""
+    try:
+        scores = get_latest_scores()
+        holdings_set = {h["code"] for h in holdings} if holdings else set()
+        candidates = []
+        for code, s in scores.items():
+            if code in holdings_set:
+                continue
+            score = s.get("total_score", 0)
+            if score >= 60:
+                details = _parse_details(s.get("details", "{}"))
+                candidates.append({
+                    "code": code,
+                    "name": STOCK_MAP.get(code, {}).get("name", code),
+                    "score": score,
+                    "signal": details.get("signal_action", "HOLD"),
+                })
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        if candidates:
+            top = candidates[:3]
+            focus_info = "\n".join(
+                f"  {c['name']}({c['code']}) 评分{c['score']:.0f} {c['signal']}"
+                for c in top
+            )
+    except Exception:
+        pass
+
+    # 构建盘前简报消息
+    lines = [f"⏰ Serenity 盘前简报 | {today}"]
+    lines.append("=" * 50)
+
+    if market_info:
+        lines.append(f"\n📊 大盘信号")
+        lines.append(f"  {market_info}")
+
+    if stop_info:
+        lines.append(f"\n📈 当前持仓")
+        lines.append(stop_info)
+
+    if focus_info:
+        lines.append(f"\n🎯 今日关注")
+        lines.append(focus_info)
+
+    lines.append("")
+
+    # 原有执行计划信息
     if not pending_orders:
-        # 尝试从昨日的执行计划生成盘前简报
         plan = generate_execution_plan(dry_run=True)
-        if not plan["sells"] and not plan["buys"]:
-            print("📭 今日无待执行信号，无需盘前推送")
-            return
-        _record_execution_orders(plan)
-        msg = plan["summary"]
+        if plan["sells"] or plan["buys"]:
+            _record_execution_orders(plan)
+        lines.append(plan["summary"])
     else:
-        lines = [f"⏰ Serenity 盘前简报 | {today}"]
-        lines.append("=" * 50)
+        lines.append("📋 待执行订单:")
         for row in pending_orders:
             r = dict(row)
             emoji = "🟢" if r["action"] == "BUY" else "🔴"
@@ -852,7 +951,8 @@ def cmd_premarket_push():
         remaining = sum(1 for r in pending_orders if r["status"] == "pending")
         if remaining > 0:
             lines.append(f"\n⏳ {remaining} 笔待执行（开盘后将自动重试）")
-        msg = "\n".join(lines)
+
+    msg = "\n".join(lines)
 
     print(msg)
     try:

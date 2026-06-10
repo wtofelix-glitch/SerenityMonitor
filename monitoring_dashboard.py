@@ -828,6 +828,12 @@ function render(d){
       <div class="card-title">🔬 评分维度预测力 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（corr vs 1日收益）</span></div>
       <div id="dimension-perf-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
     </div>
+
+    <!-- 📝 交易日志 -->
+    <div class="card" id="journal-card">
+      <div class="card-title">📝 交易日志 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">最近交易与反思状态</span></div>
+      <div id="journal-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
+    </div>
   `;
 
   document.getElementById('root').innerHTML=html;
@@ -837,6 +843,7 @@ function render(d){
   loadFactorIC();
   if(data.position_advice)loadPositionAdvice(data.position_advice);
   loadNavHistory();
+  loadJournal();
 }
 
 
@@ -1062,6 +1069,62 @@ function loadNavHistory(){
     ctx.fillText((changePct>=0?'+':'')+changePct.toFixed(1)+'%',w-55,28);
   });
 }
+
+function loadJournal(){
+  var el=document.getElementById('journal-content');
+  fetch('/api/journal').then(function(r){return r.json();}).then(function(d){
+    if(!d.ok){
+      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
+      return;
+    }
+    var entries=d.entries||[];
+    var stats=d.stats||{};
+    var html='';
+    // Stats line
+    html+='<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;color:rgba(255,255,255,0.5)">'
+      +'<span>总计 <span style="color:#FFD700;font-weight:600">'+stats.total+'</span> 条</span>'
+      +(stats.no_reflection>0?'<span style="color:#FF9800">📝 '+stats.no_reflection+' 条未反思</span>':'<span style="color:#00C853">✅ 全部已反思</span>')
+      +'</div>';
+    if(entries.length===0){
+      html+='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无交易日志</div>';
+      el.innerHTML=html;
+      return;
+    }
+    // Header
+    html+='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
+      +'<span style="flex:2">交易</span>'
+      +'<span style="flex:1;text-align:right">盈亏</span>'
+      +'<span style="flex:1;text-align:right">反思</span>'
+      +'</div>';
+    entries.slice(0,5).forEach(function(e){
+      var actionIcon=e.action==='buy'?'🟢':'🔴';
+      var profitStr='—';
+      var profitCls='';
+      if(e.profit_pct!=null){
+        profitStr=(e.profit_pct>=0?'+':'')+e.profit_pct.toFixed(2)+'%';
+        profitCls=e.profit_pct>=0?'up':'down';
+      }
+      var hasReflection = e.reflection && e.reflection.trim()!=='';
+      var reflectionIcon = hasReflection?'✅':'⬜';
+      var reflectionLabel = hasReflection?'已反思':'待反思';
+      var reasonStr = e.reason&&e.reason.trim()?e.reason:'—';
+      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
+        +'<span style="flex:2;font-size:11px">'
+        +'<span>'+actionIcon+'</span> '
+        +'<span style="font-weight:500">'+e.name+'</span>'
+        +'<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:1px">'+e.date+' · '+reasonStr.substring(0,24)+(reasonStr.length>24?'...':'')+'</div>'
+        +'</span>'
+        +'<span style="flex:1;text-align:right;font-size:12px;font-weight:600" class="'+profitCls+'">'+profitStr+'</span>'
+        +'<span style="flex:1;text-align:right;font-size:10px;color:'+(hasReflection?'#00C853':'rgba(255,255,255,0.4)')+'">'+reflectionIcon+' '+reflectionLabel+'</span>'
+        +'</div>';
+    });
+    el.innerHTML=html;
+  }).catch(function(){
+    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
+  });
+}
+
+
 
 function loadFactorIC(){
   var el=document.getElementById('factor-ic-content');
@@ -1409,6 +1472,23 @@ def api_config():
         return jsonify({"ok": True, "msg": f"{code} 设置已保存"})
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 400
+
+
+# ===== 交易日志 API =====
+@app.route("/api/journal")
+def api_journal():
+    """返回近期交易日志和统计"""
+    try:
+        from trading_journal import get_journal, get_stats
+        from config import STOCK_MAP
+        entries = get_journal(limit=10)
+        stats = get_stats()
+        # Attach name to each entry
+        for e in entries:
+            e["name"] = STOCK_MAP.get(e["code"], {}).get("name", e["code"])
+        return jsonify({"ok": True, "entries": entries, "stats": stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ===== 执行计划 API =====

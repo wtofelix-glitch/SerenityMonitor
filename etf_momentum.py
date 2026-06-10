@@ -8,6 +8,7 @@ import ssl
 import urllib.request
 import numpy as np
 from datetime import date
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from db import get_conn
 
@@ -118,7 +119,7 @@ class ETFMomentumStrategy:
         conn.commit()
         return results
 
-    def _fetch_prices(self, etf_code: str, index_sym: str | None) -> list:
+    def _fetch_prices(self, etf_code: str, index_sym: Optional[str]) -> list:
         """抓取 ETF 对应的指数价格数据"""
         if not index_sym:
             return self._get_proxy_prices(etf_code, 70)

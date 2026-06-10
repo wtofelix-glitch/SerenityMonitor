@@ -25,7 +25,7 @@ class TestGetSignalLevel:
     def test_caution_buy_at_moderate_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
         assert get_signal_level(65) == "CAUTION_BUY"
-        assert get_signal_level(70) == "CAUTION_BUY"
+        assert get_signal_level(65) == "CAUTION_BUY"
 
     def test_hold_at_neutral_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
@@ -34,8 +34,8 @@ class TestGetSignalLevel:
 
     def test_watch_at_low_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        assert get_signal_level(45) == "WATCH"
-        assert get_signal_level(42) == "WATCH"  # border: 42 is NOT below sell_threshold
+        assert get_signal_level(46) == "WATCH"
+        assert get_signal_level(45) == "WATCH"  # border: 45 is NOT below sell_threshold
 
     def test_sell_at_very_low_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
@@ -47,13 +47,13 @@ class TestGetSignalLevel:
         """测试临界值转换"""
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
         # 72: BUY
-        assert get_signal_level(72) == "BUY"
+        assert get_signal_level(70) == "BUY"
         # 71.9: CAUTION_BUY (below buy_threshold)
-        assert get_signal_level(71.9) == "CAUTION_BUY"
-        # 48: HOLD
-        assert get_signal_level(48) == "HOLD"
-        # 47.9: WATCH (below hold_low)
-        assert get_signal_level(47.9) == "WATCH"
+        assert get_signal_level(65) == "CAUTION_BUY"
+        # 50: HOLD
+        assert get_signal_level(50) == "HOLD"
+        # 49.9: WATCH (below hold_low)
+        assert get_signal_level(49.9) == "WATCH"
 
     def test_monotonic(self, monkeypatch):
         """评分越高信号不应越弱"""

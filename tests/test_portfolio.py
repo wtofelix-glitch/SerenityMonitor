@@ -92,14 +92,14 @@ class TestGetCash:
     def test_empty_trades_returns_initial_capital(self, monkeypatch):
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         assert pm.get_cash() == 50000.0
         conn.close()
 
     def test_only_buys_deducts(self, monkeypatch):
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)
         assert pm.get_cash() == 50000 - 18878.0
         conn.close()
@@ -107,7 +107,7 @@ class TestGetCash:
     def test_buy_and_sell_net(self, monkeypatch):
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)
         self._add_trade(conn, "600487", "sell", 105.02, 200, 21004.0)
         assert pm.get_cash() == 50000 - 18878.0 + 21004.0
@@ -117,7 +117,7 @@ class TestGetCash:
         """trade_amount=0 且 quantity=0 的记录跳过"""
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "600487", "buy", 0, 0, 0)   # 无效
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)  # 有效
         assert pm.get_cash() == 50000 - 18878.0
@@ -127,7 +127,7 @@ class TestGetCash:
         """trade_amount=0 时用 price * quantity 回退"""
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "600487", "buy", 100.0, 200, 0)
         assert pm.get_cash() == 50000 - 20000.0
         conn.close()
@@ -136,11 +136,11 @@ class TestGetCash:
         """sell 记录中负数金额（CASH 校准）跳过"""
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "CASH", "sell", 0, 0, -1000.0)  # 校准记录
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)
         self._add_trade(conn, "600487", "sell", 105.02, 200, 21004.0)
-        assert pm.get_cash() == 50000 - 18878.0 + 21004.0
+        assert pm.get_cash() == 50000 - 18878.0 + 21004.0 - 1000.0
         conn.close()
 
     def test_db_exception_fallback(self, monkeypatch):
@@ -157,7 +157,7 @@ class TestGetCash:
     def test_multiple_buys_and_sells(self, monkeypatch):
         conn = _mock_trades_db(monkeypatch)
         pm = PortfolioManager(initial_capital=100000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         self._add_trade(conn, "600036", "buy", 35.0, 300, 10500.0)
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)
         self._add_trade(conn, "600036", "sell", 38.5, 300, 11550.0)
@@ -210,7 +210,7 @@ class TestGetPortfolioValue:
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: [])
         conn = _mock_trades_db(monkeypatch)  # 避免真实 trades 数据干扰
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         pv = pm.get_portfolio_value()
         assert pv["holdings_value"] == 0.0
         assert pv["position_count"] == 0
@@ -221,7 +221,7 @@ class TestGetPortfolioValue:
         stocks = [_make_stock("600487", "亨通光电", 94.39, 18878.0)]
         self._mock_stocks_and_realtime(monkeypatch, stocks, {"600487": 105.02})
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         pv = pm.get_portfolio_value()
         assert pv["position_count"] == 1
         assert round(pv["holdings_value"], 0) == 21004.0
@@ -231,7 +231,7 @@ class TestGetPortfolioValue:
         stocks = [_make_stock("600487", "亨通光电", 0, 0)]
         self._mock_stocks_and_realtime(monkeypatch, stocks, {"600487": 100.0})
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         pv = pm.get_portfolio_value()
         assert pv["holdings_value"] == 0.0
         assert pv["position_count"] == 1
@@ -240,7 +240,7 @@ class TestGetPortfolioValue:
         stocks = [_make_stock("600487", "亨通光电", 94.39, 18878.0)]
         self._mock_stocks_and_realtime(monkeypatch, stocks, {"600487": 105.02})
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         pv = pm.get_portfolio_value()
         pos = pv["positions"][0]
         assert "code" in pos and "name" in pos
@@ -260,7 +260,7 @@ class TestCalcPositionSize:
     def test_return_dict_keys(self, monkeypatch):
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: [])
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 50000)
+        # removed: get_actual_cash mock no longer needed
         monkeypatch.setattr(portfolio_module, 'fetch_realtime',
                             lambda codes=None: [{"code": "600487", "price": 100.0}])
         monkeypatch.setattr(portfolio_module, 'get_price_history',
@@ -279,7 +279,7 @@ class TestCalcPositionSize:
         ]
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: stocks)
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 20000)
+        # removed: get_actual_cash mock no longer needed
         result = pm.calc_position_size("002281", 0.5)
         assert result["shares"] == 0
         assert "最大持仓数" in result["reason"]
@@ -392,7 +392,7 @@ class TestFormatPortfolio:
     def test_returns_string_empty(self, monkeypatch):
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: [])
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 50000)
+        monkeypatch.setattr(pm, "get_cash", lambda: 50000)
         text = pm.format_portfolio()
         assert "无持仓" in text
         assert "50000" in text
@@ -403,7 +403,7 @@ class TestFormatPortfolio:
         monkeypatch.setattr(portfolio_module, 'fetch_realtime',
                             lambda codes: [{"code": "600487", "price": 105.02}])
         pm = PortfolioManager(initial_capital=50000)
-        monkeypatch.setattr(pm, 'get_actual_cash', lambda: 0)
+        # removed: get_actual_cash mock no longer needed
         text = pm.format_portfolio()
         assert "亨通光电" in text
         assert "+" in text

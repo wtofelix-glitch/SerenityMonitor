@@ -55,22 +55,26 @@ def check_alerts() -> list[dict]:
             triggered.append({"code": code, "type": "stop_loss", "price": price, "target": stop_loss, "msg": msg})
 
         # 多周期趋势预警：评分持续3期下降且距卖出阈值<10分
-        try:
-            from scorer import score_all
-            all_scores = score_all()
-            my_score = next((r for r in all_scores if r.get("code") == code), None)
-            if my_score:
-                from conviction_engine import multi_cycle_consensus
-                consensus = multi_cycle_consensus(code, my_score["total_score"], "short")
-                if consensus["trend"] == "down" and consensus["consensus_score"] < 58:
-                    score_dist = consensus["consensus_score"] - 48
-                    if score_dist < 10:
-                        msg = (f"📉 {name}({code}) 趋势预警！多周期共识{consensus['consensus_score']:.0f}分 "
-                               f"(距卖出阈值{score_dist:.0f}分)，连续下行中，建议密切关注")
-                        add_alert(code, "trend_warning", price, msg)
-                        triggered.append({"code": code, "type": "trend_warning", "price": price, "msg": msg})
-        except Exception:
-            pass
+        # 止盈标的例外（已盈利≥10%，趋势下行是正常调整，不触发预警）
+        buy_price = s.get("buy_price", 0)
+        profit_pct = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+        if profit_pct < 10:  # 未达止盈区域时才检查趋势预警
+            try:
+                from scorer import score_all
+                all_scores = score_all()
+                my_score = next((r for r in all_scores if r.get("code") == code), None)
+                if my_score:
+                    from conviction_engine import multi_cycle_consensus
+                    consensus = multi_cycle_consensus(code, my_score["total_score"], "short")
+                    if consensus["trend"] == "down" and consensus["consensus_score"] < 58:
+                        score_dist = consensus["consensus_score"] - 48
+                        if score_dist < 10:
+                            msg = (f"📉 {name}({code}) 趋势预警！多周期共识{consensus['consensus_score']:.0f}分 "
+                                   f"(距卖出阈值{score_dist:.0f}分)，连续下行中，建议密切关注")
+                            add_alert(code, "trend_warning", price, msg)
+                            triggered.append({"code": code, "type": "trend_warning", "price": price, "msg": msg})
+            except Exception:
+                pass
 
     return triggered
 

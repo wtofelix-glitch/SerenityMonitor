@@ -212,13 +212,8 @@ def main():
     test_mode = "--test" in sys.argv
 
     if test_mode:
-        # 测试微信
-        wx_ok = send_hermes("weixin", "🧪 Serenity 信号推送测试 — WeChat连通正常 ✓")
-        if wx_ok:
-            log.info("Test OK (WeChat)")
-        else:
-            tg_ok = send_hermes("telegram:8703799832", "🧪 Serenity 信号推送测试 — Telegram降级 ✓")
-            log.warning("Test %s", "OK (Telegram fallback)" if tg_ok else "FAILED")
+        tg_ok = send_telegram("🧪 Serenity 信号推送测试 — Telegram ✓")
+        log.info("Test %s", "OK" if tg_ok else "FAILED")
         return
 
     scores = get_latest_scores()
@@ -226,19 +221,12 @@ def main():
     message = build_signal_message(scores, pv, tt, changed_only=not force)
     save_signal_state(scores, pv)
 
-    # 微信优先
-    wx_ok = send_hermes("weixin", message)
-    if wx_ok:
-        log.info("微信推送成功")
-        return
-
-    # 微信不通→走Telegram
-    log.warning("微信失败，降级走Telegram...")
-    tg_ok = send_hermes("telegram:8703799832", message)
+    # Telegram 直推（微信已禁用 Serenity 推送）
+    tg_ok = send_telegram(message)
     if tg_ok:
-        log.info("Telegram 推送成功（降级）")
+        log.info("Telegram 推送成功")
     else:
-        log.error("Telegram 也失败")
+        log.error("Telegram 推送失败")
         sys.exit(1)
 
 

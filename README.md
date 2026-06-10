@@ -104,12 +104,12 @@ launchctl list | grep serenity
 
 | 信号 | 说明 | 当前胜率 |
 |------|------|---------|
-| STRONG_BUY | 强力买入 (>78分) | — |
-| BUY | 买入 (>72分) | — |
-| CAUTION_BUY | 谨慎买入 (62-72分) | 见 `signal-perf` |
+| STRONG_BUY | 强力买入 (>76分) | — |
+| BUY | 买入 (>70分) | — |
+| CAUTION_BUY | 谨慎买入 (60-70分) | 见 `signal-perf` |
 | HOLD | 持有 | 见 `signal-perf` |
 | STRONG_HOLD | 强烈持有 | 见 `signal-perf` |
-| SELL | 卖出 | — |
+| SELL | 卖出 (<45分) | — |
 | TAKE_PROFIT | 止盈 | 亨通光电 |
 | STOP_LOSS | 止损 | — |
 
@@ -127,9 +127,10 @@ curl http://localhost:8401/api/signal-performance       # JSON API
 ## 持仓规则
 
 - 最多 2 只，单只上限 60%
-- 买入门槛 ≥72 分
-- 持仓跌破 48 分 → 强制卖出
+- 买入门槛 ≥70 分
+- 持仓跌破 50 分 → 强制卖出
 - 大盘危险 → 自动降仓至 1 只 / 40%
+- **A 股最小交易单位: 100 股（一手）** — 所有买卖指令自动对齐整百，不足 100 股的部分不执行
 
 ## 微信推送
 
