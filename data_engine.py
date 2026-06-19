@@ -114,14 +114,29 @@ def parse_sina_line(line: str) -> Optional[dict]:
         return None
 
 
-def fetch_realtime(code_list: Optional[list[str]] = None) -> list[dict]:
+def fetch_realtime(code_list: Optional[list[str]] = None,
+                   source: str = "sina") -> list[dict]:
     """
     获取多只股票的实时行情
     返回解析后的字典列表
+
+    Parameters
+    ----------
+    source : str
+        "sina" (默认) 或 "akshare"。Sina 快但有时限流，AKShare 稳但首调用慢
     """
     if code_list is None:
         code_list = ALL_CODES
 
+    # Filter out pseudo-codes like 'CASH' that don't exist on Sina
+    code_list = [c for c in code_list if c != "CASH"]
+
+    if source == "akshare":
+        return _tencent_fetch_realtime(code_list)
+    if source == "tencent":
+        return _tencent_fetch_realtime(code_list)
+
+    # ── 默认：Sina ──
     if METRICS_AVAILABLE:
         API_CALLS.labels(source="sina").inc()
     try:
@@ -136,6 +151,125 @@ def fetch_realtime(code_list: Optional[list[str]] = None) -> list[dict]:
         parsed = parse_sina_line(line)
         if parsed:
             results.append(parsed)
+    return results
+
+
+def _akshare_fetch_realtime(code_list: list[str]) -> list[dict]:
+    """
+    通过 AKShare 获取 A 股实时行情（备用数据源）
+    映射到与 Sina 相同字段格式，确保下游模块无感切换
+    """
+    import akshare as ak
+
+    if METRICS_AVAILABLE:
+        API_CALLS.labels(source="akshare").inc()
+
+    try:
+        df = ak.stock_zh_a_spot_em()
+    except Exception as e:
+        if METRICS_AVAILABLE:
+            API_ERRORS.labels(source="akshare").inc()
+        log.warning("AKShare 获取行情失败: %s", e)
+        raise
+
+    # 构建代码→行映射（AKShare 使用 6 位纯数字代码）
+    target_codes = {c for c in code_list}
+    results = []
+
+    for _, row in df.iterrows():
+        code = str(row.get("代码", "")).strip()
+        if code not in target_codes:
+            continue
+        try:
+            price = float(row.get("最新价", 0) or 0)
+            close_y = float(row.get("昨收", 0) or 0)
+            results.append({
+                "code": code,
+                "name": str(row.get("名称", code)),
+                "open": float(row.get("今开", 0) or 0),
+                "close_yesterday": close_y,
+                "price": price,
+                "high": float(row.get("最高", 0) or 0),
+                "low": float(row.get("最低", 0) or 0),
+                "volume": int(float(row.get("成交量", 0) or 0)),
+                "amount": float(row.get("成交额", 0) or 0),
+                "buy1": 0,
+                "sell1": 0,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+        except (ValueError, TypeError):
+            continue
+
+    return results
+
+
+def _tencent_fetch_realtime(code_list: list[str]) -> list[dict]:
+    """
+    通过腾讯行情接口获取 A 股实时行情（备用数据源）
+    URL: http://qt.gtimg.cn/q=sh600141,sz000001
+    速度 ~1s，直连无需代理，无墙
+    """
+    import httpx
+    from urllib.parse import urlencode
+
+    if METRICS_AVAILABLE:
+        API_CALLS.labels(source="tencent").inc()
+
+    # 6开头→sh, 0/3开头→sz
+    prefixed = []
+    for c in code_list:
+        if c.startswith(("6", "60")):
+            prefixed.append(f"sh{c}")
+        else:
+            prefixed.append(f"sz{c}")
+
+    url = f"http://qt.gtimg.cn/q={','.join(prefixed)}"
+
+    try:
+        r = httpx.get(url, timeout=8)
+        r.raise_for_status()
+    except Exception as e:
+        if METRICS_AVAILABLE:
+            API_ERRORS.labels(source="tencent").inc()
+        log.warning("腾讯行情获取失败: %s", e)
+        raise
+
+    results = []
+    for line in r.text.strip().split("\n"):
+        try:
+            # v_sh600141="1~兴发集团~600141~37.60~..."
+            if '"' not in line:
+                continue
+            body = line.split('"')[1]
+            fields = body.split("~")
+            if len(fields) < 38:
+                continue
+            code = fields[2]
+            if code not in code_list:
+                continue
+            price = float(fields[3])
+            close_y = float(fields[4])
+            # 成交额：腾讯单位是万元，转元
+            amount_raw = float(fields[37]) if fields[37] else 0
+            results.append({
+                "code": code,
+                "name": fields[1],
+                "open": float(fields[5]) if fields[5] else 0,
+                "close_yesterday": close_y,
+                "price": price,
+                "high": float(fields[33]) if fields[33] else 0,
+                "low": float(fields[34]) if fields[34] else 0,
+                "volume": int(float(fields[6])) if fields[6] else 0,
+                "amount": amount_raw * 10000,  # 万元→元
+                "buy1": float(fields[9]) if fields[9] else 0,
+                "sell1": float(fields[19]) if fields[19] else 0,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+        except (ValueError, TypeError, IndexError):
+            continue
+
     return results
 
 
