@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Serenity Monitor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <!-- ═══ TOP HEADER ═══════════════════════════════════════ -->
+  <header class="top-header">
+    <div class="header-inner">
+      <div class="header-brand">
+        <div class="header-logo">S</div>
+        <span class="header-title">Serenity Monitor</span>
+      </div>
+      <div class="header-meta">
+        <span class="header-time" id="header-time">--</span>
+        <span class="header-status">
+          <span class="status-dot"></span>
+          <span style="font-size:10px;color:var(--text-tertiary)">LIVE</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══ TAB BAR ══════════════════════════════════════════ -->
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="overview">
+      <span>📡</span> 总览
+    </button>
+    <button class="tab-btn" data-tab="holdings">
+      <span>📈</span> 持仓
+    </button>
+    <button class="tab-btn" data-tab="factors">
+      <span>🧮</span> 因子
+    </button>
+    <button class="tab-btn" data-tab="risk">
+      <span>🛡️</span> 风控
+    </button>
+    <button class="tab-btn" data-tab="analysis">
+      <span>📊</span> 分析
+    </button>
+  </nav>
+
+  <!-- ═══ KPI BAR ═════════════════════════════════════════ -->
+  <div class="tab-content active" id="tab-overview">
+    <div class="kpi-bar">
+      <div class="kpi-card" id="kpi-pnl">
+        <div class="kpi-label">总收益</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-value">
+        <div class="kpi-label">总权益</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-cash">
+        <div class="kpi-label">可用资金</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-positions">
+        <div class="kpi-label">持仓</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-signals">
+        <div class="kpi-label">信号</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-target">
+        <div class="kpi-label">目标进度</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+    </div>
+
+    <!-- Overview content rendered by JS -->
+    <div id="overview-content"></div>
+  </div>
+
+  <!-- ═══ TAB: HOLDINGS ════════════════════════════════════ -->
+  <div class="tab-content" id="tab-holdings"></div>
+
+  <!-- ═══ TAB: FACTORS ═════════════════════════════════════ -->
+  <div class="tab-content" id="tab-factors"></div>
+
+  <!-- ═══ TAB: RISK ════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-risk"></div>
+
+  <!-- ═══ TAB: ANALYSIS ════════════════════════════════════ -->
+  <div class="tab-content" id="tab-analysis"></div>
+
+  <script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+</body>
+</html>

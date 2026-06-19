@@ -33,3 +33,8 @@ reviews/
 
 # Runtime data
 data/
+
+# npm junk (accidental installs)
+node_modules/
+package*.json
+xcrun_db
