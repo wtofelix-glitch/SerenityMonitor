@@ -40,28 +40,72 @@ from weight_adjuster import load_adjusted_weights, DEFAULT_WEIGHTS
 app = dash.Dash(__name__, title="Serenity Dash")
 app.config.suppress_callback_exceptions = True
 
+# ── 全局 CSS ────────────────────────────────────────────────
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+<head>
+{%metas%}
+<title>{%title%}</title>
+{%favicon%}
+{%css%}
+<style>
+  body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+</style>
+</head>
+<body>
+{%app_entry%}
+<footer>
+{%config%}
+{%scripts%}
+{%renderer%}
+</footer>
+</body>
+</html>
+'''
+
+# ── Bloomberg/TradingView 风格设计系统 ──────────────────────
 THEME = {
-    "bg": "#1a1a2e",
-    "card": "rgba(255,255,255,0.05)",
-    "text": "#e0e0e0",
+    "bg": "#0E1118",
+    "card": "#1E2230",
+    "card_border": "rgba(255,255,255,0.08)",
+    "card_border_hover": "rgba(255,255,255,0.12)",
+    "text": "#E8EAED",
+    "text_sec": "rgba(232,234,237,0.6)",
+    "text_ter": "rgba(232,234,237,0.35)",
     "gold": "#FFD700",
     "up": "#FF1744",
     "down": "#00C853",
     "neutral": "#BDBDBD",
+    "bg_card_alt": "rgba(255,255,255,0.03)",
+    "chart_grid": "rgba(255,255,255,0.04)",
+    "chart_tick": "rgba(255,255,255,0.25)",
+    "font_family": '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    "font_mono": '"SF Mono", "Fira Code", Consolas, monospace',
 }
 
 NAV_STYLE = {
-    "backgroundColor": "rgba(26,26,46,0.95)",
+    "backgroundColor": "rgba(14,17,24,0.96)",
     "padding": "8px 16px",
-    "borderBottom": "1px solid rgba(255,255,255,0.1)",
+    "borderBottom": "1px solid rgba(255,255,255,0.08)",
+    "backdropFilter": "blur(12px)",
+    "WebkitBackdropFilter": "blur(12px)",
 }
 TAB_STYLE = {
     "backgroundColor": "transparent",
-    "color": "rgba(255,255,255,0.6)",
+    "color": "rgba(232,234,237,0.45)",
     "padding": "10px 20px",
     "border": "none",
     "borderBottom": "2px solid transparent",
     "fontWeight": "500",
+    "fontFamily": '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    "fontSize": "12px",
+    "textTransform": "none",
+    "letterSpacing": "0.3px",
 }
 TAB_SELECTED_STYLE = {
     "backgroundColor": "transparent",
@@ -70,6 +114,46 @@ TAB_SELECTED_STYLE = {
     "border": "none",
     "borderBottom": "2px solid #FFD700",
     "fontWeight": "600",
+    "fontFamily": '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    "fontSize": "12px",
+    "letterSpacing": "0.3px",
+}
+
+# ── 图表通用布局配置 ──────────────────────────────────────
+CHART_LAYOUT = {
+    "paper_bgcolor": "rgba(0,0,0,0)",
+    "plot_bgcolor": "rgba(0,0,0,0)",
+    "font": {"color": THEME["text"], "family": THEME["font_family"]},
+    "margin": {"l": 10, "r": 20, "t": 40, "b": 10},
+    "hovermode": "x unified",
+    "hoverlabel": {
+        "bgcolor": THEME["card"],
+        "bordercolor": THEME["card_border"],
+        "font": {"color": THEME["text"], "size": 11, "family": THEME["font_mono"]},
+    },
+    "xaxis": {
+        "gridcolor": THEME["chart_grid"],
+        "zerolinecolor": "rgba(255,255,255,0.06)",
+        "tickfont": {"color": THEME["chart_tick"], "size": 9, "family": THEME["font_mono"]},
+        "showline": False,
+        "showspikes": True,
+        "spikethickness": 1,
+        "spikedash": "dot",
+        "spikecolor": "rgba(255,255,255,0.1)",
+    },
+    "yaxis": {
+        "gridcolor": THEME["chart_grid"],
+        "zerolinecolor": "rgba(255,255,255,0.06)",
+        "tickfont": {"color": THEME["chart_tick"], "size": 9, "family": THEME["font_mono"]},
+        "showline": False,
+    },
+    "legend": {
+        "orientation": "h",
+        "y": 1.12,
+        "font": {"size": 10, "color": THEME["text_sec"]},
+        "bgcolor": "rgba(0,0,0,0)",
+    },
+    "margin": {"l": 10, "r": 20, "t": 40, "b": 10},
 }
 
 
@@ -231,25 +315,35 @@ def fetch_latest_scores():
 app.layout = html.Div(style={
     "backgroundColor": THEME["bg"],
     "color": THEME["text"],
-    "fontFamily": "-apple-system, BlinkMacSystemFont, sans-serif",
+    "fontFamily": THEME["font_family"],
     "minHeight": "100vh",
     "padding": "0",
+    "WebkitFontSmoothing": "antialiased",
 }, children=[
 
     # ── 顶部导航 ──
     html.Div(style=NAV_STYLE, children=[
         html.Div(style={"display": "flex", "alignItems": "center", "justifyContent": "space-between",
                          "maxWidth": "1200px", "margin": "0 auto"}, children=[
-            html.H1("Serenity Dash", style={
-                "fontSize": "22px", "fontWeight": "700",
-                "background": "linear-gradient(90deg,#FFD700,#FFA500)",
-                "-webkitBackgroundClip": "text",
-                "-webkitTextFillColor": "transparent",
-                "backgroundClip": "text",
-                "margin": "0",
-            }),
+            html.H1([
+                html.Span("S", style={
+                    "display": "inline-flex", "width": "22px", "height": "22px",
+                    "background": "linear-gradient(135deg,#FFD700,#FFA500)",
+                    "borderRadius": "4px", "alignItems": "center", "justifyContent": "center",
+                    "fontSize": "12px", "fontWeight": "700", "color": "#0E1118",
+                    "marginRight": "8px",
+                }),
+                html.Span("Serenity Dash", style={
+                    "fontSize": "18px", "fontWeight": "700",
+                    "background": "linear-gradient(90deg,#FFD700,#FFA500)",
+                    "-webkitBackgroundClip": "text",
+                    "-webkitTextFillColor": "transparent",
+                    "backgroundClip": "text",
+                }),
+            ], style={"display": "flex", "alignItems": "center", "margin": "0"}),
             html.Div(id="last-update", style={
-                "fontSize": "11px", "color": "rgba(255,255,255,0.4)"
+                "fontSize": "11px", "color": "rgba(232,234,237,0.35)",
+                "fontFamily": THEME["font_mono"],
             }),
         ]),
     ]),
@@ -258,6 +352,7 @@ app.layout = html.Div(style={
     dcc.Tabs(id="main-tabs", value="tab-ic", style={
         "backgroundColor": THEME["bg"],
         "maxWidth": "1200px", "margin": "0 auto",
+        "borderBottom": "1px solid rgba(255,255,255,0.08)",
     }, children=[
 
         dcc.Tab(label="📊 IC 归因", value="tab-ic", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
@@ -323,16 +418,14 @@ def _render_ic_tab():
         hovertemplate="%{y}: %{x:+.3f}<extra></extra>",
     ))
     fig_ic_bar.update_layout(
-        title=dict(text="📊 各维度当前 Rank IC", font=dict(color=THEME["text"], size=14)),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(title="Rank IC", gridcolor="rgba(255,255,255,0.06)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
-        margin=dict(l=10, r=40, t=40, b=10),
+        title=dict(text="📊 各维度当前 Rank IC", font=dict(color=THEME["text"], size=13)),
+        **{k: v for k, v in CHART_LAYOUT.items() if k not in ("xaxis", "yaxis", "hovermode")},
+        xaxis=dict(title="Rank IC", **CHART_LAYOUT["xaxis"]),
+        yaxis=dict(**CHART_LAYOUT["yaxis"]),
         height=350,
-        font=dict(color=THEME["text"]),
         hovermode="y",
     )
-    fig_ic_bar.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+    fig_ic_bar.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.15)")
 
     # ── IC 趋势折线图 ──
     fig_trend = go.Figure()
@@ -352,16 +445,9 @@ def _render_ic_tab():
             ))
 
     fig_trend.update_layout(
-        title=dict(text="📈 IC 趋势（近20期）", font=dict(color=THEME["text"], size=14)),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(title="时期", gridcolor="rgba(255,255,255,0.06)"),
-        yaxis=dict(title="Rank IC", gridcolor="rgba(255,255,255,0.06)",
-                   zerolinecolor="rgba(255,255,255,0.2)"),
-        margin=dict(l=10, r=20, t=40, b=10),
+        title=dict(text="📈 IC 趋势（近20期）", font=dict(color=THEME["text"], size=13)),
+        **CHART_LAYOUT,
         height=350,
-        font=dict(color=THEME["text"]),
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.1, font=dict(size=10)),
     )
 
     # ── IC-IR 指标表 ──
@@ -454,9 +540,9 @@ def _render_ic_tab():
 
         # IC 指标表
         html.Div(style={"background": THEME["card"], "borderRadius": "12px", "padding": "12px",
-                        "border": "1px solid rgba(255,255,255,0.08)", "marginTop": "12px"}, children=[
+                        "border": "1px solid rgba(255,255,255,0.08)", "background": THEME["card"], "marginTop": "12px"}, children=[
             html.Div("📋 因子 IC 明细", style={"fontSize": "13px", "fontWeight": "600",
-                     "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                     "color": THEME["text_sec"], "marginBottom": "8px"}),
             ic_table,
         ]),
     ])
@@ -505,16 +591,16 @@ def _render_weight_tab():
     ))
 
     fig_weight.update_layout(
-        title=dict(text="⚖️ 权重对比：默认 vs IC 调整", font=dict(color=THEME["text"], size=14)),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
-        yaxis=dict(title="权重", gridcolor="rgba(255,255,255,0.06)",
+        title=dict(text="⚖️ 权重对比：默认 vs IC 调整", font=dict(color=THEME["text"], size=13)),
+        xaxis=dict(title="评分维度", **CHART_LAYOUT["xaxis"]),
+        yaxis=dict(title="权重", **CHART_LAYOUT["yaxis"],
                    tickformat=".0%", range=[0, max(default_vals + adjusted_vals) * 1.4]),
-        margin=dict(l=10, r=20, t=40, b=60),
-        height=400,
-        font=dict(color=THEME["text"]),
         barmode="group",
-        legend=dict(orientation="h", y=1.1, font=dict(size=11)),
+        legend=CHART_LAYOUT["legend"],
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        height=400,
+        margin=dict(l=10, r=20, t=40, b=60),
+        font=dict(color=THEME["text"], family=THEME["font_family"]),
     )
 
     # ── 调整增量柱状图 ──
@@ -530,16 +616,15 @@ def _render_weight_tab():
     ))
 
     fig_delta.update_layout(
-        title=dict(text="📊 权重调整幅度", font=dict(color=THEME["text"], size=14)),
+        title=dict(text="📊 权重调整幅度", font=dict(color=THEME["text"], size=13)),
+        xaxis=dict(**CHART_LAYOUT["xaxis"]),
+        yaxis=dict(title="变动", **CHART_LAYOUT["yaxis"], tickformat="+.0%"),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
-        yaxis=dict(title="变动", gridcolor="rgba(255,255,255,0.06)",
-                   tickformat="+.0%"),
-        margin=dict(l=10, r=20, t=40, b=60),
         height=300,
-        font=dict(color=THEME["text"]),
+        margin=dict(l=10, r=20, t=40, b=60),
+        font=dict(color=THEME["text"], family=THEME["font_family"]),
     )
-    fig_delta.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.3)")
+    fig_delta.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.15)")
 
     # ── 详情表 ──
     detail_rows = []
@@ -601,9 +686,9 @@ def _render_weight_tab():
         ]),
 
         html.Div(style={"background": THEME["card"], "borderRadius": "12px", "padding": "12px",
-                        "border": "1px solid rgba(255,255,255,0.08)", "marginTop": "12px"}, children=[
+                        "border": "1px solid rgba(255,255,255,0.08)", "background": THEME["card"], "marginTop": "12px"}, children=[
             html.Div("📋 权重调整明细", style={"fontSize": "13px", "fontWeight": "600",
-                     "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                     "color": THEME["text_sec"], "marginBottom": "8px"}),
             detail_table,
         ]),
     ])
@@ -672,15 +757,9 @@ def _render_exec_tab():
             ))
 
         fig_nav.update_layout(
-            title=dict(text="📈 净值曲线 · 交易标记", font=dict(color=THEME["text"], size=14)),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(gridcolor="rgba(255,255,255,0.06)"),
-            yaxis=dict(title="总资产 (¥)", gridcolor="rgba(255,255,255,0.06)"),
-            margin=dict(l=10, r=20, t=40, b=10),
+            title=dict(text="📈 净值曲线 · 交易标记", font=dict(color=THEME["text"], size=13)),
+            **CHART_LAYOUT,
             height=400,
-            font=dict(color=THEME["text"]),
-            hovermode="x unified",
-            legend=dict(orientation="h", y=1.1, font=dict(size=11)),
         )
 
     # ── 交易明细表 ──
@@ -700,13 +779,13 @@ def _render_exec_tab():
 
     trade_table = html.Table([
         html.Thead(html.Tr([
-            html.Th("日期", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
+            html.Th("日期", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
             html.Th("", style={"padding": "6px 4px"}),
-            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("方向", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("价格", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("数量", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("金额", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
+            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("方向", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("价格", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("数量", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("金额", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
         ])),
         html.Tbody(trade_rows),
     ], style={"width": "100%", "fontSize": "12px", "borderCollapse": "collapse"})
@@ -734,13 +813,13 @@ def _render_exec_tab():
 
     perf_table = html.Table([
         html.Thead(html.Tr([
-            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("信号", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("次数", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("1D胜率", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("1D收益", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("3D胜率", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("3D收益", style={"padding": "6px 8px", "textAlign": "right", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
+            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("信号", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("次数", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("1D胜率", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("1D收益", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("3D胜率", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("3D收益", style={"padding": "6px 8px", "textAlign": "right", "color": THEME["text_ter"], "fontSize": "11px"}),
         ])),
         html.Tbody(perf_rows),
     ], style={"width": "100%", "fontSize": "12px", "borderCollapse": "collapse"})
@@ -797,9 +876,13 @@ def _render_exec_tab():
 
         fig_perf.update_layout(
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(**CHART_LAYOUT["xaxis"]),
+            yaxis=dict(**CHART_LAYOUT["yaxis"]),
+            xaxis2=dict(**CHART_LAYOUT["xaxis"]),
+            yaxis2=dict(**CHART_LAYOUT["yaxis"]),
             margin=dict(l=10, r=20, t=40, b=10),
             height=300,
-            font=dict(color=THEME["text"], size=10),
+            font=dict(color=THEME["text"], size=10, family=THEME["font_family"]),
             showlegend=False,
         )
 
@@ -825,7 +908,7 @@ def _render_exec_tab():
 
         # NAV + 交易标记
         html.Div(style={"background": THEME["card"], "borderRadius": "12px", "padding": "12px",
-                        "border": "1px solid rgba(255,255,255,0.08)", "marginBottom": "12px"}, children=[
+                        "border": "1px solid rgba(255,255,255,0.08)", "background": THEME["card"], "marginBottom": "12px"}, children=[
             dcc.Graph(figure=fig_nav, config={"displayModeBar": False}),
         ]),
 
@@ -835,14 +918,14 @@ def _render_exec_tab():
                             "borderRadius": "12px", "padding": "12px",
                             "border": "1px solid rgba(255,255,255,0.08)"}, children=[
                 html.Div("🎯 信号绩效", style={"fontSize": "13px", "fontWeight": "600",
-                         "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                         "color": THEME["text_sec"], "marginBottom": "8px"}),
                 perf_table if signal_perf else html.Div("暂无数据", style={"color": "rgba(255,255,255,0.3)", "textAlign": "center", "padding": "20px"}),
             ]),
             html.Div(style={"flex": "1", "minWidth": "320px", "background": THEME["card"],
                             "borderRadius": "12px", "padding": "12px",
                             "border": "1px solid rgba(255,255,255,0.08)"}, children=[
                 html.Div("📋 最近交易", style={"fontSize": "13px", "fontWeight": "600",
-                         "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                         "color": THEME["text_sec"], "marginBottom": "8px"}),
                 trade_table if trades else html.Div("暂无交易", style={"color": "rgba(255,255,255,0.3)", "textAlign": "center", "padding": "20px"}),
             ]),
         ]),
@@ -855,9 +938,9 @@ def _render_exec_tab():
 
         # 执行日志
         html.Div(style={"background": THEME["card"], "borderRadius": "12px", "padding": "12px",
-                        "border": "1px solid rgba(255,255,255,0.08)", "marginTop": "12px"}, children=[
+                        "border": "1px solid rgba(255,255,255,0.08)", "background": THEME["card"], "marginTop": "12px"}, children=[
             html.Div("📝 自动执行日志（近7天）", style={"fontSize": "13px", "fontWeight": "600",
-                     "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                     "color": THEME["text_sec"], "marginBottom": "8px"}),
             exec_table if exec_log else html.Div("暂无日志", style={"color": "rgba(255,255,255,0.3)", "textAlign": "center", "padding": "20px"}),
         ]),
     ])
@@ -941,9 +1024,9 @@ def _render_risk_tab():
 
     bl_table = html.Table([
         html.Thead(html.Tr([
-            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("代码", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
-            html.Th("解禁日", style={"padding": "6px 8px", "textAlign": "left", "color": "rgba(255,255,255,0.5)", "fontSize": "11px"}),
+            html.Th("标的", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("代码", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
+            html.Th("解禁日", style={"padding": "6px 8px", "textAlign": "left", "color": THEME["text_ter"], "fontSize": "11px"}),
         ])),
         html.Tbody(blacklist_rows),
     ], style={"width": "100%", "fontSize": "12px", "borderCollapse": "collapse"})
@@ -990,7 +1073,7 @@ def _render_risk_tab():
                             "border": "1px solid rgba(255,255,255,0.08)"}, children=[
                 html.Div(f"📋 黑名单 ({blacklist_count})",
                          style={"fontSize": "13px", "fontWeight": "600",
-                                "color": "rgba(255,255,255,0.6)", "marginBottom": "8px"}),
+                                "color": THEME["text_sec"], "marginBottom": "8px"}),
                 bl_table,
             ])] if blacklist_rows else []),
     ])
@@ -1007,10 +1090,12 @@ def _stat_card(title, value, subtitle=""):
         "borderRadius": "12px", "padding": "12px 16px",
         "border": "1px solid rgba(255,255,255,0.08)",
     }, children=[
-        html.Div(title, style={"fontSize": "11px", "color": "rgba(255,255,255,0.5)",
-                                "marginBottom": "4px"}),
-        html.Div(value, style={"fontSize": "22px", "fontWeight": "700", "color": THEME["gold"]}),
-        html.Div(subtitle, style={"fontSize": "10px", "color": "rgba(255,255,255,0.3)",
+        html.Div(title, style={"fontSize": "11px", "color": THEME["text_ter"],
+                                "marginBottom": "4px", "fontWeight": "500",
+                                "letterSpacing": "0.3px", "textTransform": "uppercase"}),
+        html.Div(value, style={"fontSize": "22px", "fontWeight": "700", "color": THEME["gold"],
+                                "fontFamily": THEME["font_mono"]}),
+        html.Div(subtitle, style={"fontSize": "10px", "color": THEME["text_ter"],
                                    "marginTop": "2px"}),
     ])
 
@@ -1018,11 +1103,11 @@ def _stat_card(title, value, subtitle=""):
 def _error_card(msg):
     """错误提示卡片"""
     return html.Div(style={
-        "background": "rgba(255,23,68,0.08)",
-        "border": "1px solid rgba(255,23,68,0.2)",
+        "background": "rgba(255,23,68,0.06)",
+        "border": "1px solid rgba(255,23,68,0.15)",
         "borderRadius": "12px", "padding": "20px", "textAlign": "center",
     }, children=[
-        html.Div(msg, style={"color": THEME["down"], "fontSize": "14px"}),
+        html.Div(msg, style={"color": THEME["down"], "fontSize": "13px"}),
     ])
 
 

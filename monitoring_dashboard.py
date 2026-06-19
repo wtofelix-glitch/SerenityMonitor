@@ -11,7 +11,7 @@ function loadExecutionPlan(){
     if(!card) return;
     if(d.already_executed){
       card.style.display="block";
-      document.getElementById("exec-plan-content").innerHTML='<div style="padding:12px;text-align:center;color:#69F0AE">✅ 今日计划已执行</div>';
+      document.getElementById("exec-plan-content").innerHTML='<div style="padding:12px;text-align:center;color:#FF5252">✅ 今日计划已执行</div>';
       return;
     }
     var hasActions = (d.sells&&d.sells.length>0) || (d.buys&&d.buys.length>0);
@@ -19,22 +19,22 @@ function loadExecutionPlan(){
     card.style.display="block";
     var h='';
     if(d.sells&&d.sells.length>0){
-      h+='<div style="font-size:12px;color:#FF6E6E;margin-bottom:4px">🔴 卖出</div>';
+      h+='<div style="font-size:12px;color:#69F0AE;margin-bottom:4px">🟢 卖出</div>';
       d.sells.forEach(function(s){
         h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05)">';
         h+='<div><span style="font-weight:600">'+s.name+'</span> <span style="font-size:10px;color:rgba(255,255,255,.4)">'+s.code+'</span>';
         h+='<div style="font-size:10px;color:rgba(255,255,255,.3)">'+s.shares+'股 ~¥'+(s.estimated_proceeds||0).toFixed(0)+' | '+(s.reasons||[]).join(", ")+'</div></div>';
-        h+='<span style="font-size:11px;color:'+(s.profit_pct>=0?'#00C853':'#FF1744')+'">'+(s.profit_pct>=0?'+':'')+(s.profit_pct||0).toFixed(1)+'%</span>';
+        h+='<span style="font-size:11px;color:'+(s.profit_pct>=0?'#FF1744':'#00C853')+'">'+(s.profit_pct>=0?'+':'')+(s.profit_pct||0).toFixed(1)+'%</span>';
         h+='</div>';
       });
     }
     if(d.buys&&d.buys.length>0){
-      h+='<div style="font-size:12px;color:#69F0AE;margin:8px 0 4px">🟢 买入</div>';
+      h+='<div style="font-size:12px;color:#FF5252;margin:8px 0 4px">🔴 买入</div>';
       d.buys.forEach(function(b){
         h+='<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05)">';
         h+='<div><span style="font-weight:600">'+b.name+'</span> <span style="font-size:10px;color:rgba(255,255,255,.4)">'+b.code+'</span>';
         h+='<div style="font-size:10px;color:rgba(255,255,255,.3)">'+b.shares+'股 @'+b.price+' ≈¥'+(b.amount||0).toFixed(0)+' | 评分'+(b.score||0).toFixed(0)+'</div></div>';
-        h+='<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(0,200,83,.15);color:#69F0AE">'+(b.signal||'BUY')+'</span>';
+        h+='<span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,23,68,.15);color:#FF5252">'+(b.signal||'BUY')+'</span>';
         h+='</div>';
       });
     }
@@ -83,8 +83,9 @@ def _ignore_term(signum, frame):
 signal.signal(signal.SIGTERM, _ignore_term)
 
 import json
+import time
 from datetime import datetime, timedelta
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template, request
 
 from serenity_logger import get_logger
 from db import get_conn
@@ -93,9 +94,11 @@ log = get_logger(__name__)
 
 # --- 项目模块 ---
 from config import ALL_CODES, STOCK_MAP
+from data_engine import fetch_realtime, sina_fetch_raw
 from scorer import score_all
 from factor_engine import get_current_signals, SIGNAL_FACTORS
 from market_timing import get_market_signal
+from market_sense import MarketSense
 from sector_rotation import SectorRotationEngine
 from rating_engine import get_rating
 from dividend_engine import DividendEngine
@@ -213,6 +216,15 @@ def gather_monitor_data():
 
     # 3. 大盘择时
     market = get_market_signal()
+    
+    # 3.5 操作模式（均值回归/趋势跟踪）
+    try:
+        _ms_dash = MarketSense()
+        operational_mode = _ms_dash.get_operational_mode()
+    except Exception:
+        operational_mode = {"mode": "neutral", "factor_invert": False, 
+                           "sell_trigger_weight": 1.0, "buy_threshold_shift": 0,
+                           "regime_label": "震荡市", "avg_20d_return": 0}
 
     # 4. 行业轮动（5分钟缓存）
     if _cache["sectors"] and _cache_time["sectors"] and (now - _cache_time["sectors"]) < CACHE_TTL["sectors"]:
@@ -274,6 +286,8 @@ def gather_monitor_data():
         "signal_brief": _build_signal_brief(scores, _get_portfolio_summary()),
         "target_tracker": _get_target_tracker(),
         "position_advice": _get_position_advice(scores),
+        "stop_conditions": _get_stop_conditions(),
+        "operational_mode": operational_mode,
     }
 
 
@@ -286,13 +300,29 @@ def _get_position_advice(scores):
         positions = pv.get("positions", [])
         score_map = {s["code"]: s for s in scores}
 
+        # 获取持仓感知信号（解决看板直接引用原始BUY信号的问题）
+        try:
+            from signal_engine import get_position_signal
+        except ImportError:
+            get_position_signal = None
+
         advice = []
         for pos in positions:
             code = pos["code"]
             sig = score_map.get(code, {})
             score = sig.get("total_score", 50)
-            action = sig.get("signal_action", "HOLD")
+            raw_action = sig.get("signal_action", "HOLD")
             profit = pos.get("profit_pct", 0)
+
+            # 使用持仓感知信号覆盖原始BUY信号
+            action = raw_action
+            if get_position_signal and raw_action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+                try:
+                    final_signal = get_position_signal(score, profit, is_holding=True)
+                    if final_signal in ("STRONG_HOLD", "HOLD"):
+                        action = final_signal
+                except Exception:
+                    pass  # fallback to raw action
 
             # Kelly 仓位计算（跳过持仓数限制，已有持仓需要算Kelly）
             try:
@@ -367,6 +397,46 @@ def _get_position_advice(scores):
         }
     except Exception as e:
         return {"error": str(e)}
+
+def _get_stop_conditions():
+    """获取止盈止损触发状态"""
+    try:
+        from portfolio import PortfolioManager
+        pm = PortfolioManager()
+        actions = pm.check_stop_conditions()
+        trailing = pm.get_trailing_stop_levels()
+        # 合并：每个持仓的止盈止损状态
+        result = []
+        trail_map = {t["code"]: t for t in trailing}
+        action_map = {}
+        for a in actions:
+            code = a["code"]
+            if code not in action_map:
+                action_map[code] = []
+            action_map[code].append({
+                "action": a.get("action", ""),
+                "reason": a.get("reason", ""),
+                "profit_pct": a.get("profit_pct", 0),
+            })
+        for t in trailing:
+            code = t["code"]
+            result.append({
+                "code": code,
+                "name": t.get("name", code),
+                "current": t.get("current", 0),
+                "entry": t.get("entry", 0),
+                "peak": t.get("peak", 0),
+                "profit_pct": round(t.get("profit_pct", 0), 1),
+                "peak_profit_pct": round(t.get("peak_profit_pct", 0), 1),
+                "drawdown_from_peak": round(t.get("drawdown_from_peak", 0), 1),
+                "trailing_triggered": t.get("trailing_triggered", False),
+                "exceeds_profit_take1": t.get("exceeds_profit_take1", False),
+                "exceeds_profit_take2": t.get("exceeds_profit_take2", False),
+                "actions": action_map.get(code, []),
+            })
+        return result
+    except Exception:
+        return []
 
 def _get_target_tracker():
     """目标追踪：5.1万 → 10.2万 / 3个月"""
@@ -469,6 +539,13 @@ def _get_portfolio_summary():
         return _cache["pf"] or {"positions": 0, "total_value": 0}
 
 
+@app.route("/")
+def index():
+    """root → ngrok 隧道入口，重定向到移动端看板"""
+    from flask import redirect
+    return redirect("/monitor")
+
+
 @app.route("/api/monitor-data")
 def api_monitor_data():
     API_CALLS.labels(source="dashboard_api").inc()
@@ -485,767 +562,10 @@ def api_monitor_data():
 # =============================================================
 # 主页面
 # =============================================================
-HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Serenity Monitor</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-body{background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e0e0e0;min-height:100vh;padding:12px 10px 80px}
-.card{background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:12px;margin-bottom:12px}
-.card-title{font-size:13px;font-weight:600;color:rgba(255,255,255,0.6);margin-bottom:8px;letter-spacing:0.5px}
-.top-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.top-bar h1{font-size:20px;font-weight:700;background:linear-gradient(90deg,#FFD700,#FFA500);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
-.top-bar .meta{text-align:right;font-size:11px;color:rgba(255,255,255,0.4);line-height:1.4}
-.up{color:#FF1744}
-.down{color:#00C853}
-.neutral{color:#FFD700}
-.text-muted{color:rgba(255,255,255,0.4)}
-/* --- 持仓卡 --- */
-.holding-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-.holding-item{background:rgba(255,255,255,0.03);border-radius:10px;padding:8px;text-align:center}
-.holding-name{font-size:12px;font-weight:600;margin-bottom:2px}
-.holding-code{font-size:10px;color:rgba(255,255,255,0.3);margin-bottom:4px}
-.holding-pnl{font-size:16px;font-weight:700;margin-bottom:2px}
-.holding-price{font-size:11px;color:rgba(255,255,255,0.5)}
-.holding-signal{font-size:9px;margin-top:4px;padding:2px 6px;border-radius:4px;display:inline-block;font-weight:600}
-.signal-STRONG_BUY{background:rgba(0,200,83,0.2);color:#00C853}
-.signal-BUY{background:rgba(0,200,83,0.15);color:#69F0AE}
-.signal-CAUTION_BUY{background:rgba(0,200,83,0.1);color:#B9F6CA}
-.signal-HOLD{background:rgba(255,215,0,0.15);color:#FFD700}
-.signal-WATCH{background:rgba(255,215,0,0.1);color:#FFE082}
-.signal-SELL{background:rgba(255,23,68,0.15);color:#FF1744}
-.signal-STOP_LOSS{background:rgba(255,23,68,0.2);color:#FF5252}
-/* --- 因子表 --- */
-.factor-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
-.factor-wrap table{font-size:10px;border-collapse:collapse;white-space:nowrap;width:100%}
-.factor-wrap th{position:sticky;top:0;background:rgba(26,26,46,0.95);padding:5px 4px;text-align:center;font-weight:600;color:rgba(255,255,255,0.6);border-bottom:1px solid rgba(255,255,255,0.1);font-size:9px}
-.factor-wrap td{padding:4px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.04)}
-.factor-wrap .stock-name{text-align:left;font-weight:600;font-size:10px;padding-left:4px;white-space:nowrap;position:sticky;left:0;background:rgba(26,26,46,0.95);z-index:1}
-.factor-val{font-variant-numeric:tabular-nums}
-/* --- 大盘择时 --- */
-.market-row{display:flex;gap:8px;flex-wrap:wrap}
-.market-item{flex:1;min-width:80px;background:rgba(255,255,255,0.03);border-radius:8px;padding:6px 8px;text-align:center;font-size:11px}
-.market-item .label{color:rgba(255,255,255,0.4);font-size:9px}
-.market-item .value{font-weight:600;font-size:13px;margin-top:2px}
-.advice-box{background:rgba(255,215,0,0.1);border:1px solid rgba(255,215,0,0.2);border-radius:8px;padding:8px 10px;margin-top:8px;text-align:center;font-size:13px;font-weight:600;color:#FFD700}
-/* --- 行业轮动 --- */
-.sector-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.sector-item{display:flex;justify-content:space-between;align-items:center;background:rgba(255,255,255,0.03);border-radius:8px;padding:6px 8px;font-size:12px}
-.sector-name{font-weight:500}
-.sector-change{font-weight:700;font-size:13px}
-.sector-signal{border-radius:4px;padding:2px 6px;font-size:9px;font-weight:600}
-/* --- 评级圆点 --- */
-.rating-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
-.rating-item{background:rgba(255,255,255,0.03);border-radius:8px;padding:6px;text-align:center}
-.rating-dot{width:24px;height:24px;border-radius:12px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;margin-bottom:2px}
-.rating-A{background:rgba(0,200,83,0.3);color:#00C853}
-.rating-B{background:rgba(105,240,174,0.2);color:#69F0AE}
-.rating-C{background:rgba(255,215,0,0.2);color:#FFD700}
-.rating-D{background:rgba(255,152,0,0.2);color:#FF9800}
-.rating-E{background:rgba(255,23,68,0.2);color:#FF1744}
-.rating-N\A{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3)}
-.rating-name{font-size:10px;color:rgba(255,255,255,0.5)}
-/* --- 底部导航 --- */
-.bottom-nav{position:fixed;bottom:0;left:0;right:0;background:rgba(26,26,46,0.95);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,0.1);display:flex;justify-content:space-around;padding:10px 0;padding-bottom:calc(10px + env(safe-area-inset-bottom,0))}
-.nav-btn{background:0 0;border:none;color:rgba(255,255,255,0.5);font-size:11px;padding:6px 16px;border-radius:8px;cursor:pointer;transition:all 0.2s;display:flex;flex-direction:column;align-items:center;gap:3px}
-.nav-btn .icon{font-size:18px}
-.nav-btn.active,.nav-btn:active{color:#FFD700;background:rgba(255,215,0,0.1)}
-.loading{text-align:center;padding:60px 0;color:rgba(255,255,255,0.3);font-size:14px}
-.loading .spinner{display:inline-block;width:24px;height:24px;border:3px solid rgba(255,255,255,0.1);border-top-color:#FFD700;border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:8px}
-@keyframes spin{to{transform:rotate(360deg)}}
-</style>
-</head>
-<body>
-
-<div id="root">
-  <div class="loading">
-    <div class="spinner"></div>
-    <div>加载中...</div>
-  </div>
-</div>
-
-<div class="bottom-nav">
-  <button class="nav-btn" onclick="refresh()"><span class="icon">🔄</span>刷新</button>
-  <button class="nav-btn" onclick="showTrade()"><span class="icon">📊</span>调仓</button>
-  <button class="nav-btn" onclick="showConfig()"><span class="icon">⚙️</span>设置</button>
-</div>
-
-<script>
-function fmt(n,d){if(n==null||isNaN(n))return'-';return Number(n).toFixed(d==null?2:d)}
-function clsPct(v){if(v==null)return'';return v>=0?'up':'down'}
-function pctStr(v){if(v==null||isNaN(v))return'-';let s=v>=0?'+':'';return s+v.toFixed(2)+'%'}
-function sigCls(s){return'signal-'+s}
-
-function render(d){
-  const data=d.data;if(!data)return;
-  const scores=data.scores||[];
-  const factors=data.factors||[];
-  const market=data.market||{};
-  const sectors=data.sectors||[];
-  const ratings=data.ratings||[];
-  const sf=data.signal_factors||[];
-  const fl=data.factor_labels||{};
-  const etfTop5=data.etf_top5||[];
-  const divTop5=data.dividend_top5||[];
-  const pf=data.portfolio_summary||{};
-  const pfDetails=pf.position_details||[];
-  const sb=data.signal_brief||{};
-
-  // 持仓盈亏卡（真实 P&L）
-  let posHtml='';
-  if(pfDetails.length>0){
-    posHtml=pfDetails.map(p=>{
-      const profitCls=p.profit_pct>=0?'up':'down';
-      return `
-        <div class="holding-item">
-          <div class="holding-name ${profitCls}">${p.name||'--'}</div>
-          <div class="holding-code">${p.code||''}</div>
-          <div class="holding-pnl ${profitCls}">${(p.profit_pct>=0?'+':'')+p.profit_pct.toFixed(2)}%</div>
-          <div class="holding-price">成本 ¥${fmt(p.buy_price)} · 现价 ¥${fmt(p.current_price)}</div>
-        </div>`}).join('');
-  } else {
-    posHtml='<div class="text-muted" style="padding:8px;text-align:center">暂无持仓</div>';
-  }
-
-  let html=`
-    <div class="top-bar">
-      <h1>Serenity Monitor</h1>
-      <div class="meta">
-        <div>${data.date}</div>
-        <div>${data.timestamp}</div>
-      </div>
-    </div>
-
-    <!-- 信号简报 -->
-    ${(sb.buy_count>0||sb.risk_count>0)?`
-    <div class="card" style="background:rgba(255,215,0,0.08);border-color:rgba(255,215,0,0.25)">
-      <div class="card-title">📡 今日信号</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:12px">
-        ${sb.buy_candidates&&sb.buy_candidates.map(b=>`
-          <div style="flex:1;min-width:120px;background:rgba(0,200,83,0.08);border-radius:8px;padding:6px 8px">
-            <span style="color:#00C853;font-weight:700">🟢 关注买入</span>
-            <span style="font-weight:600">${b.name}</span>
-            <span style="color:rgba(255,255,255,0.5);font-size:10px">${b.score}分 · ${b.action}</span>
-          </div>
-        `).join('')}
-        ${sb.risk_alerts&&sb.risk_alerts.map(r=>`
-          <div style="flex:1;min-width:120px;background:rgba(255,23,68,0.08);border-radius:8px;padding:6px 8px">
-            <span style="color:#FF1744;font-weight:700">🔴 ${r.action}</span>
-            <span style="font-weight:600">${r.name}</span>
-            <span style="color:rgba(255,255,255,0.5);font-size:10px">${r.score}分</span>
-          </div>
-        `).join('')}
-      </div>
-    </div>`:''}
-    <!-- 📐 仓位优化建议 -->
-    <div class="card" id="position-advice-card">
-      <div class="card-title">📐 仓位优化 · <span style="color:rgba(255,255,255,0.4);font-size:11px">Kelly公式 + 信号强度</span></div>
-      <div id="position-advice-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-
-
-    <!-- 持仓盈亏卡 -->
-    <div class="card">
-      <div class="card-title">📈 持仓盈亏 · <span style="color:#FFD700">${pf.positions||0}只</span> · 总权益 ¥${fmt(pf.total_value,0)} | 浮盈 <span class="${(pf.total_profit_pct||0)>=0?'up':'down'}">${(pf.total_profit_pct||0)>=0?'+':''}${fmt(pf.total_profit_pct,2)}%</span></div>
-      <div class="holding-grid">
-        ${posHtml}
-      </div>
-
-    <!-- 🎯 翻倍目标追踪 -->
-    <div class="card" style="background:linear-gradient(135deg,rgba(255,215,0,0.08),rgba(255,165,0,0.05));border-color:rgba(255,215,0,0.2)">
-      <div class="card-title">🎯 翻倍目标追踪 · <span style="color:#FFD700">${data.target_tracker?.initial_capital?fmt(data.target_tracker.initial_capital,0)+'→':''}${data.target_tracker?.target_capital?fmt(data.target_tracker.target_capital,0):'10.2万'} / ${data.target_tracker?.days_total||90}天</span></div>
-      <div style="padding:6px 0">
-        <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:4px">
-          <span>进度 <span style="color:#FFD700;font-weight:700">${(data.target_tracker?.progress_pct||0).toFixed(1)}%</span></span>
-          <span style="color:rgba(255,255,255,0.4)">${data.target_tracker?.days_elapsed||0}/${data.target_tracker?.days_total||90}天</span>
-          <span>需月收益 <span style="color:#00C853;font-weight:700">${(data.target_tracker?.required_monthly_return||0)>=0?'+':''}${(data.target_tracker?.required_monthly_return||0).toFixed(1)}%</span></span>
-        </div>
-        <div style="background:rgba(255,255,255,0.06);border-radius:6px;height:8px;overflow:hidden">
-          <div style="background:linear-gradient(90deg,#FFD700,#FF6D00);height:100%;width:${Math.min(100,data.target_tracker?.progress_pct||0)}%;border-radius:6px;transition:width 0.5s"></div>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:9px;color:rgba(255,255,255,0.3);margin-top:2px">
-          <span>¥${fmt(data.target_tracker?.initial_capital,0)}</span>
-          <span>¥${fmt(data.target_tracker?.target_capital,0)}</span>
-        </div>
-        <div style="text-align:center;margin-top:6px;font-size:10px;color:rgba(255,255,255,0.5)">
-          还差 <span style="color:#FFD700;font-weight:600">¥${fmt(data.target_tracker?.remaining,0)}</span> · 
-          ${(data.target_tracker?.required_monthly_return||0)>25?'⚠️ 月需收益偏高，需更积极策略':(data.target_tracker?.required_monthly_return||0)>15?'⚡ 中等难度，精选标的':(data.target_tracker?.required_monthly_return||0)>0?'✅ 节奏正常，按计划执行':'🎉 已达成或接近目标！'}
-        </div>
-      </div>
-    </div>
-
-    
-    <!-- 📈 净值曲线 -->
-    <div class="card" id="nav-card">
-      <div class="card-title">📈 净值曲线</div>
-      <div id="nav-chart" style="height:160px;position:relative;padding:8px 0">
-        <canvas id="navCanvas" style="width:100%;height:140px"></canvas>
-      </div>
-    </div>
-
-    <!-- 评分排行条 -->
-    <div class="card">
-      <div class="card-title">🏆 评分排行</div>
-      <div style="display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:2px 0">
-        ${scores.map((s,i)=>`
-          <div style="flex:0 0 auto;min-width:72px;background:rgba(255,255,255,0.03);border-radius:8px;padding:6px 8px;text-align:center">
-            <div style="font-size:9px;color:rgba(255,255,255,0.4)">#${s.rank}</div>
-            <div style="font-size:12px;font-weight:600;white-space:nowrap">${s.name}</div>
-            <div style="font-size:15px;font-weight:700;color:${s.total_score>=65?'#00C853':s.total_score>=50?'#FFD700':'#FF1744'}">${fmt(s.total_score,0)}</div>
-            <div style="font-size:9px;color:rgba(255,255,255,0.35)">${s.signal_action||'HOLD'}</div>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-
-    <!-- 14因子矩阵 -->
-    <div class="card">
-      <div class="card-title">🧮 14因子信号矩阵</div>
-      <div class="factor-wrap">
-        <table>
-          <thead><tr>
-            <th>标的</th>
-            ${sf.map(f=>'<th>'+ (fl[f]||f) +'</th>').join('')}
-          </tr></thead>
-          <tbody>
-            ${factors.map(stk=>`
-              <tr>
-                <td class="stock-name">${stk.name}</td>
-                ${sf.map(f=>{
-                  let v=stk[f];
-                  let c='';let disp='-';
-                  if(v!=null){disp=fmt(v,3);c=v>=0?'up':'down';}
-                  return '<td class="factor-val '+c+'">'+disp+'</td>';
-                }).join('')}
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 大盘择时 -->
-    <div class="card">
-      <div class="card-title">📊 大盘择时</div>
-      <div class="market-row">
-        <div class="market-item">
-          <div class="label">上证</div>
-          <div class="value">${market.sh?fmt(market.sh.last_close):'--'}</div>
-          <div class="text-muted" style="font-size:9px">${market.sh?market.sh.trend:'--'}</div>
-        </div>
-        <div class="market-item">
-          <div class="label">沪深300</div>
-          <div class="value">${market.hs300?fmt(market.hs300.last_close):'--'}</div>
-          <div class="text-muted" style="font-size:9px">${market.hs300?market.hs300.trend:'--'}</div>
-        </div>
-        <div class="market-item">
-          <div class="label">RSI</div>
-          <div class="value ${market.avg_rsi>=70?'down':market.avg_rsi<=30?'up':'neutral'}">${market.avg_rsi!=null?fmt(market.avg_rsi,1):'--'}</div>
-          <div class="text-muted" style="font-size:9px">${market.overall_trend||'--'}</div>
-        </div>
-      </div>
-      <div class="advice-box">
-        💡 ${market.overall_advice||'等待数据...'}
-      </div>
-    </div>
-
-    <!-- 行业轮动 -->
-    <div class="card">
-      <div class="card-title">🔄 行业轮动</div>
-      <div class="sector-grid">
-        ${sectors.map(s=>`
-          <div class="sector-item">
-            <span class="sector-name">${s.sector}</span>
-            <span class="sector-change ${clsPct(s.change)}">${pctStr(s.change)}</span>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-
-    <!-- 综合评级 -->
-    <div class="card">
-      <div class="card-title">⭐ 综合评级</div>
-      <div class="rating-grid">
-        ${ratings.map(r=>`
-          <div class="rating-item">
-            <div class="rating-dot rating-${r.rating.replace('/','\\/')}">${r.rating}</div>
-            <div style="font-size:12px;font-weight:600">${r.name}</div>
-            <div class="rating-name">${r.signal_label||''}</div>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-
-    <!-- ETF 动量轮动 -->
-    <div class="card">
-      <div class="card-title">📈 ETF 动量轮动 Top 5</div>
-      <div class="sector-grid">
-        ${etfTop5.map((e,i)=>`
-          <div class="sector-item">
-            <span class="sector-name">#${e.rank||i+1} ${e.name||e.etf_code}</span>
-            <span class="sector-change ${e.total_score>=70?'up':e.total_score>=50?'neutral':'down'}">${fmt(e.total_score,0)}分</span>
-          </div>
-        `).join('')||'<div class="text-muted" style="padding:8px">暂无数据</div>'}
-      </div>
-    </div>
-
-    <!-- 红利低波 -->
-    <div class="card">
-      <div class="card-title">💰 红利低波 Top 5</div>
-      <div class="sector-grid">
-        ${divTop5.map(r=>`
-          <div class="sector-item">
-            <span class="sector-name">${r.name||r.code}</span>
-            <span class="sector-change ${r.total_score>=70?'up':r.total_score>=50?'neutral':'down'}">${fmt(r.total_score,0)}分</span>
-          </div>
-        `).join('')||'<div class="text-muted" style="padding:8px">暂无数据</div>'}
-      </div>
-    </div>
-
-    <!-- 因子 IC 归因 -->
-    <div class="card" id="factor-ic-card">
-      <div class="card-title">📊 因子 IC 归因 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（近30天·Rank IC）</span></div>
-      <div id="factor-ic-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-
-    <!-- 信号绩效回顾 -->
-    <div class="card" id="signal-history-card">
-      <div class="card-title">📊 近7天买入信号绩效</div>
-      <div id="signal-history-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-
-    <!-- 信号类型胜率 -->
-    <div class="card" id="signal-perf-card">
-      <div class="card-title">📊 信号类型绩效 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（全部历史）</span></div>
-      <div id="signal-perf-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-
-    <!-- 维度有效性 -->
-    <div class="card" id="dimension-perf-card">
-      <div class="card-title">🔬 评分维度预测力 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">（corr vs 1日收益）</span></div>
-      <div id="dimension-perf-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-
-    <!-- 📝 交易日志 -->
-    <div class="card" id="journal-card">
-      <div class="card-title">📝 交易日志 <span style="font-size:9px;color:rgba(255,255,255,0.3);font-weight:400">最近交易与反思状态</span></div>
-      <div id="journal-content" style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;padding:10px">加载中...</div>
-    </div>
-  `;
-
-  document.getElementById('root').innerHTML=html;
-  loadSignalHistory();
-  loadSignalPerformance();
-  loadDimensionEffectiveness();
-  loadFactorIC();
-  if(data.position_advice)loadPositionAdvice(data.position_advice);
-  loadNavHistory();
-  loadJournal();
-}
-
-
-function loadPositionAdvice(pa){
-  var el=document.getElementById('position-advice-content');
-  if(!pa||pa.error){el.innerHTML='<div style="padding:8px;color:rgba(255,255,255,0.4)">暂无建议</div>';return;}
-  var html='';
-  // 持仓建议
-  var ha=pa.holdings_advice||[];
-  var bc=pa.buy_candidates||[];
-  var suggestMap={ADD:{label:'加仓',color:'#00C853'},REDUCE:{label:'减仓',color:'#FF9800'},EXIT:{label:'清仓',color:'#FF1744'},TAKE_PARTIAL:{label:'止盈',color:'#FFD700'},WATCH:{label:'观察',color:'#BDBDBD'},HOLD:{label:'持有',color:'#69F0AE'}};
-  if(ha.length){
-    ha.forEach(function(a){
-      var sm=suggestMap[a.suggest]||{label:a.suggest,color:'#888'};
-      html+='<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.05)">'
-        +'<div style="display:flex;justify-content:space-between;align-items:center">'
-        +'<span style="font-weight:600">'+a.name+'</span>'
-        +'<span style="font-size:10px;color:rgba(255,255,255,0.4)">'+a.score+'分 '+a.action+'</span>'
-        +'</div>'
-        +'<div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">'
-        +'<span style="font-size:10px;color:rgba(255,255,255,0.5)">'+a.reason+'</span>'
-        +'<span style="background:'+sm.color+';color:#000;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700">'+sm.label+'</span>'
-        +'</div>'
-        +(a.kelly_max_amount>0?'<div style="font-size:9px;color:rgba(255,255,255,0.3);margin-top:2px">Kelly建议仓位: ¥'+fmt(a.kelly_max_amount,0)+' ('+a.kelly_cash_pct+'%)</div>':'')
-        +'</div>';
-    });
-  }
-  // 买入候选
-  if(bc.length){
-    html+='<div style="margin-top:8px"><span style="color:#00C853;font-size:10px;font-weight:600">🟢 买入候选</span></div>';
-    bc.forEach(function(b){
-      html+='<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-        +'<span>'+b.name+' <span style="color:rgba(255,255,255,0.4);font-size:10px">'+b.score+'分</span></span>'
-        +'<span style="font-size:10px;color:#00C853">'+b.suggested_shares+'股 ¥'+fmt(b.suggested_amount,0)+'</span>'
-        +'</div>';
-    });
-  }
-  html+='<div style="margin-top:4px;font-size:9px;color:rgba(255,255,255,0.3);text-align:right">可用现金: ¥'+fmt(pa.cash,0)+'</div>';
-  el.innerHTML=html||'<div style="padding:8px;color:rgba(255,255,255,0.4)">暂无优化建议</div>';
-}
-function loadSignalHistory(){
-  fetch('/api/signal-history').then(r=>r.json()).then(d=>{
-    if(!d.ok || !d.data.length){
-      document.getElementById('signal-history-content').innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无买入信号</div>';
-      return;
-    }
-    var h=d.data.map(s=>{
-      var icon={'STRONG_BUY':'🟢🟢🟢','BUY':'🟢🟢','CAUTION_BUY':'🟢'}[s.action]||'⚪';
-      var o1d=s.outcome_1d!=null?(s.outcome_1d>=0?'+':'')+s.outcome_1d.toFixed(1)+'%':'—';
-      var o3d=s.outcome_3d!=null?(s.outcome_3d>=0?'+':'')+s.outcome_3d.toFixed(1)+'%':'—';
-      var oCls=s.outcome_1d!=null?(s.outcome_1d>=0?'up':'down'):'';
-      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
-        <div style="display:flex;align-items:center;gap:6px">
-          <span>${icon}</span>
-          <span style="font-weight:600">${s.name}</span>
-          <span style="font-size:10px;color:rgba(255,255,255,0.4)">${s.date} ${s.time}</span>
-        </div>
-        <div style="display:flex;gap:12px;font-size:10px">
-          <span>${fmt(s.score,0)}分</span>
-          <span class="${oCls}">1D:${o1d}</span>
-          <span>3D:${o3d}</span>
-          <span style="color:rgba(255,255,255,0.5)">¥${fmt(s.price)}</span>
-        </div>
-      </div>`;
-    }).join('');
-    document.getElementById('signal-history-content').innerHTML=h;
-  }).catch(()=>{
-    document.getElementById('signal-history-content').innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
-  });
-}
-
-
-function loadSignalPerformance(){
-  var el=document.getElementById('signal-perf-content');
-  fetch('/api/signal-performance').then(r=>r.json()).then(d=>{
-    if(!d.ok||!d.signal_actions||!d.signal_actions.length){
-      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
-      return;
-    }
-    var html='';
-    // Summary line
-    var s=d.summary;
-    html+='<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;color:rgba(255,255,255,0.5)">'
-      +'<span>信号 '+s.total_signals+' | 已结算 '+s.with_outcome+'</span>'
-      +'<span>胜率 '+(s.overall_win_rate!=null?fmt(s.overall_win_rate*100,1)+'%':'N/A')+'</span>'
-      +'<span>均收益 '+(s.overall_avg_return!=null?fmt(s.overall_avg_return,2)+'%':'N/A')+'</span>'
-      +'</div>';
-    // Header
-    html+='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
-      +'<span style="flex:2">信号</span>'
-      +'<span style="flex:1;text-align:right">次数</span>'
-      +'<span style="flex:1;text-align:right">1日收益</span>'
-      +'<span style="flex:1;text-align:right">1日胜率</span>'
-      +'<span style="flex:1;text-align:right">3日胜率</span>'
-      +'</div>';
-    d.signal_actions.forEach(function(sa){
-      var ar1=sa.avg_return_1d!=null?fmt(sa.avg_return_1d,2)+'%':'N/A';
-      var wr1=sa.win_rate_1d!=null?fmt(sa.win_rate_1d*100,1)+'%':'N/A';
-      var wr3=sa.win_rate_3d!=null?fmt(sa.win_rate_3d*100,1)+'%':'N/A';
-      var color=sa.win_rate_1d!=null?(sa.win_rate_1d>=0.4?'#00C853':sa.win_rate_1d>=0.3?'#FFD700':'#FF1744'):'rgba(255,255,255,0.3)';
-      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-        +'<span style="flex:2;font-weight:500;font-size:11px">'+sa.action+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:11px">'+sa.total+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:11px;color:'+(sa.avg_return_1d!=null&&sa.avg_return_1d>0?'#FF1744':'#00C853')+'">'+ar1+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:11px;font-weight:600;color:'+color+'">'+wr1+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:11px;color:'+color+'">'+wr3+'</span>'
-        +'</div>';
-    });
-    el.innerHTML=html;
-  }).catch(function(){
-    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
-  });
-}
-
-function loadDimensionEffectiveness(){
-  var el=document.getElementById('dimension-perf-content');
-  fetch('/api/signal-performance').then(r=>r.json()).then(d=>{
-    if(!d.ok||!d.dimensions||!d.dimensions.length){
-      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
-      return;
-    }
-    var html='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
-      +'<span style="flex:2">维度</span>'
-      +'<span style="flex:1;text-align:right">样本</span>'
-      +'<span style="flex:1;text-align:right">corr_1d</span>'
-      +'<span style="flex:1;text-align:right">正收益%</span>'
-      +'<span style="flex:1;text-align:right">强区间</span>'
-      +'</div>';
-    d.dimensions.forEach(function(dim){
-      var bestBin=dim.bins.reduce(function(a,b){return a.avg_return>b.avg_return?a:b;},dim.bins[0]);
-      var bbLabel=bestBin?bestBin.range:'';
-      var corrCls=Math.abs(dim.rank_corr_1d)>=0.1?'up':'neutral';
-      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-        +'<span style="flex:2;font-size:11px;font-weight:500">'+dim.dimension.replace('_score','')+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:10px;color:rgba(255,255,255,0.4)">'+dim.samples+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:12px;font-weight:600" class="'+corrCls+'">'+(dim.rank_corr_1d>=0?'+':'')+fmt(dim.rank_corr_1d,3)+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:11px;color:'+(dim.positive_pct>=0.35?'#00C853':dim.positive_pct>=0.3?'#FFD700':'#FF1744')+'">'+fmt(dim.positive_pct*100,1)+'%</span>'
-        +'<span style="flex:1;text-align:right;font-size:10px;color:rgba(255,255,255,0.4)">'+bbLabel+'</span>'
-        +'</div>';
-    });
-    el.innerHTML=html;
-  }).catch(function(){
-    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
-  });
-}
-
-function loadNavHistory(){
-  fetch('/api/nav-history').then(r=>r.json()).then(d=>{
-    if(!d.ok||!d.data.length)return;
-    var data=d.data;
-    var canvas=document.getElementById('navCanvas');
-    if(!canvas)return;
-    var ctx=canvas.getContext('2d');
-    var w=canvas.parentElement.clientWidth-20;
-    var h=140;
-    canvas.width=w*2;
-    canvas.height=h*2;
-    canvas.style.width=w+'px';
-    canvas.style.height=h+'px';
-    ctx.scale(2,2);
-    
-    var values=data.map(function(d){return d.value});
-    var minV=Math.min.apply(null,values)*0.98;
-    var maxV=Math.max.apply(null,values)*1.02;
-    var range=maxV-minV||1;
-    var stepX=w/Math.max(data.length-1,1);
-    
-    // Grid
-    ctx.strokeStyle='rgba(255,255,255,0.06)';
-    ctx.lineWidth=0.5;
-    for(var i=0;i<5;i++){
-      var y=20+i*30;
-      ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
-    }
-    
-    // Target line
-    var targetY=20+(1-(data[0]?(51066.41*2-minV)/range:0.5))*120;
-    ctx.strokeStyle='rgba(255,215,0,0.3)';
-    ctx.lineWidth=1;
-    ctx.setLineDash([4,4]);
-    ctx.beginPath();ctx.moveTo(0,targetY);ctx.lineTo(w,targetY);ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle='rgba(255,215,0,0.5)';
-    ctx.font='9px sans-serif';
-    ctx.fillText('目标 ¥102,133',w-80,targetY-4);
-    
-    // Area fill
-    var grad=ctx.createLinearGradient(0,0,0,h);
-    grad.addColorStop(0,'rgba(0,200,83,0.15)');
-    grad.addColorStop(1,'rgba(0,200,83,0)');
-    ctx.fillStyle=grad;
-    ctx.beginPath();
-    ctx.moveTo(0,h);
-    data.forEach(function(d,i){
-      var x=i*stepX;
-      var y=20+(1-(d.value-minV)/range)*120;
-      ctx.lineTo(x,y);
-    });
-    ctx.lineTo((data.length-1)*stepX,h);
-    ctx.closePath();ctx.fill();
-    
-    // Line
-    ctx.strokeStyle='#FF1744';
-    ctx.lineWidth=2;
-    ctx.beginPath();
-    data.forEach(function(d,i){
-      var x=i*stepX;
-      var y=20+(1-(d.value-minV)/range)*120;
-      if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
-    });
-    ctx.stroke();
-    
-    // Value labels
-    ctx.fillStyle='rgba(255,255,255,0.6)';
-    ctx.font='10px sans-serif';
-    ctx.fillText('¥'+fmt(values[0],0),2,14);
-    ctx.fillText('¥'+fmt(values[values.length-1],0),w-60,14);
-    
-    // Pct change
-    var changePct=data[data.length-1].pct||0;
-    ctx.fillStyle=changePct>=0?'#FF1744':'#00C853';
-    ctx.font='bold 11px sans-serif';
-    ctx.fillText((changePct>=0?'+':'')+changePct.toFixed(1)+'%',w-55,28);
-  });
-}
-
-function loadJournal(){
-  var el=document.getElementById('journal-content');
-  fetch('/api/journal').then(function(r){return r.json();}).then(function(d){
-    if(!d.ok){
-      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
-      return;
-    }
-    var entries=d.entries||[];
-    var stats=d.stats||{};
-    var html='';
-    // Stats line
-    html+='<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:10px;color:rgba(255,255,255,0.5)">'
-      +'<span>总计 <span style="color:#FFD700;font-weight:600">'+stats.total+'</span> 条</span>'
-      +(stats.no_reflection>0?'<span style="color:#FF9800">📝 '+stats.no_reflection+' 条未反思</span>':'<span style="color:#00C853">✅ 全部已反思</span>')
-      +'</div>';
-    if(entries.length===0){
-      html+='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无交易日志</div>';
-      el.innerHTML=html;
-      return;
-    }
-    // Header
-    html+='<div style="display:flex;padding:4px 0;font-size:9px;color:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.06)">'
-      +'<span style="flex:2">交易</span>'
-      +'<span style="flex:1;text-align:right">盈亏</span>'
-      +'<span style="flex:1;text-align:right">反思</span>'
-      +'</div>';
-    entries.slice(0,5).forEach(function(e){
-      var actionIcon=e.action==='buy'?'🟢':'🔴';
-      var profitStr='—';
-      var profitCls='';
-      if(e.profit_pct!=null){
-        profitStr=(e.profit_pct>=0?'+':'')+e.profit_pct.toFixed(2)+'%';
-        profitCls=e.profit_pct>=0?'up':'down';
-      }
-      var hasReflection = e.reflection && e.reflection.trim()!=='';
-      var reflectionIcon = hasReflection?'✅':'⬜';
-      var reflectionLabel = hasReflection?'已反思':'待反思';
-      var reasonStr = e.reason&&e.reason.trim()?e.reason:'—';
-      html+='<div style="display:flex;align-items:center;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-        +'<span style="flex:2;font-size:11px">'
-        +'<span>'+actionIcon+'</span> '
-        +'<span style="font-weight:500">'+e.name+'</span>'
-        +'<div style="font-size:9px;color:rgba(255,255,255,0.35);margin-top:1px">'+e.date+' · '+reasonStr.substring(0,24)+(reasonStr.length>24?'...':'')+'</div>'
-        +'</span>'
-        +'<span style="flex:1;text-align:right;font-size:12px;font-weight:600" class="'+profitCls+'">'+profitStr+'</span>'
-        +'<span style="flex:1;text-align:right;font-size:10px;color:'+(hasReflection?'#00C853':'rgba(255,255,255,0.4)')+'">'+reflectionIcon+' '+reflectionLabel+'</span>'
-        +'</div>';
-    });
-    el.innerHTML=html;
-  }).catch(function(){
-    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
-  });
-}
-
-
-
-function loadFactorIC(){
-  var el=document.getElementById('factor-ic-content');
-  fetch('/api/factor-ic').then(r=>r.json()).then(d=>{
-    if(!d.ok || !d.ic_summary||!d.ic_summary.length){
-      el.innerHTML='<div style="padding:8px;text-align:center;color:rgba(255,255,255,0.4)">暂无数据</div>';
-      return;
-    }
-    var top=d.top_factors||[];
-    var weak=d.weak_factors||[];
-    var rows='';
-    // Top factors
-    if(top.length){
-      rows+='<div style="margin-bottom:6px"><span style="color:#00C853;font-size:10px;font-weight:600">🏆 最有效</span></div>';
-      top.forEach(function(f){
-        var cls=f.ic>=0?'up':'down';
-        rows+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-          +'<span style="font-weight:500">'+f.label+'</span>'
-          +'<span class="'+cls+'" style="font-weight:600">'+(f.ic>=0?'+':'')+fmt(f.ic,3)+'</span>'
-          +'</div>';
-      });
-    }
-    // Weak factors
-    if(weak.length){
-      rows+='<div style="margin-top:8px;margin-bottom:6px"><span style="color:#FF1744;font-size:10px;font-weight:600">⚠️ 最无效</span></div>';
-      weak.forEach(function(f){
-        var cls=f.ic>=0?'up':'down';
-        rows+='<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-          +'<span style="font-weight:500">'+f.label+'</span>'
-          +'<span class="'+cls+'" style="font-weight:600">'+(f.ic>=0?'+':'')+fmt(f.ic,3)+'</span>'
-          +'</div>';
-      });
-    }
-    el.innerHTML=rows;
-  }).catch(function(){
-    el.innerHTML='<div style="color:#FF1744;text-align:center">加载失败</div>';
-  });
-}
-
-function refresh(){
-  document.getElementById('root').innerHTML='<div class="loading"><div class="spinner"></div><div>刷新中...</div></div>';
-  fetch('/api/monitor-data').then(r=>r.json()).then(d=>{
-    if(d.ok)render(d);else document.getElementById('root').innerHTML='<div class="loading" style="color:#FF1744">❌ 数据获取失败</div>';
-  }).catch(()=>{
-    document.getElementById('root').innerHTML='<div class="loading" style="color:#FF1744">❌ 网络错误</div>';
-  });
-}
-
-// 首次加载 + 30秒自动刷新
-refresh();
-setInterval(refresh,30000);
-// 因子 IC 卡片独立刷新（60秒）
-setInterval(loadFactorIC,60000);
-// 信号绩效卡片独立刷新（60秒）
-setInterval(loadSignalPerformance,60000);
-setInterval(loadDimensionEffectiveness,60000);
-
-// ===== 调仓弹窗 =====
-function showTrade(){
-  fetch('/api/monitor-data').then(r=>r.json()).then(d=>{
-    var scores=d.data.scores||[];
-    var h='<div class="modal-overlay" onclick="closeModal()"><div class="modal-box" onclick="event.stopPropagation()">'
-    +'<div class="modal-title">📊 调仓操作</div>'
-    +'<form onsubmit="submitTrade(event)">'
-    +'<select name="code" style="width:100%;padding:8px;margin:5px 0">'
-    +scores.map(s=>'<option value="'+s.code+'">'+s.name+' ('+s.code+') 评分:'+fmt(s.total||s.score,1)+'</option>').join('')
-    +'</select>'
-    +'<select name="action" style="width:100%;padding:8px;margin:5px 0"><option value="buy">买入</option><option value="sell">卖出</option></select>'
-    +'<input name="price" type="number" step="0.01" placeholder="成交价格" style="width:100%;padding:8px;margin:5px 0" required>'
-    +'<input name="qty" type="number" step="1" placeholder="数量(股)" style="width:100%;padding:8px;margin:5px 0" required>'
-    +'<input name="note" placeholder="备注(可选)" style="width:100%;padding:8px;margin:5px 0">'
-    +'<button type="submit" style="width:100%;padding:10px;background:#1565C0;color:#fff;border:none;border-radius:8px;margin-top:10px">确认提交</button>'
-    +'</form></div></div>';
-    var el=document.createElement('div');el.id='modal';el.innerHTML=h;document.body.appendChild(el);
-  });
-}
-function submitTrade(e){
-  e.preventDefault();
-  var f=e.target;
-  var data={code:f.code.value,action:f.action.value,price:parseFloat(f.price.value),quantity:parseInt(f.qty.value),note:f.note.value};
-  fetch('/api/trades',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
-  .then(r=>r.json()).then(d=>{alert(d.ok?'✅ '+d.msg:'❌ '+d.msg);closeModal();refresh();});
-}
-
-// ===== 设置弹窗 =====
-function showConfig(){
-  fetch('/api/monitor-data').then(r=>r.json()).then(d=>{
-    var scores=d.data.scores||[];
-    var h='<div class="modal-overlay" onclick="closeModal()"><div class="modal-box" onclick="event.stopPropagation()">'
-    +'<div class="modal-title">⚙️ 持仓设置</div>'
-    +'<form onsubmit="submitConfig(event)">'
-    +'<select name="code" style="width:100%;padding:8px;margin:5px 0">'
-    +scores.map(s=>'<option value="'+s.code+'">'+s.name+' ('+s.code+')</option>').join('')
-    +'</select>'
-    +'<input name="stop_loss" type="number" step="0.01" placeholder="止损价" style="width:100%;padding:8px;margin:5px 0">'
-    +'<input name="target_high" type="number" step="0.01" placeholder="止盈目标上限" style="width:100%;padding:8px;margin:5px 0">'
-    +'<input name="target_low" type="number" step="0.01" placeholder="止盈目标下限" style="width:100%;padding:8px;margin:5px 0">'
-    +'<button type="submit" style="width:100%;padding:10px;background:#E65100;color:#fff;border:none;border-radius:8px;margin-top:10px">保存设置</button>'
-    +'</form></div></div>';
-    var el=document.createElement('div');el.id='modal';el.innerHTML=h;document.body.appendChild(el);
-  });
-}
-function submitConfig(e){
-  e.preventDefault();
-  var f=e.target;
-  var data={code:f.code.value};
-  if(f.stop_loss.value)data.stop_loss=parseFloat(f.stop_loss.value);
-  if(f.target_high.value)data.target_high=parseFloat(f.target_high.value);
-  if(f.target_low.value)data.target_low=parseFloat(f.target_low.value);
-  fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
-  .then(r=>r.json()).then(d=>{alert(d.ok?'✅ '+d.msg:'❌ '+d.msg);closeModal();});
-}
-function closeModal(){var m=document.getElementById('modal');if(m)m.remove();}
-</script>
-<style>
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:999;display:flex;align-items:center;justify-content:center}
-.modal-box{background:#1a1a2e;border-radius:16px;padding:20px;width:90%;max-width:360px;max-height:80vh;overflow-y:auto}
-.modal-title{font-size:16px;font-weight:700;margin-bottom:12px;color:#fff}
-</style>
-</body>
-</html>"""
+# HTML 模板已迁移到 templates/monitor.html
+# 使用 static/css/monitor.css + static/js/monitor.js
+# 看板 UI 已重构为 Bloomberg/TradingView 风格
+# 旧内联 HTML 保留在 git 历史中（commit 前）
 
 
 # ===== 信号历史 API（仪表盘） =====
@@ -1422,9 +742,58 @@ def api_factor_ic():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+# ===== 大师智慧 API =====
+@app.route("/api/guru")
+def api_guru():
+    """返回大师智慧看板数据"""
+    try:
+        from guru_wisdom import status as guru_status
+        from guru_wisdom import get_recent_quotes, get_db
+        stats = guru_status()
+        recent = get_recent_quotes(5)
+        gurus = get_db().execute(
+            "SELECT id, cn_name FROM gurus WHERE active=1 ORDER BY category, name"
+        ).fetchall()
+
+        quotes = []
+        for q in recent:
+            quotes.append({
+                "guru": q.get("cn_name", ""),
+                "guru_id": q.get("guru_id", ""),
+                "content": q.get("content", "")[:120],
+                "sentiment": q.get("sentiment", "neutral"),
+                "topic": q.get("topic", ""),
+                "collected_at": q.get("collected_at", ""),
+                "source": q.get("source", ""),
+            })
+
+        sd = stats["sentiment_distribution"]
+        total = max(sd["bullish"] + sd["bearish"] + sd["neutral"], 1)
+        guru_list = [{"id": r["id"], "name": r["cn_name"], "influence": 5} for r in gurus]
+
+        return jsonify({
+            "ok": True,
+            "stats": {
+                "gurus": stats["gurus"],
+                "total_quotes": stats["total_quotes"],
+                "recent_7d": stats["recent_quotes_7d"],
+                "last_collection": stats["last_collection"],
+                "bullish_pct": round(sd["bullish"] / total * 100),
+                "bearish_pct": round(sd["bearish"] / total * 100),
+                "neutral_pct": round(sd["neutral"] / total * 100),
+                "bullish": sd["bullish"], "bearish": sd["bearish"], "neutral": sd["neutral"],
+            },
+            "gurus": guru_list,
+            "recent_quotes": quotes,
+        })
+    except Exception as e:
+        log.error("guru API failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/monitor")
 def monitor_page():
-    return HTML
+    return render_template("monitor.html")
 
 
 # ===== 调仓 API =====
@@ -1534,6 +903,11 @@ def api_execute():
         executed = []
 
         for s in plan["sells"]:
+            # 安全闸：只卖出活跃持仓中的标的
+            stock = get_conn().execute("SELECT is_active FROM stocks WHERE code = ?", (s["code"],)).fetchone()
+            if not stock or not stock["is_active"]:
+                log.warning(f"跳过卖出 {s['code']}: 非活跃持仓")
+                continue
             price = s["estimated_proceeds"] / max(s["shares"], 1)
             clear_active(s["code"])
             reason = " ".join(s.get("reasons", []))[:200]
@@ -1541,6 +915,7 @@ def api_execute():
             executed.append(f"卖出 {s['name']}({s['code']}) {s['shares']}股 @{price:.2f}")
 
         for b in plan["buys"]:
+            is_topup = b.get("action") == "TOPUP"
             price = b["price"]
             try:
                 atr_rec = recommend_atr_params(b["code"])
@@ -1553,15 +928,29 @@ def api_execute():
             target_high = target.get("target_sell", 0)
             target_low = target.get("buy_zone_low", 0)
 
-            set_active(b["code"], price, today, target_high, target_low)
-            try:
-                conn = get_conn()
-                conn.execute("UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
-                           (stop_price, b["amount"], f"auto买入{b['shares']}股", b["code"]))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+            if is_topup:
+                # 加仓：累加 trade_amount，不重置已有持仓
+                try:
+                    conn = get_conn()
+                    existing = conn.execute("SELECT trade_amount FROM stocks WHERE code=?", (b["code"],)).fetchone()
+                    old_amount = float(existing["trade_amount"] or 0) if existing else 0
+                    new_amount = old_amount + (b["amount"] or 0)
+                    conn.execute("UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
+                               (stop_price, new_amount, f"加仓+{b['shares']}股", b["code"]))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+            else:
+                set_active(b["code"], price, today, target_high, target_low)
+                try:
+                    conn = get_conn()
+                    conn.execute("UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
+                               (stop_price, b["amount"], f"auto买入{b['shares']}股", b["code"]))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
 
             add_trade(b["code"], "buy", price, b["shares"], today,
                       f"auto: score={b.get('score',0):.0f} {b.get('signal','')}", trade_amount=b["amount"])
@@ -1599,7 +988,421 @@ def _plan_already_executed(plan):
         return False
 
 
+# ===== 异常事件 API =====
+@app.route("/api/anomalies")
+def api_anomalies():
+    """返回未确认的异常事件（含价格异动/信号突变/因子突变）"""
+    try:
+        from db import get_unacknowledged_anomalies
+        raw = get_unacknowledged_anomalies(limit=10)
+        anomalies = []
+        for r in raw:
+            anomalies.append({
+                "id": r["id"],
+                "code": r["code"],
+                "name": r.get("name") or STOCK_MAP.get(r["code"], {}).get("name", r["code"]),
+                "level": r["level"],
+                "type": r["alert_type"],
+                "price": r["price"],
+                "message": r["message"][:200],
+                "created_at": r["created_at"],
+            })
+        emerg = [a for a in anomalies if a["level"] == "A"]
+        warnings = [a for a in anomalies if a["level"] == "B"]
+        info = [a for a in anomalies if a["level"] == "C"]
+        return jsonify({
+            "ok": True,
+            "count": len(anomalies),
+            "emergency_count": len(emerg),
+            "warning_count": len(warnings),
+            "info_count": len(info),
+            "anomalies": anomalies[:5],
+            "emergencies": emerg[:3],
+        })
+    except Exception as e:
+        log.error("anomalies API failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e)})
+
+# ===== 今日策略增强 API（聚合大师+异动+信号） =====
+@app.route("/api/today-strategy")
+def api_today_strategy():
+    """返回今日策略增强数据：大师情绪摘要 + 最强买入信号 + 异动摘要"""
+    try:
+        from guru_wisdom import status as guru_status
+        from guru_wisdom import get_recent_quotes
+        stats = guru_status()
+        sd = stats["sentiment_distribution"]
+        total = max(sd["bullish"] + sd["bearish"] + sd["neutral"], 1)
+        recent_quotes = get_recent_quotes(3)
+        guru_summary = {
+            "bullish_pct": round(sd["bullish"] / total * 100),
+            "bearish_pct": round(sd["bearish"] / total * 100),
+            "gurus": stats["gurus"],
+            "total_quotes": stats["total_quotes"],
+            "recent_7d": stats["recent_quotes_7d"],
+            "latest_quotes": [
+                {"guru": q.get("cn_name", ""), "content": q.get("content", "")[:80],
+                 "sentiment": q.get("sentiment", "neutral")}
+                for q in recent_quotes[:3]
+            ],
+        }
+        signals = get_current_signals()
+        conviction = []
+        for s in sorted(signals, key=lambda x: x.get("signal", 0), reverse=True)[:5]:
+            code = s["code"]
+            name = STOCK_MAP.get(code, {}).get("name", code)
+            conviction.append({
+                "code": code,
+                "name": name,
+                "signal": s.get("signal", 0),
+                "rank": s.get("rank", 0),
+                "score": s.get("score", 0),
+            })
+        conviction = [c for c in conviction if c["signal"] > 55][:3]
+        from db import get_unacknowledged_anomalies
+        raw_anomalies = get_unacknowledged_anomalies(limit=5)
+        anomaly_summary = {
+            "total": len(raw_anomalies),
+            "emergency": len([a for a in raw_anomalies if a["level"] == "A"]),
+            "recent": [
+                {"name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+                 "code": a["code"],
+                 "level": a["level"],
+                 "type": a["alert_type"],
+                 "message": a["message"][:100],
+                 "created_at": a["created_at"]}
+                for a in raw_anomalies[:3]
+            ],
+        }
+        return jsonify({
+            "ok": True,
+            "data": {
+                "guru": guru_summary,
+                "conviction": conviction,
+                "anomalies": anomaly_summary,
+            }
+        })
+    except Exception as e:
+        log.error("today-strategy API failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e), "data": {
+            "guru": {"bullish_pct": 0, "bearish_pct": 0, "gurus": 0, "total_quotes": 0, "recent_7d": 0, "latest_quotes": []},
+            "conviction": [],
+            "anomalies": {"total": 0, "emergency": 0, "recent": []},
+        }})
+
+
+# ===== 快捷查询 API（手机书签一键直达） =====
+
+@app.route("/api/nl-query")
+def api_nl_query():
+    """自然语言查询 — 中文意图识别，调用现有分析函数"""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "请提供参数 ?q=你的问题"})
+
+    try:
+        from db import get_conn, get_unacknowledged_anomalies
+        from auto_execute import generate_execution_plan
+        conn = get_conn()
+
+        intent = _detect_intent(q)
+
+        # ── 卖出/该卖/止盈止损 ──
+        if intent == "sell":
+            plan = generate_execution_plan(dry_run=True)
+            sells = [{
+                "code": s["code"], "name": s["name"],
+                "reason": s.get("reasons", [])[:3],
+                "pnl": s.get("pnl_pct", 0),
+            } for s in plan.get("sells", [])]
+            return jsonify({
+                "ok": True, "intent": "sell",
+                "answer": f"今日卖出候选 {len(sells)} 只" if sells else "今日无卖出计划",
+                "sells": sells,
+            })
+
+        # ── 买入/该买/机会 ──
+        elif intent == "buy":
+            plan = generate_execution_plan(dry_run=True)
+            buys = [{
+                "code": b["code"], "name": b["name"],
+                "score": b.get("score", 0), "reason": b.get("reason", ""),
+            } for b in plan.get("buys", [])]
+            return jsonify({
+                "ok": True, "intent": "buy",
+                "answer": f"买入候选 {len(buys)} 只" if buys else "今日无买入候选",
+                "buys": sorted(buys, key=lambda x: x["score"], reverse=True),
+            })
+
+        # ── 盈亏/赚赔/收益 ──
+        elif intent == "pnl":
+            rows = conn.execute("""
+                SELECT s.code, s.name, s.buy_price,
+                       d.close as current_price,
+                       ROUND((d.close - s.buy_price) / s.buy_price * 100, 2) as pnl_pct
+                FROM stocks s
+                LEFT JOIN (SELECT code, close FROM daily_snapshots
+                           WHERE date = (SELECT MAX(date) FROM daily_snapshots)) d
+                  ON s.code = d.code
+                WHERE s.is_active = 1 AND s.buy_price > 0
+            """).fetchall()
+            positions = [{
+                "code": r["code"], "name": r["name"],
+                "pnl_pct": round(r["pnl_pct"], 1) if r["pnl_pct"] else 0,
+            } for r in rows]
+            total = sum(p["pnl_pct"] for p in positions)
+            return jsonify({
+                "ok": True, "intent": "pnl",
+                "answer": f"总盈亏 {total:+.1f}%，持仓 {len(positions)} 只",
+                "total_pnl_pct": round(total, 1),
+                "positions": positions,
+            })
+
+        # ── 预警/风险/异常 ──
+        elif intent == "alert":
+            raw = get_unacknowledged_anomalies(limit=10)
+            alerts = [{
+                "code": a["code"],
+                "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+                "level": a["level"], "msg": a["message"][:120],
+            } for a in raw]
+            emergency = len([a for a in raw if a["level"] == "A"])
+            return jsonify({
+                "ok": True, "intent": "alert",
+                "answer": f"{emergency}条紧急，{len(alerts)}条预警" if emergency else f"{len(alerts)}条预警",
+                "emergency": emergency, "alerts": alerts,
+            })
+
+        # ── 汇总/状态/怎么样 ──
+        else:
+            plan = generate_execution_plan(dry_run=True)
+            raw = get_unacknowledged_anomalies(limit=3)
+            return jsonify({
+                "ok": True, "intent": "summary",
+                "answer": f"持仓{_count_positions(conn)}只，买入候选{len(plan.get('buys',[]))}只，"
+                          f"预警{len(raw)}条",
+                "details": {
+                    "positions": _count_positions(conn),
+                    "buy_candidates": len(plan.get("buys", [])),
+                    "sell_candidates": len(plan.get("sells", [])),
+                    "alerts": len(raw),
+                },
+            })
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+def _detect_intent(q: str) -> str:
+    """中文意图识别"""
+    ql = q.lower()
+    # 卖出/止盈/止损/该卖
+    if any(w in q for w in ("卖", "止盈", "止损", "清仓", "减仓", "脱手", "该跑")):
+        return "sell"
+    # 买入/机会/该买/加仓
+    if any(w in q for w in ("买", "机会", "加仓", "建仓", "入场", "该上")):
+        return "buy"
+    # 盈亏/收益/赚赔/赚了
+    if any(w in q for w in ("盈亏", "收益", "赚", "亏", "赔", "盈利", "损益")):
+        return "pnl"
+    # 预警/风险/异常/警报
+    if any(w in q for w in ("预警", "风险", "异常", "警报", "告警", "踩雷")):
+        return "alert"
+    return "summary"
+
+
+def _count_positions(conn) -> int:
+    try:
+        r = conn.execute(
+            "SELECT COUNT(*) as c FROM stocks WHERE is_active = 1 AND buy_price > 0"
+        ).fetchone()
+        return r["c"] if r else 0
+    except Exception:
+        return 0
+
+
+def _plan_already_executed(plan: dict) -> bool:
+    """检测执行计划是否已执行"""
+    try:
+        conn = get_conn()
+        today = datetime.now().strftime("%Y-%m-%d")
+        r = conn.execute(
+            "SELECT COUNT(*) as c FROM trades WHERE date(created_at) = ?",
+            (today,),
+        ).fetchone()
+        return bool(r and r["c"] > 0)
+    except Exception:
+        return False
+
+
+_app = app  # 供外部引用
+
+
+# ===== 数据源状态 API =====
+@app.route("/api/data-source-status")
+def api_data_source_status():
+    """检测主备数据源连通性"""
+    from datetime import datetime as dt
+    status = {"sina": {"reachable": False, "latency_ms": 0},
+              "tencent": {"reachable": False, "latency_ms": 0}}
+
+    # Sina 测试
+    try:
+        t0 = time.time()
+        raw = sina_fetch_raw([ALL_CODES[0]])
+        if raw and "var hq_str" in raw:
+            status["sina"]["reachable"] = True
+            status["sina"]["latency_ms"] = round((time.time() - t0) * 1000)
+    except Exception as e:
+        status["sina"]["error"] = str(e)[:80]
+
+    # 腾讯行情测试
+    try:
+        t0 = time.time()
+        data = fetch_realtime([ALL_CODES[0]], source="tencent")
+        if data and data[0].get("price"):
+            status["tencent"]["reachable"] = True
+            status["tencent"]["latency_ms"] = round((time.time() - t0) * 1000)
+    except Exception as e:
+        status["tencent"]["error"] = str(e)[:80]
+
+    return jsonify({
+        "ok": True,
+        "timestamp": dt.now().isoformat(),
+        "primary": "sina",
+        "fallback": "tencent",
+        "sources": status,
+    })
+@app.route("/api/quick")
+def api_quick():
+    """一键汇总：持仓盈亏 + 今日信号 + 未读预警"""
+    try:
+        from db import get_conn, get_unacknowledged_anomalies
+        from auto_execute import generate_execution_plan
+        conn = get_conn()
+
+        # 1. 持仓盈亏
+        positions = conn.execute("""
+            SELECT s.code, s.name, s.buy_price, s.buy_date,
+                   d.close as current_price,
+                   d.change_pct,
+                   ROUND((d.close - s.buy_price) / s.buy_price * 100, 2) as pnl_pct
+            FROM stocks s
+            LEFT JOIN (
+                SELECT code, close, change_pct FROM daily_snapshots
+                WHERE date = (SELECT MAX(date) FROM daily_snapshots)
+            ) d ON s.code = d.code
+            WHERE s.is_active = 1 AND s.buy_price > 0
+        """).fetchall()
+
+        pnl = []
+        total_pnl = 0
+        for r in positions:
+            pnl.append({
+                "code": r["code"],
+                "name": r["name"],
+                "buy": r["buy_price"],
+                "now": r["current_price"] or 0,
+                "pnl": round(r["pnl_pct"], 1) if r["pnl_pct"] else 0,
+            })
+            total_pnl += r["pnl_pct"] or 0
+
+        # 2. 今日执行计划
+        plan = generate_execution_plan(dry_run=True)
+        sells = [{"code": s["code"], "name": s["name"], "reason": s["reasons"][:2]} for s in plan.get("sells", [])]
+        buys = [{"code": b["code"], "name": b["name"], "score": b.get("score", 0)} for b in plan.get("buys", [])]
+
+        # 3. 未读预警
+        raw = get_unacknowledged_anomalies(limit=5)
+        alerts = [{
+            "code": a["code"],
+            "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+            "level": a["level"],
+            "msg": a["message"][:100],
+        } for a in raw]
+
+        return jsonify({
+            "ok": True,
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "pnl": {
+                "total_pct": round(total_pnl, 1),
+                "positions": pnl,
+            },
+            "plan": {
+                "sells": sells,
+                "buys": buys,
+                "already_executed": _plan_already_executed(plan),
+            },
+            "alerts": {
+                "unread": len(raw),
+                "emergency": len([a for a in raw if a["level"] == "A"]),
+                "items": alerts,
+            },
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/quick/pnl")
+def api_quick_pnl():
+    """纯盈亏数据"""
+    try:
+        conn = get_conn()
+        positions = conn.execute("""
+            SELECT s.code, s.name, s.buy_price,
+                   d.close as current_price,
+                   ROUND((d.close - s.buy_price) / s.buy_price * 100, 2) as pnl_pct
+            FROM stocks s
+            LEFT JOIN (SELECT code, close FROM daily_snapshots
+                       WHERE date = (SELECT MAX(date) FROM daily_snapshots)) d ON s.code = d.code
+            WHERE s.is_active = 1 AND s.buy_price > 0
+        """).fetchall()
+
+        positions_data = []
+        total = 0
+        for r in positions:
+            p = round(r["pnl_pct"], 1) if r["pnl_pct"] else 0
+            positions_data.append({"code": r["code"], "name": r["name"], "pnl_pct": p})
+            total += p
+
+        return jsonify({
+            "ok": True,
+            "total_pnl_pct": round(total, 1),
+            "positions": positions_data,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/quick/alerts")
+def api_quick_alerts():
+    """纯预警数据"""
+    try:
+        from db import get_unacknowledged_anomalies
+        raw = get_unacknowledged_anomalies(limit=20)
+        items = []
+        for a in raw:
+            items.append({
+                "code": a["code"],
+                "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+                "level": a["level"],
+                "type": a["alert_type"],
+                "msg": a["message"][:150],
+                "time": a["created_at"],
+            })
+        return jsonify({
+            "ok": True,
+            "total": len(raw),
+            "emergency": len([a for a in raw if a["level"] == "A"]),
+            "warning": len([a for a in raw if a["level"] == "B"]),
+            "alerts": items,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 if __name__ == "__main__":
     log.info("🅳 Serenity Monitor 移动端看板启动 — http://localhost:8401/monitor")
     log.info("📊 Prometheus 指标: http://localhost:8401/metrics")
+    log.info("⚡ 快捷: /api/quick /api/quick/pnl /api/quick/alerts")
     app.run(host="0.0.0.0", port=8401, debug=False)
