@@ -301,7 +301,13 @@ class RiskManager:
         alerts = []
         max_pos = self._cap.get("max_positions", 2)
         max_weight = self._cap.get("max_single_weight", 0.60)
-        min_weight = self._cap.get("min_single_weight", 0.30)
+        # 🆕 使用 effective_config 的 min_single_weight（支持 aggressive_mode 覆盖）
+        try:
+            from config import get_effective_config
+            _eff2 = get_effective_config()
+            min_weight = _eff2["capital"].get("min_single_weight", 0.10)
+        except Exception:
+            min_weight = self._cap.get("min_single_weight", 0.30)
 
         if len(holdings) >= max_pos:
             alerts.append({

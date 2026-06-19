@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import Optional
 import json
 
-from config import CAPITAL_CONFIG, RISK_CONFIG, STOCK_MAP, STOCK_DETAILS
+from config import CAPITAL_CONFIG, RISK_CONFIG, STOCK_MAP, STOCK_DETAILS, get_effective_config
 from db import get_conn, add_trade, load_all_stocks, set_active, clear_active, get_price_history
 from data_engine import fetch_realtime
 from serenity_logger import get_logger
@@ -29,9 +29,11 @@ class PortfolioManager:
         self.commission_rate = cfg["commission_rate"]
         self.stamp_tax_rate = cfg["stamp_tax_rate"]
 
-        # 风控
-        self.stop_loss_pct = RISK_CONFIG["stop_loss_pct"]
-        self.trailing_stop_pct = RISK_CONFIG["trailing_stop_pct"]
+        # 风控 — 使用 get_effective_config 以应用 aggressive_mode 参数偏移
+        _eff = get_effective_config()
+        _risk = _eff["risk"]
+        self.stop_loss_pct = _risk["stop_loss_pct"]
+        self.trailing_stop_pct = _risk["trailing_stop_pct"]
 
         # 浮动盈亏峰值追踪（用于移动止盈）
         self._peak_prices = {}  # code -> highest_price_since_entry
@@ -39,10 +41,25 @@ class PortfolioManager:
         # 从 DB 加载持久化的峰值价格
         self._load_peaks_from_db()
         self.profit_take_levels = [
-            (RISK_CONFIG["profit_take_level1"], RISK_CONFIG["partial_exit_level1"]),
-            (RISK_CONFIG["profit_take_level2"], RISK_CONFIG["partial_exit_level2"]),
-            (RISK_CONFIG["profit_take_level3"], 1.0),
+            (_risk["profit_take_level1"], _risk["partial_exit_level1"]),
+            (_risk["profit_take_level2"], _risk["partial_exit_level2"]),
+            (_risk["profit_take_level3"], 1.0),
         ]
+        # 🆕 翻倍优化：operational_mode profit_take_tiers 覆盖（趋势市让利润奔跑）
+        try:
+            from market_sense import MarketSense
+            _op2 = MarketSense().get_operational_mode()
+            _tiers = _op2.get("profit_take_tiers")
+            _exits = _op2.get("exit_levels")
+            if _tiers and _exits and len(_tiers) >= 2 and len(_exits) >= 2:
+                self.profit_take_levels = [
+                    (_tiers[0], _exits[0]),
+                    (_tiers[1], _exits[1]),
+                    (_tiers[2] if len(_tiers) > 2 else _tiers[1] * 2, 1.0),
+                ]
+                log.info("📊 operational_mode 止盈覆盖: %s", self.profit_take_levels)
+        except Exception:
+            pass
 
     # ── 核心查询 ──────────────────────────────────────────
 
@@ -50,7 +67,7 @@ class PortfolioManager:
     def positions(self) -> list[dict]:
         """从数据库读取当前持仓"""
         stocks = load_all_stocks()
-        return [s for s in stocks if s["is_active"]]
+        return [s for s in stocks if s["is_active"] and s.get("code") != "CASH"]
 
     @property
     def position_codes(self) -> list[str]:
@@ -58,11 +75,20 @@ class PortfolioManager:
 
 
     def get_cash(self) -> float:
-        """计算可用现金: 初始资金 - sum(买入金额) + sum(卖出金额)
-           fallback: 若 trade_amount=0，用 price * quantity 计算
-           健壮版：忽略 trade_amount=0 且 quantity=0 的无效记录"""
+        """可用现金:
+           1) 优先: trades 表中有 code='CASH' 的记录 → 直接返回其 price
+           2) 公式: 初始资金 - sum(买入) + sum(卖出)
+        """
         conn = get_conn()
         try:
+            # ① CASH 覆盖记录（手动校准值）
+            cash_row = conn.execute(
+                "SELECT price FROM trades WHERE code='CASH' AND action='sell' AND rowid IN (SELECT max(rowid) FROM trades WHERE code='CASH')"
+            ).fetchone()
+            if cash_row and cash_row["price"] and cash_row["price"] > 0:
+                return cash_row["price"]
+
+            # ② 公式计算
             rows = conn.execute(
                 "SELECT action, price, quantity, trade_amount FROM trades"
             ).fetchall()
@@ -77,14 +103,13 @@ class PortfolioManager:
             if amt == 0 and r["price"] and r["quantity"]:
                 amt = r["price"] * r["quantity"]
             if amt == 0:
-                continue  # 跳过无效记录"""
+                continue
             if r["action"] == "buy":
                 bought += amt
             elif r["action"] == "sell":
                 sold += amt
         cash = self.initial_capital - bought + sold
-        # 优先使用账户真实现金（校准值）
-        return max(cash, 0.0)  # 现金不可能为负，数据不全时截断到0
+        return max(cash, 0.0)
 
     def get_portfolio_value(self) -> dict:
         """计算当前组合总价值 = 现金 + 持仓市值 + 移动止盈追踪"""
@@ -100,9 +125,9 @@ class PortfolioManager:
                 "position_count": 0,
             }
 
-        codes = [p["code"] for p in positions]
-        realtime = fetch_realtime(codes)
-        rt_map = {r["code"]: r for r in realtime}
+        codes = [p["code"] for p in positions if p["code"] != "CASH"]
+        realtime = fetch_realtime(codes) if codes else []
+        rt_map = {r["code"]: r for r in realtime} if realtime else {}
 
         holdings_value = 0.0
         details = []
@@ -160,7 +185,6 @@ class PortfolioManager:
         """
         from data_engine import fetch_single
 
-        cfg = CAPITAL_CONFIG
         cash = self.get_cash()
         total = self.get_portfolio_value()["total_value"]
         positions = self.positions
@@ -177,7 +201,13 @@ class PortfolioManager:
         min_per_position = total * self.min_single_weight
 
         # Kelly 调整: high confidence → 更大仓位
-        kelly_fraction = 0.2 + signal_confidence * 0.5  # 范围 0.2 ~ 0.7
+        # 翻倍模式：更高 Kelly 基线
+        try:
+            _kelly_base = CAPITAL_CONFIG.get("_kelly_base", 0.2)
+            _kelly_mult = CAPITAL_CONFIG.get("_kelly_multiplier", 0.5)
+        except Exception:
+            _kelly_base, _kelly_mult = 0.2, 0.5
+        kelly_fraction = _kelly_base + signal_confidence * _kelly_mult  # 激进: 0.3~0.85, 保守: 0.2~0.7
         target_amount = min(max_usable * kelly_fraction, max_per_position)
 
         # 不能小于最小仓位
@@ -196,6 +226,20 @@ class PortfolioManager:
 
         shares = int(target_amount / price / 100) * 100
         actual_amount = shares * price
+        # 确保不超出实际可用现金
+        if actual_amount > max_usable:
+            # 缩减到可用现金范围内（保持整百）
+            shares = int(max_usable / price / 100) * 100
+            actual_amount = shares * price
+        # 确保不超出实际可用现金
+        if actual_amount > max_usable:
+            # 缩减到可用现金范围内（保持整百）
+            shares = int(max_usable / price / 100) * 100
+            actual_amount = shares * price
+        if shares < 100:
+            return {"shares": 0, "amount": 0, "cash_used_pct": 0,
+                    "price": price,
+                    "reason": f"现金不足: 需¥{price*100:,.0f}起买, 可用¥{max_usable:,.0f}"}
         cash_used_pct = actual_amount / cash * 100 if cash > 0 else 0
 
         return {
@@ -490,7 +534,7 @@ class PortfolioManager:
             profit_pct = (current - entry) / entry * 100
             peak_profit_pct = (peak - entry) / entry * 100
             drawdown_from_peak = (current - peak) / peak * 100 if peak > 0 else 0
-            trailing_trigger = self.trailing_stop_pct * -1  # 如拉回12%
+            trailing_trigger = self.trailing_stop_pct * -100  # 百分比单位，匹配 drawdown_from_peak
 
             results.append({
                 "code": code,
@@ -501,10 +545,10 @@ class PortfolioManager:
                 "profit_pct": round(profit_pct, 2),
                 "peak_profit_pct": round(peak_profit_pct, 2),
                 "drawdown_from_peak": round(drawdown_from_peak, 2),
-                "trailing_trigger_pct": round(trailing_trigger * 100, 1),
+                "trailing_trigger_pct": round(trailing_trigger, 1),
                 "trailing_triggered": drawdown_from_peak <= trailing_trigger,
-                "exceeds_profit_take1": profit_pct >= RISK_CONFIG["profit_take_level1"] * 100,
-                "exceeds_profit_take2": profit_pct >= RISK_CONFIG["profit_take_level2"] * 100,
+                "exceeds_profit_take1": profit_pct >= self.profit_take_levels[0][0] * 100,
+                "exceeds_profit_take2": profit_pct >= self.profit_take_levels[1][0] * 100,
             })
 
         return results
@@ -565,8 +609,8 @@ class PortfolioManager:
                 action = "STRONG_HOLD"
                 reason.append(f"信号强劲(评分{score:.0f})，继续持有")
 
-            # 可加仓判断
-            if score >= 60 and ts.get("profit_pct", 0) < 5:
+            # 可加仓判断（仅HOLD/STRONG_HOLD时可加仓，避免与卖出信号矛盾）
+            if action in ("HOLD", "STRONG_HOLD") and score >= 60 and ts.get("profit_pct", 0) < 5:
                 action_add = "CONSIDER_ADD"
                 reason.append("可考虑分批加仓")
 

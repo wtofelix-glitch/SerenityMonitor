@@ -20,6 +20,9 @@ except ImportError:
     _FUNDAMENTAL_AVAILABLE = False
     FundamentalEngine = None
 from portfolio import PortfolioManager, get_portfolio
+from serenity_logger import get_logger
+
+log = get_logger(__name__)
 
 # ============================================================
 # Conviction 动态调参引擎
@@ -632,25 +635,39 @@ def compute_caution_buy_filter(code: str, tech: dict, alpha_signals: dict,
         "detail": f"成交量{vol_ratio:.1f}x MA20" if vol_ok else f"缩量{vol_ratio:.1f}x MA20",
     })
 
-    # 过滤2: 动量底线（momentum_score >= 35）
+    # 过滤2: 动量底线 — 均值回归模式下放宽（翻转后低分=原高分回调→买点）
     mom_score = None
     if scores:
         mom_score = scores.get("momentum_score", 0)
     if mom_score is None:
-        mom_score = 50  # 无数据时放行
-    mom_ok = mom_score >= 35
+        mom_score = 50
+    try:
+        from scorer import get_operational_mode
+        _opm = get_operational_mode()
+        _is_mr = _opm.get("factor_invert", False)
+    except Exception:
+        _is_mr = False
+    if _is_mr:
+        # 均值回归: 翻转后15-65=原动量35-85, 这是回调后买点区间
+        mom_ok = 15 <= mom_score <= 65
+    else:
+        mom_ok = mom_score >= 35
     filters.append({
-        "name": "动量底线",
+        "name": "动量底线" + ("[MR]" if _is_mr else ""),
         "passed": mom_ok,
-        "detail": f"动量分{mom_score:.0f}" if mom_ok else f"动量分{mom_score:.0f}(<35)",
+        "detail": f"动量分{mom_score:.0f}" if mom_ok else f"动量分{mom_score:.0f}({'15-65期望' if _is_mr else '<35'})",
     })
 
-    # 过滤3: 趋势配合（价格在 MA20 上方）
+    # 过滤3: 趋势配合 — 均值回归模式接受MA20下方（超跌反弹机会）
     trend_ok = tech.get("price_above_ma20", False)
+    if _is_mr:
+        # 均值回归: 允许MA20下方，但要有放量确认（缩量下跌不抄底）
+        trend_ok = True  # 不拦截，留给量能过滤
     filters.append({
-        "name": "趋势配合",
+        "name": "趋势配合" + ("[MR]" if _is_mr else ""),
         "passed": trend_ok,
-        "detail": "价格在MA20上方" if trend_ok else "价格在MA20下方",
+        "detail": "均值回归放宽" if (_is_mr and not tech.get("price_above_ma20", False)) else (
+            "价格在MA20上方" if trend_ok else "价格在MA20下方"),
     })
 
     passed = all(f["passed"] for f in filters)
@@ -668,31 +685,54 @@ def compute_caution_buy_filter(code: str, tech: dict, alpha_signals: dict,
 
 def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
     """
-    买入信号多条件确认
+    买入信号多条件确认 — 支持均值回归模式自适
 
     Returns
     -------
     dict with: confirmed (bool), reasons (list), confidence (float)
     """
+    try:
+        from scorer import get_operational_mode
+        _opm2 = get_operational_mode()
+        _is_mr2 = _opm2.get("factor_invert", False)
+    except Exception:
+        _is_mr2 = False
+
     reasons = []
     confirm_count = 0
     total_checks = 0
 
-    # 条件1: 价格在 MA5 上方（短线强势）
+    # 条件1: 价格在 MA5 上方（短线强势）— 均值回归模式反转
     total_checks += 1
-    if tech.get("price_above_ma5"):
-        confirm_count += 1
-        reasons.append("✓ 价格站上MA5")
+    if _is_mr2:
+        # 均值回归: 价格在MA5下方=超跌→买点
+        if not tech.get("price_above_ma5"):
+            confirm_count += 1
+            reasons.append("✓ [MR] 价格跌破MA5(超跌反弹机会)")
+        else:
+            reasons.append("✗ [MR] 价格在MA5上方(未超跌)")
     else:
-        reasons.append("✗ 价格在MA5下方")
+        if tech.get("price_above_ma5"):
+            confirm_count += 1
+            reasons.append("✓ 价格站上MA5")
+        else:
+            reasons.append("✗ 价格在MA5下方")
 
-    # 条件2: 均线多头排列
+    # 条件2: 均线多头排列 — 均值回归模式接受死叉
     total_checks += 1
-    if tech.get("ma5_above_ma20"):
-        confirm_count += 1
-        reasons.append("✓ MA5 > MA20 多头排列")
+    if _is_mr2:
+        # 均值回归: 死叉后=超卖→买点
+        if not tech.get("ma5_above_ma20"):
+            confirm_count += 1
+            reasons.append("✓ [MR] MA5<MA20(死叉超卖→反弹)")
+        else:
+            reasons.append("✗ [MR] 多头排列(未回调)")
     else:
-        reasons.append("✗ 均线空头排列")
+        if tech.get("ma5_above_ma20"):
+            confirm_count += 1
+            reasons.append("✓ MA5 > MA20 多头排列")
+        else:
+            reasons.append("✗ 均线空头排列")
 
     # 条件3: RSI 不超买
     total_checks += 1
@@ -754,14 +794,17 @@ def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
 # 主信号生成
 # ============================================================
 
-def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None) -> list[dict]:
+def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None,
+                     scorer_total_scores: dict = None) -> list[dict]:
     """
     为所有标的生产完整的交易信号
 
     Parameters
     ----------
-    codes     : 标的列表, 默认全部
-    portfolio : PortfolioManager 实例, 用于计算仓位建议
+    codes               : 标的列表, 默认全部
+    portfolio           : PortfolioManager 实例, 用于计算仓位建议
+    scorer_total_scores : dict[code → float], scorer 的 10 维评分
+                          传入后跳过 signal_engine 自身的 6 维评分计算
 
     Returns
     -------
@@ -782,7 +825,7 @@ def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None
     signals = []
     for code in codes:
         try:
-            sig = _generate_single_signal(code, rt_map.get(code, {}), position_codes, portfolio)
+            sig = _generate_single_signal(code, rt_map.get(code, {}), position_codes, portfolio, scorer_total_scores)
             if sig:
                 signals.append(sig)
         except Exception as e:
@@ -800,7 +843,8 @@ def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None
 
 
 def _generate_single_signal(code: str, realtime_data: dict,
-                             position_codes: set, portfolio: PortfolioManager) -> Optional[dict]:
+                             position_codes: set, portfolio: PortfolioManager,
+                             scorer_total_scores: dict = None) -> Optional[dict]:
     """单个标的的信号生成"""
     name = STOCK_MAP.get(code, {}).get("name", code)
     price = realtime_data.get("price", 0)
@@ -848,23 +892,37 @@ def _generate_single_signal(code: str, realtime_data: dict,
     else:
         fourteen_factor_score = None
 
-    total_score = compute_multi_factor_score(tech_score, serenity_score, alpha_signals, zone_info, fund_signal, fourteen_factor_score)
+    # 优先使用 scorer 传入的 10 维评分，替代 signal_engine 自身的 6 维计算
+    if scorer_total_scores and code in scorer_total_scores:
+        total_score = scorer_total_scores[code]
+    else:
+        total_score = compute_multi_factor_score(tech_score, serenity_score, alpha_signals, zone_info, fund_signal, fourteen_factor_score)
 
-    # 优先使用 scorer 的最新评分（确保 rescore 和 signal 显示一致）
+    # 评分已由 scorer 通过 scorer_total_scores 传入（或回退到 compute_multi_factor_score）
+    # 不再需要 scoring_history 的 DB 回退
+
+    # 🆕 均值回归评分叠加 — MR 模式激活时，RSI 超卖加分/超买减分
+    # 回测验证：MeanReversionStrategy 在当前市场显著优于 MultiFactorStrategy
+    # 002281: MR +21.9% vs MF -3.4%, 000988: MR +9.3% vs MF -0.6%
     try:
-        from db import get_conn as _get_conn
-        from datetime import date as _date
-        _conn = _get_conn()
-        _row = _conn.execute(
-            'SELECT total_score, serenity_score FROM scoring_history WHERE code=? AND date=? ORDER BY total_score DESC LIMIT 1',
-            (code, _date.today().isoformat())
-        ).fetchone()
-        if _row and _row[0] is not None:
-            total_score = _row[0]
-        if _row and len(_row) > 1 and _row[1] is not None:
-            serenity_score = _row[1]
+        from market_sense import MarketSense
+        _mr_mode = MarketSense().get_operational_mode()
     except Exception:
-        pass
+        _mr_mode = {}
+    # 如果 scorer 已传入评分（含 MR 维度），跳过此处的 RSI 叠加，避免重复计算
+    _use_scorer_scores = bool(scorer_total_scores and code in scorer_total_scores)
+    if _mr_mode.get("factor_invert") and not _use_scorer_scores:
+        rsi_val = tech.get("rsi", 50)
+        if rsi_val is not None and not (isinstance(rsi_val, float) and (rsi_val != rsi_val)):
+            if rsi_val < 30:
+                total_score += 12
+            elif rsi_val < 40:
+                total_score += 5
+            elif rsi_val > 75:
+                total_score -= 10
+            elif rsi_val > 65:
+                total_score -= 5
+            total_score = max(0, min(100, total_score))
 
     # 7. 信号级别（持仓/非持仓分开处理，带 conviction 动态调参）
     try:
@@ -877,18 +935,26 @@ def _generate_single_signal(code: str, realtime_data: dict,
                                  is_holding, _conv_target) if is_holding else get_signal_level(total_score, _conv_target)
 
     # 7.3 🆕 技术面卖出触发器 — 均线死叉/上轨遇阻/连降等
+    # 市场状态自适应：均值回归模式下降权卖出触发器（历史SELL信号+3%反弹）
     sell_triggers = compute_sell_triggers(code, tech, total_score)
-    total_sell_weight = sum(t["weight"] for t in sell_triggers)
+    raw_sell_weight = sum(t["weight"] for t in sell_triggers)
+    try:
+        from scorer import get_operational_mode
+        _op_mode = get_operational_mode()
+        _stw = _op_mode.get("sell_trigger_weight", 1.0)
+    except Exception:
+        _stw = 1.0
+    total_sell_weight = raw_sell_weight * _stw
     if total_sell_weight >= 3 and action not in ("SELL", "STOP_LOSS"):
         action = "SELL"
-        log.info("  🔴 卖出触发器触发(%d点): %s", total_sell_weight,
+        log.info("  🔴 卖出触发器触发(原始%d×权重%.0f%%=%.1f点): %s", raw_sell_weight, _stw*100, total_sell_weight,
                  "; ".join(t["detail"] for t in sell_triggers))
     elif total_sell_weight >= 2 and total_score < 60 and action not in ("SELL", "STOP_LOSS"):
         if is_holding:
             action = "WEAK_HOLD"
         else:
             action = "WATCH"
-        log.info("  🟡 卖出预警(%d点): %s", total_sell_weight,
+        log.info("  🟡 卖出预警(原始%d×权重%.0f%%=%.1f点): %s", raw_sell_weight, _stw*100, total_sell_weight,
                  "; ".join(t["detail"] for t in sell_triggers))
 
     # 7.5 已达目标价 → 强制卖出

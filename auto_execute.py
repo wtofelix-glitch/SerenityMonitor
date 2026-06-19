@@ -144,21 +144,16 @@ def compute_total_portfolio_value(holdings: list[dict], cash: float) -> float:
 
 
 def compute_available_cash() -> float:
-    """计算可用现金"""
-    conn = get_conn()
-    rows = conn.execute("SELECT action, price, quantity, trade_amount FROM trades").fetchall()
-    conn.close()
-    bought = 0.0
-    sold = 0.0
-    for r in rows:
-        amt = r["trade_amount"] or 0
-        if amt == 0 and r["price"] and r["quantity"]:
-            amt = r["price"] * r["quantity"]
-        if r["action"] == "buy":
-            bought += amt
-        elif r["action"] == "sell":
-            sold += amt
-    return CAPITAL_CONFIG["initial_capital"] - bought + sold
+    """计算可用现金 — 通过 PortfolioManager 精确计算
+    
+    旧算法: initial_capital - sum(all_buys) + sum(all_sells)
+    问题: 重复 sell 记录/历史清仓残留会严重扭曲现金值
+    新算法: 从 PortfolioManager 读取，由活跃持仓 + 正确成本链计算
+    """
+    from portfolio import PortfolioManager
+    pm = PortfolioManager()
+    pv = pm.get_portfolio_value()
+    return float(pv.get("cash", 0))
 
 
 def generate_execution_plan(dry_run: bool = False) -> dict:
@@ -177,9 +172,15 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
     """
     today = date.today().isoformat()
     scores = get_latest_scores()
-    holdings = get_current_holdings()
+    holdings = [h for h in get_current_holdings() if h.get("code") != "CASH"]
     holding_codes = {h["code"] for h in holdings}
     cash = compute_available_cash()
+
+    # 读取激进模式下的有效配置（enter_threshold=64 而非 68 等）
+    from config import get_effective_config
+    _eff = get_effective_config()
+    _eff_cap = _eff["capital"]
+    _eff_risk = _eff["risk"]
 
     total_value = compute_total_portfolio_value(holdings, cash)
 
@@ -188,15 +189,21 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         code="", action="SELL",
         holdings=holdings,
         current_total_value=total_value,
-        initial_capital=INITIAL_CAPITAL,
+        initial_capital=total_value,  # 用当前总资产作为回撤基准
     )
     if not risk_check["allowed"]:
         critical_reasons = [r for r in risk_check["reasons"] if "熔断" in r or "回撤" in r]
         if critical_reasons:
             log.warning("风控触发: %s", "; ".join(critical_reasons))
 
-    # ── 熔断保护：总回撤 > 15% → 强制清仓 ──
-    portfolio_dd = (INITIAL_CAPITAL - total_value) / INITIAL_CAPITAL
+    # ── 熔断保护：总回撤 > 12% → 强制清仓 ──
+    # 基准为nav_history峰值（非初始资金），避免误触发
+    try:
+        _peak_row = conn.execute("SELECT COALESCE(MAX(total_value), ?) as peak FROM nav_history", (total_value,)).fetchone()
+        _peak_nav = _peak_row["peak"] if _peak_row else total_value
+    except Exception:
+        _peak_nav = total_value
+    portfolio_dd = (_peak_nav - total_value) / _peak_nav if _peak_nav > 0 else 0
     if portfolio_dd > CIRCUIT_BREAKER_DD:
         sells = []
         for h in holdings:
@@ -235,11 +242,23 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
 
     # 大盘择时调整
     market = _get_market_adjustments()
+    # 合并 MarketSense 操作模式（factor_invert, buy_threshold_shift 等）
+    try:
+        from market_sense import MarketSense
+        _op_mode = MarketSense().get_operational_mode()
+        market["operational_mode"] = _op_mode
+        market["regime"] = _op_mode.get("regime_label", "")
+    except Exception:
+        market["operational_mode"] = {}
+        market["regime"] = ""
     max_positions = market['max_pos']
     max_single_weight = market['max_single']
-    enter_threshold = CAPITAL_CONFIG.get("enter_threshold", SIGNAL_CONFIG["buy_threshold"]) + market['enter_adj']
-    exit_threshold = CAPITAL_CONFIG.get("exit_threshold", SIGNAL_CONFIG.get("pos_exit_threshold", 48))
-    reserve_cash_ratio = CAPITAL_CONFIG["reserve_cash_ratio"]
+    enter_threshold = _eff_cap.get("enter_threshold", SIGNAL_CONFIG["buy_threshold"]) + market['enter_adj']
+    # 叠加操作模式的买入门槛偏移（均值回归模式降门槛）
+    _op_buy_shift = market.get("operational_mode", {}).get("buy_threshold_shift", 0)
+    enter_threshold += _op_buy_shift
+    exit_threshold = _eff_cap.get("exit_threshold", SIGNAL_CONFIG.get("pos_exit_threshold", 48))
+    reserve_cash_ratio = _eff_cap.get("reserve_cash_ratio", 0.03)
 
     sells = []
     buys = []
@@ -286,6 +305,24 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             should_sell = True
             reasons.append(f"系统信号: {signal}")
 
+        # 条件4: 评分连续衰减 — 3天连降且无反弹迹象 → 建议减仓/换仓
+        # 不强卖（留决策空间），但加警告标记
+        try:
+            _score_rows = conn.execute(
+                "SELECT total_score FROM scoring_history WHERE code=? ORDER BY date DESC LIMIT 4",
+                (code,)
+            ).fetchall()
+            if len(_score_rows) >= 3:
+                _scores = [r[0] for r in _score_rows if r[0] is not None]
+                if len(_scores) >= 3 and _scores[0] < _scores[1] < _scores[2]:
+                    _drop_total = _scores[2] - _scores[0]
+                    if _drop_total >= 6:  # 累计下降6分以上
+                        reasons.append(f"评分3连降({_scores[2]:.0f}→{_scores[0]:.0f}) 累计-{_drop_total:.0f}分")
+                        if score < 65 and not should_sell:
+                            should_sell = True
+        except Exception:
+            pass
+
         if should_sell:
             amt = h.get("trade_amount", 0) or 0
             buy_price = h.get("buy_price", 1)
@@ -305,17 +342,62 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                 "urgency": "high" if signal in ("SELL", "STOP_LOSS") else "medium",
             })
 
+    # ── Phase 1.5: 止盈减仓检查 ──────────────────────────
+    try:
+        from portfolio import get_portfolio
+        _pm = get_portfolio()
+        _stop_actions = _pm.check_stop_conditions()
+        _already_selling = {s["code"] for s in sells}
+        for _sa in _stop_actions:
+            if _sa["code"] in _already_selling:
+                continue
+            if "PARTIAL" in _sa.get("action", ""):
+                _h = next((x for x in holdings if x["code"] == _sa["code"]), None)
+                if _h:
+                    _amt = _h.get("trade_amount", 0) or 0
+                    _bp = _h.get("buy_price", 1)
+                    _shares = int(_amt / _bp / 100) * 100 if _bp > 0 else 0
+                    _exit_ratio = _sa.get("exit_ratio", 1.0)
+                    _sell_shares = max(100, int(_shares * _exit_ratio / 100) * 100)
+                    _est = _sell_shares * _sa.get("price", _bp)
+                    sells.append({
+                        "code": _sa["code"],
+                        "name": STOCK_MAP.get(_sa["code"], {}).get("name", _sa["code"]),
+                        "action": "SELL_PARTIAL",
+                        "score": scores.get(_sa["code"], {}).get("total_score", 0),
+                        "shares": _sell_shares,
+                        "estimated_proceeds": round(_est, 2),
+                        "profit_pct": _sa.get("profit_pct", 0),
+                        "reasons": [_sa["reason"]],
+                        "urgency": "medium",
+                    })
+                    _already_selling.add(_sa["code"])
+                    log.info("止盈减仓加入执行计划: %s %s", _sa["code"], _sa["reason"])
+    except Exception as _e:
+        log.debug("止盈检查跳过: %s", _e)
+
     # ── Phase 2: 释放资金后，检查可买入标的 ──────────────────
     freed_cash = sum(s["estimated_proceeds"] for s in sells)
     available_cash = cash + freed_cash
 
-    # 卖出后剩余持仓数
-    remaining_holdings = len(holdings) - len(sells)
+    # 卖出后剩余持仓数（止盈减仓不算清仓，不释放仓位槽）
+    _full_sells = [s for s in sells if "PARTIAL" not in s.get("action", "")]
+    remaining_holdings = len(holdings) - len(_full_sells)
     open_slots = max(0, max_positions - remaining_holdings)
 
     swap_candidates = []
     if open_slots <= 0 and holdings:
-        # 无空位 — 检查是否应换仓：非持仓评分 > 最低持仓评分 + 8
+        # 无空位 — 检查是否应换仓
+        # 换仓门槛随市场状态自适应：趋势市/牛市+3，MR+2（评分压缩），震荡+3
+        # 翻倍目标: 降低所有门槛，更积极换仓
+        _swap_gap = 3
+        _swap_signals = ("STRONG_BUY", "BUY", "CAUTION_BUY")
+        if market.get("operational_mode", {}).get("factor_invert"):
+            _swap_gap = 2
+            _swap_signals = ("STRONG_BUY", "BUY", "CAUTION_BUY")
+        elif market.get("operational_mode", {}).get("mode") == "trend":
+            _swap_gap = 3
+            _swap_signals = ("STRONG_BUY", "BUY", "CAUTION_BUY")
         held_scores = {
             h["code"]: scores.get(h["code"], {}).get("total_score", 0)
             for h in holdings if h["code"] not in {s["code"] for s in sells}
@@ -332,8 +414,8 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                 score = s.get("total_score", 0)
                 details = _parse_details(s.get("details", "{}"))
                 signal = details.get("signal_action", "")
-                if score >= enter_threshold and signal in ("STRONG_BUY", "BUY"):
-                    if score >= worst_held_score + 8:
+                if score >= enter_threshold and signal in _swap_signals:
+                    if score >= worst_held_score + _swap_gap:
                         swap_candidates.append({
                             "code": code,
                             "name": STOCK_MAP.get(code, {}).get("name", code),
@@ -377,7 +459,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         # 换仓买入：用换出资金买入换入标的
         in_price = s_details.get("price", 0)
         if in_price > 0:
-            swap_budget = estimated + cash  # 换出资金 + 剩余现金
+            swap_budget = estimated + available_cash  # 换出资金 + 剩余现金（含止盈释放）
             in_shares = int(swap_budget * 0.95 / in_price / 100) * 100
             if in_shares >= 100:
                 in_amount = in_shares * in_price
@@ -398,8 +480,54 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                 open_slots -= 1
     # 更新可用资金（含换仓卖出释放）
     available_cash = cash + freed_cash
-    remaining_holdings = len(holdings) - len(sells)
+    # 🆕 翻倍目标：换仓后重新计算 open_slots，确保剩余现金可买入第二只
+    # 换仓卖出一只、买入一只，净仓位不变，open_slots = max_positions - 新持仓数
+    _new_full_sells = [s for s in sells if "PARTIAL" not in s.get("action", "")]
+    remaining_holdings = len(holdings) - len(_new_full_sells)
     open_slots = max(0, max_positions - remaining_holdings)
+
+    # ── Phase 2.5: 持仓加仓 (Top-up) — 无空位时对高分持仓追加 ──
+    if open_slots <= 0 and available_cash > 0 and holdings:
+        remaining_held = [h for h in holdings if h["code"] not in {s["code"] for s in sells}]
+        for h in sorted(remaining_held, key=lambda x: scores.get(x["code"], {}).get("total_score", 0), reverse=True):
+            code = h["code"]
+            s = scores.get(code, {})
+            score = s.get("total_score", 0)
+            details = _parse_details(s.get("details", "{}"))
+            signal = details.get("signal_action", "")
+            price = details.get("price", 0)
+            if score < enter_threshold or signal not in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+                continue
+            # 检查是否还有加仓空间（不超过 max_single_weight）
+            cur_amt = h.get("trade_amount", 0) or 0
+            max_amt = total_value * max_single_weight
+            room = max_amt - cur_amt
+            if room <= 0 or price <= 0:
+                continue
+            # 计算可追加股数（整百，不超过可用现金和加仓空间）
+            add_shares = int(min(available_cash, room) / price / 100) * 100
+            if add_shares < 100:
+                continue
+            add_amount = add_shares * price
+            buys.append({
+                "code": code,
+                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "action": "TOPUP",
+                "score": score,
+                "signal": signal,
+                "price": price,
+                "shares": add_shares,
+                "amount": round(add_amount, 2),
+                "tier": STOCK_MAP.get(code, {}).get("tier", 3),
+                "zone_label": details.get("zone_label", ""),
+                "reason": f"加仓: 评分{score:.0f} 当前{cur_amt/max(total_value,1)*100:.0f}%→{(cur_amt+add_amount)/max(total_value,1)*100:.0f}%权重",
+            })
+            available_cash -= add_amount
+            break  # 集中火力，一次只加仓一只
+
+    # 构建卖出调整后的持仓（排除完全卖出的标的，减仓保留）
+    _full_sell_codes = {s["code"] for s in sells if "PARTIAL" not in s.get("action", "")}
+    adjusted_holdings = [h for h in holdings if h["code"] not in _full_sell_codes]
 
     # 候选买入池
     buy_candidates = []
@@ -458,9 +586,9 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         # 风控检查：黑名单 + 冷却 + 行业集中度
         risk_check = risk.is_trade_allowed(
             code=code_check, action="BUY",
-            holdings=holdings,
+            holdings=adjusted_holdings,
             current_total_value=total_value,
-            initial_capital=INITIAL_CAPITAL,
+            initial_capital=total_value,  # 用当前总资产作为回撤基准
             new_amount=available_cash * max_single_weight,
         )
         if not risk_check["allowed"]:
@@ -481,7 +609,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             continue
 
         amount = shares * price
-        if amount < CAPITAL_CONFIG.get("min_single_weight", 0.25) * total_value:
+        if amount < _eff_cap.get("min_single_weight", CAPITAL_CONFIG.get("min_single_weight", 0.25)) * total_value:
             continue
 
         buys.append({
@@ -594,6 +722,12 @@ def _record_execution_orders(plan: dict):
     conn = get_conn()
     # 先清理当日旧记录，避免重复
     for s in plan["sells"]:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM execution_log"
+            " WHERE date = ? AND code = ? AND action = ? AND status = ?",
+            (today, s["code"], "SELL", "executed")).fetchone()[0]
+        if existing > 0:
+            continue  # 今日已执行，跳过重复
         conn.execute("""
             DELETE FROM execution_log
             WHERE date = ? AND code = ? AND action = ? AND status IN ('pending', 'failed')
@@ -605,6 +739,12 @@ def _record_execution_orders(plan: dict):
         """, (today, s["code"], "SELL", s["shares"], s["estimated_proceeds"],
               "; ".join(s.get("reasons", []))[:200]))
     for b in plan["buys"]:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM execution_log"
+            " WHERE date = ? AND code = ? AND action = ? AND status = ?",
+            (today, b["code"], "BUY", "executed")).fetchone()[0]
+        if existing > 0:
+            continue
         conn.execute("""
             DELETE FROM execution_log
             WHERE date = ? AND code = ? AND action = ? AND status IN ('pending', 'failed')
@@ -672,10 +812,34 @@ def _retry_pending_executions(dry_run: bool = False) -> int:
 
         try:
             if action == "SELL":
+                # 幂等保护: 检查今日是否已卖出此标的
+                _conn3 = get_conn()
+                _already_sold = _conn3.execute(
+                    "SELECT COUNT(*) FROM trades WHERE code=? AND action='sell' AND date=?",
+                    (code, today)
+                ).fetchone()[0]
+                if _already_sold > 0:
+                    log.warning("跳过重复卖出 %s: 今日已记录 %d 笔", code, _already_sold)
+                    _update_execution(code, today, "executed", attempt=attempt, price=price,
+                                      shares=shares, error_msg="重复跳过", action=action)
+                    executed += 1
+                    continue
                 clear_active(code)
                 add_trade(code, "sell", price, shares, today,
                           f"force-execute (重试#{attempt-1})", trade_amount=shares*price)
             elif action == "BUY":
+                # 幂等保护: 检查今日是否已买入此标的
+                _conn3 = get_conn()
+                _already_bought = _conn3.execute(
+                    "SELECT COUNT(*) FROM trades WHERE code=? AND action='buy' AND date=?",
+                    (code, today)
+                ).fetchone()[0]
+                if _already_bought > 0:
+                    log.warning("跳过重复买入 %s: 今日已记录 %d 笔", code, _already_bought)
+                    _update_execution(code, today, "executed", attempt=attempt, price=price,
+                                      shares=shares, error_msg="重复跳过", action=action)
+                    executed += 1
+                    continue
                 target = STOCK_DETAILS.get(code, {})
                 stop_price = round(price * 0.92, 2)  # 8% 止损
                 set_active(code, price, today,
@@ -1007,6 +1171,12 @@ def main():
         executed = []
 
         for s in plan["sells"]:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM execution_log"
+                " WHERE date = ? AND code = ? AND action = ? AND status = ?",
+                (today, s["code"], "SELL", "executed")).fetchone()[0]
+            if existing > 0:
+                continue  # 今日已执行，跳过重复
             price = s["estimated_proceeds"] / max(s["shares"], 1)
             clear_active(s["code"])
             add_trade(s["code"], "sell", price, s["shares"], today,
@@ -1014,6 +1184,12 @@ def main():
             executed.append(f'  ✅ 卖出 {s["name"]}({s["code"]}) {s["shares"]}股 @{price:.2f}')
 
         for b in plan["buys"]:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM execution_log"
+                " WHERE date = ? AND code = ? AND action = ? AND status = ?",
+                (today, b["code"], "BUY", "executed")).fetchone()[0]
+            if existing > 0:
+                continue
             price = b["price"]
             # 计算并设置止损
             try:
