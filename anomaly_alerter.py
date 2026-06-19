@@ -25,14 +25,22 @@ def check_anomalies():
     if not positions:
         return []
     
-    codes = [p["code"] for p in positions]
-    realtime = fetch_realtime(codes)
+    codes = [p["code"] for p in positions if p["code"] != "CASH"]
+    if not codes:
+        return []
+    try:
+        realtime = fetch_realtime(codes)
+    except Exception as e:
+        print(f"[WARN] fetch_realtime失败(收盘后正常): {e}", file=sys.stderr)
+        return []  # 优雅降级：无实时数据 = 无不报警
     rt_map = {r["code"]: r for r in realtime}
     
     alerts = []
     
     for pos in positions:
         code = pos["code"]
+        if code == "CASH":
+            continue  # CASH 不是股票，不参与异常检测
         name = pos.get("name", STOCK_MAP.get(code, {}).get("name", code))
         rt = rt_map.get(code, {})
         price = rt.get("price", 0)
@@ -166,4 +174,5 @@ if __name__ == "__main__":
         except Exception:
             pass
     else:
-        print("✅ 无异常")
+        # 无异常不推送 — 空输出让 cron 静默跳过
+        pass

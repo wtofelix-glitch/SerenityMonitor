@@ -6,6 +6,9 @@ SerenityMonitor 统一日志模块
     log.info("message")
     log.warning("something", exc_info=True)
 """
+
+import glob
+import time
 import logging
 import os
 import sys
@@ -13,6 +16,20 @@ from datetime import datetime
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+LOG_RETENTION_DAYS = 14  # 保留最近14天日志，超出自动清理
+
+
+def cleanup_old_logs():
+    """清理超过 LOG_RETENTION_DAYS 天的旧日志文件"""
+    cutoff = time.time() - LOG_RETENTION_DAYS * 86400
+    for pattern in ["serenity_*.log", "dashboard*.log", "scheduler*.log",
+                   "ngrok*.log", "bridge*.log"]:
+        for f in glob.glob(os.path.join(LOG_DIR, pattern)):
+            try:
+                if os.path.getmtime(f) < cutoff:
+                    os.remove(f)
+            except OSError:
+                pass
 
 _loggers: dict[str, logging.Logger] = {}
 
@@ -27,6 +44,9 @@ def get_logger(name: str = "serenity") -> logging.Logger:
         return logger
 
     logger.setLevel(logging.DEBUG)
+
+    # 启动时清理过期日志
+    cleanup_old_logs()
 
     # 文件 handler — 按天轮转
     today = datetime.now().strftime("%Y-%m-%d")

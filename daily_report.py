@@ -229,6 +229,23 @@ def generate_daily_report() -> str:
     except Exception:
         pass
 
+    # ====== 大师智慧信号 ======
+    try:
+        from guru_wisdom import generate_report as _guru_report, get_recent_quotes, status as _guru_status
+        _guru_stats = _guru_status()
+        if _guru_stats["total_quotes"] > 0:
+            lines.append("📜 **大师智慧信号**")
+            # 近7天有新增则显示语录，否则显示统计
+            if _guru_stats["recent_quotes_7d"] > 0:
+                _recent = get_recent_quotes(3)
+                for _q in _recent:
+                    _emoji = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(_q.get("sentiment", "neutral"), "⚪")
+                    lines.append(f"  {_emoji} {_q['cn_name']}: {_q['content'][:50]}")
+            lines.append(f"  📊 共 {_guru_stats['total_quotes']} 条语录 | {_guru_stats['gurus']} 位大师")
+            lines.append("")
+    except Exception:
+        pass
+
     # ====== 信号汇总 ======
     try:
         from signal_engine import generate_signals

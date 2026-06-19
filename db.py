@@ -504,8 +504,8 @@ def save_score_history(code: str, scores: dict):
         INSERT INTO scoring_history (code, date, total_score, base_score,
             zone_score, momentum_score, volume_score, details,
             serenity_score, factor_score, technical_score, sentiment_score,
-            moat_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            moat_score, mr_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(code, date) DO UPDATE SET
             total_score=excluded.total_score, base_score=excluded.base_score,
             zone_score=excluded.zone_score, momentum_score=excluded.momentum_score,
@@ -513,7 +513,8 @@ def save_score_history(code: str, scores: dict):
             serenity_score=excluded.serenity_score, factor_score=excluded.factor_score,
             technical_score=excluded.technical_score,
             sentiment_score=excluded.sentiment_score,
-            moat_score=excluded.moat_score
+            moat_score=excluded.moat_score,
+            mr_score=excluded.mr_score
     """, (
         code, scores["date"], scores["total_score"],
         scores.get("base_score", 0), scores.get("zone_score", 0),
@@ -522,7 +523,8 @@ def save_score_history(code: str, scores: dict):
         scores.get("serenity_score", 0), scores.get("factor_score", 0),
         scores.get("technical_score", 0),
         scores.get("sentiment_score", 0),
-        scores.get("moat_score", 50)
+        scores.get("moat_score", 50),
+        scores.get("mr_score", 50.0)
     ))
     conn.commit()
     conn.close()
@@ -762,9 +764,60 @@ def refresh_signal_performance():
     conn.close()
 
 
-def get_signal_performance(code: str = None, action: str = None) -> list[dict]:
-    """查询信号绩效"""
+def get_signal_performance(code: str = None, action: str = None, days: int = None):
+    """查询信号绩效
+
+    两种模式：
+    1. 无 days 参数（默认）：从 signal_performance 预聚合表查询，返回 list[dict]
+    2. 有 days 参数：从 signal_log 按天过滤并聚合，返回 dict[action] = {count, outcomes}
+    """
+    from datetime import date, timedelta
+
     conn = get_conn()
+
+    # ---- 模式 2：按天过滤 + 聚合 ----
+    if days is not None:
+        since = (date.today() - timedelta(days=days)).isoformat()
+        rows = conn.execute("""
+            SELECT action,
+                   COUNT(*) AS cnt,
+                   SUM(CASE WHEN outcome_1d > 0 THEN 1 ELSE 0 END) AS wins_1d,
+                   SUM(CASE WHEN outcome_3d > 0 THEN 1 ELSE 0 END) AS wins_3d,
+                   SUM(CASE WHEN outcome_5d > 0 THEN 1 ELSE 0 END) AS wins_5d,
+                   AVG(outcome_1d) AS avg_return_1d,
+                   AVG(outcome_3d) AS avg_return_3d,
+                   AVG(outcome_5d) AS avg_return_5d
+            FROM signal_log
+            WHERE date >= ?
+               AND (? IS NULL OR action = ?)
+            GROUP BY action
+            ORDER BY cnt DESC
+        """, (since, action, action) if action else (since, None, None)).fetchall()
+
+        conn.close()
+        result = {}
+        for r in rows:
+            cnt = r["cnt"]
+            result[r["action"]] = {
+                "count": cnt,
+                "outcomes": {
+                    "outcome_1d": {
+                        "hit_rate": round(r["wins_1d"] / cnt * 100, 1) if cnt else 0,
+                        "avg_return": round(r["avg_return_1d"] * 100, 2) if r["avg_return_1d"] else 0,
+                    },
+                    "outcome_3d": {
+                        "hit_rate": round(r["wins_3d"] / cnt * 100, 1) if cnt else 0,
+                        "avg_return": round(r["avg_return_3d"] * 100, 2) if r["avg_return_3d"] else 0,
+                    },
+                    "outcome_5d": {
+                        "hit_rate": round(r["wins_5d"] / cnt * 100, 1) if cnt else 0,
+                        "avg_return": round(r["avg_return_5d"] * 100, 2) if r["avg_return_5d"] else 0,
+                    },
+                },
+            }
+        return result
+
+    # ---- 模式 1：从预聚合表查询（旧行为） ----
     q = "SELECT * FROM signal_performance WHERE 1=1"
     params = []
     if code:

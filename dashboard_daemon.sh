@@ -66,6 +66,7 @@ start_tunnel() {
 
 # ---- 主流程 ----
 start_dashboard
-start_tunnel
+# Cloudflare 隧道已切换为 ngrok（`com.ngrok.hermes-gateway` 管理），不再启动 cloudflared
+echo "$(date '+%Y-%m-%d %H:%M:%S') 隧道由 ngrok 管理 (serenity-bridge)" >> "$LOGFILE"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') 守护检查完成" >> "$LOGFILE"

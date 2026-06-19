@@ -53,11 +53,12 @@ def main():
 
     # ── 1. 多因子评分 ──────────────────────────────────────
     step('1/8 多因子评分')
+    _scorer_results = None
     try:
         from scorer import score_all
-        results = score_all()
-        print(f"  ✅ 完成: {len(results)} 只标的已评分")
-        for r in results[:5]:
+        _scorer_results = score_all()
+        print(f"  ✅ 完成: {len(_scorer_results)} 只标的已评分")
+        for r in _scorer_results[:5]:
             print(f"     {r['name']:6s} {r['code']} {r['total_score']:.0f}分 {r['signal_action']}")
     except Exception as e:
         print(f"  ⚠️ 评分失败: {e}")
@@ -67,7 +68,9 @@ def main():
     try:
         from signal_engine import generate_signals
         from config import ALL_CODES
-        signals = generate_signals(codes=ALL_CODES)
+        # 使用 Step1 的统一评分结果（确保与 auto-execute 信号一致）
+        scorer_scores = {r["code"]: r["total_score"] for r in _scorer_results} if _scorer_results else None
+        signals = generate_signals(codes=ALL_CODES, scorer_total_scores=scorer_scores)
         buy_signals = [s for s in signals if s.get('action') in ('STRONG_BUY', 'BUY')]
         sell_signals = [s for s in signals if s.get('action') in ('SELL', 'STOP_LOSS')]
         print(f"  ✅ {len(signals)} 信号 | 🟢买入{len(buy_signals)} 🔴卖出{len(sell_signals)}")

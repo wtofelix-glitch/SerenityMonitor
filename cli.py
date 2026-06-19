@@ -643,9 +643,16 @@ def cmd_portfolio():
 
 
 def cmd_signal():
-    """查看所有标的的买卖信号"""
+    """查看所有标的的买卖信号（先运行统一评分，确保与auto-execute一致）"""
+    from scorer import score_all
+    # 先运行评分管线（写入 scoring_history 并返回结果）
+    score_results = score_all()
+    # 从评分结果构建信号显示（而非独立计算）
     pm = get_portfolio()
-    signals = generate_signals(portfolio=pm)
+    # 复用 score_all 中已生成的信号（通过 scoring_history 读取）
+    signals = generate_signals(portfolio=pm, scorer_total_scores={
+        r["code"]: r["total_score"] for r in score_results
+    })
     print(pm.format_signal_summary(signals))
 
 
@@ -1744,6 +1751,55 @@ def main():
         return
 
     cmd = sys.argv[1]
+
+    # ====== 🆕 大师智慧命令组 ======
+    if cmd == "guru":
+        if len(sys.argv) >= 3:
+            _gsub = sys.argv[2]
+            if _gsub == "status":
+                from guru_wisdom import status as _gs
+                s = _gs()
+                print(f"📊 Guru Wisdom 状态")
+                print(f"  · 监控大师: {s['gurus']} 位")
+                print(f"  · 总语录: {s['total_quotes']} 条")
+                print(f"  · 近7天新增: {s['recent_quotes_7d']} 条")
+                print(f"  · 上次采集: {s['last_collection']}")
+                dist = s['sentiment_distribution']
+                print(f"  · 情绪: 🟢{dist['bullish']} 🔴{dist['bearish']} ⚪{dist['neutral']}")
+            elif _gsub == "report":
+                from guru_wisdom import generate_report as _gr
+                print(_gr())
+            elif _gsub == "sentiment" and len(sys.argv) >= 4:
+                from guru_wisdom import get_guru_sentiment as _gsent
+                ss = _gsent(sys.argv[3])
+                print(f"📊 大师对 {sys.argv[3]} 的情绪:")
+                print(f"  · 涉及 {ss['gurus_count']} 位大师")
+                print(f"  · 🟢看多{ss['bullish']} 🔴看空{ss['bearish']} ⚪中性{ss['neutral']}")
+                print(f"  · 净情绪: {ss['net_score']:.2f}")
+            elif _gsub == "collect":
+                from guru_wisdom import collect_all, collect_guru
+                if len(sys.argv) >= 5 and sys.argv[3] == "--guru":
+                    r = collect_guru(sys.argv[4])
+                    print(f"✅ {r['guru']}: 采集 {r['items']} 条 | {r['status']}")
+                else:
+                    results = collect_all()
+                    total = sum(r["items"] for r in results)
+                    ok = sum(1 for r in results if r["status"] == "success")
+                    print(f"✅ 全量采集: {ok}/{len(results)} 成功, 共 {total} 条")
+            elif _gsub == "quote" and len(sys.argv) >= 4:
+                from guru_wisdom import get_guru_stock_mentions as _gm
+                mentions = _gm(sys.argv[3])
+                print(f"📜 大师提及 {sys.argv[3]}:")
+                for m in mentions:
+                    _emoji = {"bullish": "🟢", "bearish": "🔴", "neutral": "⚪"}.get(m.get("sentiment", "neutral"), "⚪")
+                    print(f"  {_emoji} {m['cn_name']}: {m['content'][:60]}")
+            else:
+                print(f"用法: python3 cli.py guru {{status|report|sentiment <code>|collect|quote <code>}}")
+        else:
+            print("用法: python3 cli.py guru {status|report|sentiment <code>|collect|quote <code>}")
+        return
+
+    # ====== LEGACY: 旧命令字典分发 ======
 
     commands = {
         "init": lambda: cmd_init(force="--force" in sys.argv),
