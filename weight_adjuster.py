@@ -88,6 +88,17 @@ def adjust_weights(min_days: int = 5) -> dict:
     Returns:
         调整后的权重 dict
     """
+    # 0. 检查手动覆盖锁
+    if os.path.exists(ADJUSTED_WEIGHTS_PATH):
+        try:
+            with open(ADJUSTED_WEIGHTS_PATH) as f:
+                existing = json.load(f)
+            if existing.get("_manual_override"):
+                print("🔒 权重手动覆盖已锁定，跳过自动调整")
+                return existing.get("weights", dict(DEFAULT_WEIGHTS))
+        except Exception:
+            pass
+    
     # 1. 运行 factor_ic.py 获取最新 IC 数据
     import subprocess
     script_dir = os.path.dirname(os.path.abspath(__file__))

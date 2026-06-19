@@ -42,118 +42,122 @@ SINA_PREFIX = "http://hq.sinajs.cn/list="
 # ============================================================
 # 标的深度信息
 # ============================================================
+# ============================================================
+# 标的深度信息 — 2026-06-18 收盘后校准
+# 价格基准：光迅266.2 | 华工177.55 | 亨通111 | 剑桥214.54 | 兴发38.65
+# ============================================================
 STOCK_DETAILS = {
     "002281": {
         "score": 97,
-        "buy_zone_low": 180.0,
-        "buy_zone_high": 230.0,
-        "target_sell": 320.0,
+        "buy_zone_low": 175.0,
+        "buy_zone_high": 220.0,
+        "target_sell": 300.0,
         "reason": "光器件全产业链龙头，AI光互联核心受益 — CPO检测/FAU直接映射Serenity的SIVE瓶颈逻辑",
         "serenity_tag": "CPO_chokepoint",
     },
     "000988": {
         "score": 90,
         "buy_zone_low": 130.0,
-        "buy_zone_high": 170.0,
-        "target_sell": 250.0,
+        "buy_zone_high": 165.0,
+        "target_sell": 220.0,
         "reason": "光模块+激光双主线，AI算力配套 — 激光器+光引擎赛道与SIVE逻辑高度重合",
         "serenity_tag": "laser+optical_engine",
     },
     "603083": {
         "score": 77,
-        "buy_zone_low": 140.0,
-        "buy_zone_high": 180.0,
-        "target_sell": 280.0,
+        "buy_zone_low": 155.0,
+        "buy_zone_high": 190.0,
+        "target_sell": 270.0,
         "reason": "高速光模块弹性标的，800G/1.6T放量 — 受益于CPO光学引擎需求爆发",
         "serenity_tag": "optical_module",
     },
     "600487": {
         "score": 75,
-        "buy_zone_low": 50.0,
-        "buy_zone_high": 65.0,
-        "target_sell": 90.0,
+        "buy_zone_low": 82.0,
+        "buy_zone_high": 115.0,
+        "target_sell": 145.0,
         "reason": "光纤光缆龙头，CPO光纤阵列(FAU)受益 — 防守型+补涨逻辑",
         "serenity_tag": "fiber_infra",
     },
     "002428": {
         "score": 55,
-        "buy_zone_low": 75.0,
-        "buy_zone_high": 95.0,
-        "target_sell": 130.0,
+        "buy_zone_low": 78.0,
+        "buy_zone_high": 96.0,
+        "target_sell": 120.0,
         "reason": "锗衬底材料，CPO用InP衬底的替代表达 — Serenity持有AXTI的映射逻辑",
         "serenity_tag": "substrate_material",
     },
     "600141": {
         "score": 68,
-        "buy_zone_low": 22.0,
-        "buy_zone_high": 28.0,
-        "target_sell": 38.0,
+        "buy_zone_low": 30.0,
+        "buy_zone_high": 36.0,
+        "target_sell": 44.0,
         "reason": "磷化工龙头，红磷/磷化学品用于CPO光对准和Rubin半导体热管理 — Serenity红磷主题映射",
         "serenity_tag": "phosphorus_chemicals",
     },
     "603986": {
         "score": 60,
-        "buy_zone_low": 400.0,
-        "buy_zone_high": 500.0,
-        "target_sell": 650.0,
+        "buy_zone_low": 410.0,
+        "buy_zone_high": 505.0,
+        "target_sell": 625.0,
         "reason": "NOR Flash/DRAM，AI数据中心存储需求外溢 — Serenity重仓SNDK的映射逻辑",
         "serenity_tag": "ai_storage",
     },
     "600460": {
         "score": 45,
-        "buy_zone_low": 14.0,
-        "buy_zone_high": 18.0,
-        "target_sell": 28.0,
+        "buy_zone_low": 28.0,
+        "buy_zone_high": 34.0,
+        "target_sell": 42.0,
         "reason": "功率半导体IDM龙头，800VDC数据中心供电架构受益 — 映射Serenity NVTS/POWI功率半主题",
         "serenity_tag": "power_semiconductor",
     },
     # 防御组合
     "600036": {
         "score": 75,
-        "buy_zone_low": 35.0,
+        "buy_zone_low": 34.0,
         "buy_zone_high": 42.0,
-        "target_sell": 55.0,
+        "target_sell": 52.0,
         "reason": "零售银行龙头，高股息防御 — 震荡市资金避风港，ROE行业领先",
         "serenity_tag": "defensive_dividend",
     },
     "600585": {
         "score": 68,
-        "buy_zone_low": 22.0,
-        "buy_zone_high": 28.0,
-        "target_sell": 38.0,
+        "buy_zone_low": 16.0,
+        "buy_zone_high": 20.0,
+        "target_sell": 24.0,
         "reason": "水泥龙头+高分红 — 基建稳增长受益，低估值防御属性强",
         "serenity_tag": "infra_dividend",
     },
     "600900": {
         "score": 80,
-        "buy_zone_low": 25.0,
+        "buy_zone_low": 24.0,
         "buy_zone_high": 30.0,
-        "target_sell": 38.0,
+        "target_sell": 36.0,
         "reason": "水电绝对龙头，现金流稳定 — 类债券属性，极端行情避险首选",
         "serenity_tag": "utility_defensive",
     },
     "601398": {
         "score": 78,
-        "buy_zone_low": 5.5,
-        "buy_zone_high": 7.0,
-        "target_sell": 9.0,
+        "buy_zone_low": 6.6,
+        "buy_zone_high": 8.2,
+        "target_sell": 10.0,
         "reason": "全球最大银行，股息率5%+ — 国家队护盘标的，系统性重要",
         "serenity_tag": "bank_defensive",
     },
     "601006": {
         "score": 65,
-        "buy_zone_low": 6.5,
-        "buy_zone_high": 8.0,
-        "target_sell": 10.5,
+        "buy_zone_low": 4.3,
+        "buy_zone_high": 5.3,
+        "target_sell": 6.6,
         "reason": "煤炭运输专线，稳定现金流 — 高股息+低波动，红利策略核心",
         "serenity_tag": "railway_dividend",
     },
 
     "600176": {
         "score": 55,
-        "buy_zone_low": 35.0,
-        "buy_zone_high": 42.0,
-        "target_sell": 55.0,
+        "buy_zone_low": 36.0,
+        "buy_zone_high": 44.0,
+        "target_sell": 54.0,
         "reason": "玻纤/电子布全球龙头，AI服务器PCB基材需求爆发 — 6月金股(7家券商推荐)，同赛道宏和科技已20倍",
         "serenity_tag": "electronic_fabric",
     },
@@ -287,7 +291,47 @@ CAPITAL_CONFIG = {
     "reserve_cash_ratio": 0.03,        # 保留 3% 现金（翻倍目标→现金=浪费）
     "commission_rate": 0.00025,        # 佣金万2.5
     "stamp_tax_rate": 0.001,           # 印花税千1（卖出时）
+    # 🆕 激进翻倍模式 — 一键切换保守/激进策略参数
+    # True: 高Kelly仓位 + 紧止损 + 低现金 + 更宽标的筛选
+    # 翻倍模式建议: 震荡市/牛市开启，连续亏损>2笔后关闭
+    "aggressive_mode": True,
+    # Kelly 翻倍参数（portfolio.py 动态读取）
+    "_kelly_base": 0.3,              # 翻倍模式: 0.3 (保守0.2)
+    "_kelly_multiplier": 0.55,       # 翻倍模式: 0.55 → range 0.3~0.85 (保守0.5→0.2~0.7)
 }
+
+
+def get_effective_config() -> dict:
+    """根据 aggressive_mode 返回实际生效的参数
+    
+    翻倍目标下激进模式的参数偏移：
+    - Kelly fraction: 0.3-0.85 (保守 0.2-0.7)
+    - min_single_weight: 0.15 (保守 0.30) 
+    - reserve_cash: 0.01 (保守 0.03)
+    - enter_threshold: 64 (保守 68)
+    - exit_threshold: 42 (保守 48)
+    - 震荡市自动启用（熊市/连续亏损>2时建议关闭）
+    """
+    cfg = dict(CAPITAL_CONFIG)
+    risk = dict(RISK_CONFIG)
+    
+    if cfg.get("aggressive_mode"):
+        cfg["min_single_weight"] = 0.10  # 翻倍目标: 0.15→0.10, 让现金充分利用不浪费槽位
+        cfg["reserve_cash_ratio"] = 0.002  # 翻倍目标: 0.5%→0.2%, 趋势市现金=最大浪费
+        cfg["enter_threshold"] = 56  # 翻倍目标: 60→56, 趋势市叠加-4→52, MR叠加-5→51
+        cfg["exit_threshold"] = 36  # 翻倍目标: 38→36, 更宽松持有让利润奔跑
+        risk["stop_loss_pct"] = -0.03      # 紧止损 -3%
+        risk["trailing_stop_pct"] = 0.06   # 移动止盈回撤 6%
+        risk["max_daily_loss_pct"] = -0.04  # 翻倍目标: 给Kelly留空间 -4%
+        risk["profit_take_level1"] = 0.08  # 止盈一档 +8%
+        risk["profit_take_level2"] = 0.16  # 止盈二档 +16%
+        risk["profit_take_level3"] = 0.28  # 止盈三档 +28%
+        # Kelly 翻倍系数（在 portfolio.py 中读取）
+        cfg["_kelly_base"] = 0.40  # 翻倍目标: 0.35→0.40, 趋势牛市重仓
+        cfg["_kelly_multiplier"] = 0.70  # 翻倍目标: 0.65→0.70 → range 0.40-1.0
+    
+    return {"capital": cfg, "risk": risk}
+
 
 # ============================================================
 # 🆕 风控参数
@@ -307,8 +351,8 @@ RISK_CONFIG = {
     "partial_exit_level1": 0.50,       # 一档出50%（200股→出100股，与100股最小单位对齐）
     "partial_exit_level2": 0.50,       # 二档出剩余持仓的50%（剩余100股→全部卖出）
     "optimizer_min_signal": 0.05,      # 组合优化器最小有效信号阈值
-    "optimizer_max_position_pct": 0.60, # 组合优化器单只上限 40%→60%
-    "optimizer_min_trade": 5000,       # 最小调仓金额
+    "optimizer_max_position_pct": 0.70,  # 翻倍目标: 60%→70%, 更集中 # 组合优化器单只上限 40%→60%
+    "optimizer_min_trade": 3000,       # 翻倍目标: 5000→3000, 更灵活       # 最小调仓金额
     # 🆕 硬止损规则 — 保护本金
     "max_single_loss_pct": -0.06,      # 单只亏损不超过 -6%
     "max_consecutive_losses": 2,       # 连续亏损2笔 → 强制空仓
@@ -326,8 +370,8 @@ SIGNAL_CONFIG = {
     #   [新] CAUTION_BUY 60-70: 21条(+0.91% wr38.5%) → 表现良好，hold_high降至60扩大该区
     #   [原] HOLD 50-60: 46条(0.0% wr33.3%) → 提高标准至50
     #   [原] SELL<42: 仅8条(-0.83% wr28.6%) → 提高至45，更多检出
-    "buy_threshold": 70.0,             # 综合评分 > 70 → BUY 信号（原72）
-    "strong_buy_threshold": 76.0,      # 综合评分 > 76 → 强力买入（原78）
+    "buy_threshold": 63.0,             # 综合评分 > 63 → BUY 信号（因子翻转后分布下移，原70）
+    "strong_buy_threshold": 68.0,      # 综合评分 > 68 → 强力买入（因子翻转后分布下移，原76）
     "sell_threshold": 45.0,            # 综合评分 < 45 → SELL 信号（原42）
     "hold_high": 60.0,                 # 评分在 60-70 → 谨慎买入 CAUTION_BUY（原62）
     "hold_low": 50.0,                  # 评分在 50-60 → 持有观察 HOLD（原48）
@@ -339,7 +383,7 @@ SIGNAL_CONFIG = {
         "中性": 0,
         "积极": 0,
         "机会": -2,                    # -2: 门槛放宽
-        "震荡": -4,                    # 🆕 震荡市额外-4（66→62放宽）
+        "震荡": -5,                    # 🆕 震荡市额外-5（翻倍目标放宽）
     },
     "factor_signal_confirm": 0.20,     # 因子信号 >= 0.20 确认买入
     "factor_signal_reject": -0.15,     # 因子信号 <= -0.15 拒绝买入
