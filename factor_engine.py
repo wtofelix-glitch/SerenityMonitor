@@ -36,9 +36,7 @@ __all__ = [
 ]
 
 # 信号因子名称列表 — 用于积分转换
-SIGNAL_FACTORS = ["ksft", "rank_20", "rsv_20", "beta_20", "resi_20",
-                  "macd_signal", "obv_trend", "mfi_signal", "cci_signal",
-                  "wq_alpha1", "wq_alpha3", "wq_alpha5", "wq_alpha15", "wq_alpha19"]
+from factor_metadata import SIGNAL_FACTORS
 # 描述因子名称列表 — 仅用于风险提示
 DESCRIPTIVE_FACTORS = ["klen", "std_20"]
 

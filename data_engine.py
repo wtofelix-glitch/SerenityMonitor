@@ -71,7 +71,7 @@ def sina_fetch_raw(code_list: list[str]) -> str:
     opener = urllib.request.build_opener(proxy_handler)
     req = urllib.request.Request(url)
     req.add_header("Referer", "https://finance.sina.com.cn")
-    with opener.open(req, timeout=10) as resp:
+    with opener.open(req, timeout=5) as resp:
         raw = resp.read().decode("gbk")
     return raw
 
@@ -227,7 +227,7 @@ def _tencent_fetch_realtime(code_list: list[str]) -> list[dict]:
     url = f"http://qt.gtimg.cn/q={','.join(prefixed)}"
 
     try:
-        r = httpx.get(url, timeout=8)
+        r = httpx.get(url, timeout=5)
         r.raise_for_status()
     except Exception as e:
         if METRICS_AVAILABLE:

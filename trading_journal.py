@@ -47,6 +47,51 @@ def init_journal_table():
     conn.close()
 
 
+def sync_from_trades(reason_prefix: str = "auto同步"):
+    """从 trades 表同步未记录的买卖到 trading_journal（幂等：按date+code+action去重）"""
+    init_journal_table()
+    conn = get_conn()
+    existing = conn.execute(
+        "SELECT DISTINCT code, action, date FROM trading_journal"
+    ).fetchall()
+    seen = set((r["code"], r["action"], r["date"]) for r in existing)
+
+    rows = conn.execute(
+        "SELECT code, action, price, quantity, date, note, created_at "
+        "FROM trades ORDER BY id"
+    ).fetchall()
+
+    synced = 0
+    for r in rows:
+        key = (r["code"], r["action"], r["date"])
+        if key in seen:
+            continue
+        conn.execute("""
+            INSERT INTO trading_journal
+                (code, action, date, price, shares, amount, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            r["code"],
+            r["action"],
+            r["date"],
+            r["price"],
+            r["quantity"],
+            r["price"] * r["quantity"],
+            f"{reason_prefix}: {r['note']}" if r["note"] else reason_prefix,
+        ))
+        seen.add(key)
+        synced += 1
+
+    # 也同步 CASH 校准记录（排除）
+    conn.execute(
+        "DELETE FROM trading_journal WHERE code = 'CASH'"
+    )
+
+    conn.commit()
+    conn.close()
+    return synced
+
+
 def log_trade(code: str, action: str, date_str: str = None, price: float = 0,
               shares: int = 0, reason: str = "", score: float = None,
               tags: str = "") -> int:

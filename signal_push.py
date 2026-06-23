@@ -23,15 +23,15 @@ from portfolio import PortfolioManager
 from serenity_logger import get_logger
 log = get_logger(__name__)
 
-TELEGRAM_TARGET = "telegram:8703799832"
+TELEGRAM_TARGET = f"telegram:{os.environ.get('TELEGRAM_CHAT_ID', '')}"
 HERMES_BIN = "/Users/mac/.local/bin/hermes"
 STATE_FILE = os.path.join(os.path.dirname(__file__), ".signal_state.json")
 
 
 import asyncio
 
-TELEGRAM_TOKEN = "8668009256:AAHe8wNCeY85pp4t41A-jBs_EAJqjl_cPuw"
-TELEGRAM_CHAT_ID = 8703799832
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 def send_telegram(message: str) -> bool:
     """通过 python-telegram-bot 发送消息（走代理）"""
@@ -166,10 +166,6 @@ def send_hermes(platform_target: str, message: str) -> bool:
 def push_execution_plan(plan: dict = None) -> bool:
     """推送执行计划到 Telegram，附带 Dashboard 确认链接"""
     try:
-        from auto_execute import generate_execution_plan
-        if plan is None:
-            plan = generate_execution_plan(dry_run=True)
-
         # 读取 Dashboard 公网 URL
         import os
         url_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.serenity_public_url')

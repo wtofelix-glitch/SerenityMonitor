@@ -3,7 +3,7 @@
 输出明确的 BUY / SELL / HOLD / STOP 信号
 """
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from config import (
@@ -19,7 +19,8 @@ try:
 except ImportError:
     _FUNDAMENTAL_AVAILABLE = False
     FundamentalEngine = None
-from portfolio import PortfolioManager, get_portfolio
+if TYPE_CHECKING:
+    from portfolio import PortfolioManager
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -115,6 +116,17 @@ def _apply_conviction_to_signal_config() -> dict:
     regime = cv["regime"]
     buy_adjust = cv["buy_adjust"]
     sell_adjust = cv["sell_adjust"]
+    
+    # 🆕 翻倍目标：激增模式额外调整
+    from config import CAPITAL_CONFIG
+    if CAPITAL_CONFIG.get("aggressive_mode"):
+        buy_adjust -= 5      # 更容易买入 (buy_threshold 63→58)
+        sell_adjust -= 7     # 更难触发卖出 (sell_threshold 45→38)
+        # 兜底：conviction极端场景不抵消激增偏移
+        # 弱势regime可能把buy推高到66 → clamp到61
+        # 强势regime可能把sell推高到41 → clamp到42
+        buy_adjust = min(buy_adjust, -2)    # buy_threshold ≤ 61
+        sell_adjust = min(sell_adjust, -5)  # sell_threshold ≤ 40
     
     # 调整买入/卖出阈值
     cfg["buy_threshold"] = max(50, min(85, SIGNAL_CONFIG["buy_threshold"] + buy_adjust))
@@ -794,7 +806,7 @@ def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
 # 主信号生成
 # ============================================================
 
-def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None,
+def generate_signals(codes: list[str] = None, portfolio: "PortfolioManager" = None,
                      scorer_total_scores: dict = None) -> list[dict]:
     """
     为所有标的生产完整的交易信号
@@ -813,6 +825,7 @@ def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None
     if codes is None:
         codes = ALL_CODES
     if portfolio is None:
+        from portfolio import get_portfolio
         portfolio = get_portfolio()
 
     # 获取实时数据
@@ -843,7 +856,7 @@ def generate_signals(codes: list[str] = None, portfolio: PortfolioManager = None
 
 
 def _generate_single_signal(code: str, realtime_data: dict,
-                             position_codes: set, portfolio: PortfolioManager,
+                             position_codes: set, portfolio: "PortfolioManager",
                              scorer_total_scores: dict = None) -> Optional[dict]:
     """单个标的的信号生成"""
     name = STOCK_MAP.get(code, {}).get("name", code)

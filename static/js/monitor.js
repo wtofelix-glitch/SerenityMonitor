@@ -18,8 +18,9 @@ const STATE = {
   data: null,
   navHistory: [],
   chartInstance: null,
-  activeTab: 'overview',
+    activeTab: 'overview',
   refreshInterval: null,
+  prevSignals: null,  // for change tracking
 };
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -27,6 +28,23 @@ const fmt = (n, d = 2) => (n == null || isNaN(n)) ? '—' : Number(n).toFixed(d)
 const clsPct = v => (v == null || isNaN(v) || v === 0) ? '' : (v >= 0 ? 'up' : 'down');
 const pctStr = v => (v == null || isNaN(v)) ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 const signClass = s => s ? 'signal-label-' + s : '';
+
+function getWriteToken() {
+  const params = new URLSearchParams(window.location.search);
+  const urlToken = params.get('token');
+  if (urlToken) {
+    try { localStorage.setItem('serenity_dashboard_token', urlToken); } catch(e) {}
+    return urlToken;
+  }
+  try { return localStorage.getItem('serenity_dashboard_token') || ''; } catch(e) { return ''; }
+}
+
+function writeHeaders(base) {
+  const headers = Object.assign({}, base || {});
+  const token = getWriteToken();
+  if (token) headers['X-Serenity-Token'] = token;
+  return headers;
+}
 
 // ─── 格式化货币 ────────────────────────────────────────────────
 function fmtCurrency(v) {
@@ -85,22 +103,36 @@ function init() {
 }
 
 // ─── 数据刷新 ──────────────────────────────────────────────────
-function refresh() {
+function refresh(force) {
   // 显示刷新指示器（非阻塞，不擦除内容）
   const timeEl = $('header-time');
   if (timeEl) timeEl.textContent = '⟳ 刷新中...';
 
-  fetch('/api/monitor-data')
+  const url = force ? '/api/monitor-data?force=1' : '/api/monitor-data';
+
+  fetch(url)
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
+        // Save previous signals for change tracking
+        if (!STATE.prevSignals && STATE.data && STATE.data.signal_brief) {
+          STATE.prevSignals = STATE.data.signal_brief;
+        }
         STATE.data = d.data;
         renderAll();
+        // Initialize lucide icons after DOM update
+        const iconLib = window.lucide;
+        if (iconLib && iconLib.createIcons) {
+          try { iconLib.createIcons(); } catch(e) {}
+        }
       } else {
         showError('数据获取失败');
       }
     })
-    .catch(() => showError('网络错误'));
+    .catch(err => {
+      if (err && err.name === 'AbortError') return;
+      showError('网络错误');
+    });
 
   // Load auxiliary data in background
   loadNavHistory();
@@ -113,11 +145,24 @@ function refresh() {
 
 function renderAll() {
   updateHeader();
-  updateKPI();
-  updateTargetTracker();
-  renderOverview(STATE.data);
+  updateMarketTape();
+  // Update previous signals after render for next comparison
+  if (STATE.data && STATE.data.signal_brief) {
+    STATE.prevSignals = STATE.data.signal_brief;
+  }
   // Force current tab render
   switchTab(STATE.activeTab);
+}
+
+// ─── 手动刷新（跳过缓存） ───────────────────────────────────
+function manualRefresh() {
+  const btn = $('refresh-btn');
+  if (btn) btn.classList.add('spinning');
+  refresh(true);
+  // 重置定时器：从现在起再过30秒自动刷新
+  clearInterval(STATE.refreshInterval);
+  STATE.refreshInterval = setInterval(refresh, 30000);
+  setTimeout(() => { if (btn) btn.classList.remove('spinning'); }, 700);
 }
 
 // ─── 头部更新 ──────────────────────────────────────────────────
@@ -126,6 +171,233 @@ function updateHeader() {
   if (!d) return;
   const timeEl = $('header-time');
   if (timeEl) timeEl.textContent = d.timestamp || d.date || '—';
+}
+
+function getMarketView(mkt) {
+  const rawSignal = ((mkt || {}).overall_signal || '').toLowerCase();
+  if (rawSignal.includes('多') || rawSignal === 'bull' || rawSignal === 'bullish') {
+    return { label: '多头', cls: 'up', posture: '进攻' };
+  }
+  if (rawSignal.includes('空') || rawSignal === 'bear' || rawSignal === 'bearish') {
+    return { label: '空头', cls: 'down', posture: '防守' };
+  }
+  return { label: '震荡', cls: 'gold', posture: '等待' };
+}
+
+function getExecutionView(d) {
+  const sb = (d || {}).signal_brief || {};
+  const pf = (d || {}).portfolio_summary || {};
+  const buyCount = sb.buy_count || 0;
+  const riskCount = sb.risk_count || 0;
+  const pnl = pf.total_profit_pct || 0;
+  const confidence = Math.max(8, Math.min(96, 42 + buyCount * 9 - riskCount * 7 + (pnl >= 0 ? 6 : -5)));
+  let label = '等待确认';
+  let tone = 'gold';
+  if (buyCount > 0 && buyCount >= riskCount) {
+    label = `${buyCount} 个买入候选`;
+    tone = 'up';
+  } else if (riskCount > buyCount) {
+    label = `${riskCount} 个风险提示`;
+    tone = 'down';
+  }
+  return { label, tone, confidence, buyCount, riskCount };
+}
+
+function parseDashboardTime(d) {
+  const raw = (d && (d.timestamp || d.date)) || '';
+  if (raw && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    const normalized = raw.length <= 10 ? raw + 'T00:00:00' : raw.replace(' ', 'T');
+    const parsed = new Date(normalized);
+    if (!isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
+function getSessionView(d) {
+  const now = parseDashboardTime(d);
+  const day = now.getDay();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const steps = [
+    { id: 'premarket', label: '盘前', short: '盘前' },
+    { id: 'intraday', label: '盘中', short: '盘中' },
+    { id: 'midday', label: '午间', short: '午间' },
+    { id: 'postmarket', label: '盘后', short: '盘后' },
+  ];
+
+  if (day === 0 || day === 6) {
+    return {
+      id: 'closed', label: '休市', tone: 'gold', focus: '观察，不开新动作',
+      window: '非交易日', next: '下一交易日 09:15 盘前校准', steps,
+    };
+  }
+  if (mins < 9 * 60 + 15) {
+    return {
+      id: 'premarket', label: '盘前准备', tone: 'gold', focus: '筛候选，定风控线',
+      window: '09:15 前', next: '09:15 集合竞价观察', steps,
+    };
+  }
+  if (mins < 9 * 60 + 30) {
+    return {
+      id: 'premarket', label: '集合竞价', tone: 'gold', focus: '只确认，不追价',
+      window: '09:15-09:30', next: '09:30 开盘执行窗口', steps,
+    };
+  }
+  if ((mins >= 9 * 60 + 30 && mins <= 11 * 60 + 30) || (mins >= 13 * 60 && mins <= 15 * 60)) {
+    return {
+      id: 'intraday', label: '盘中执行', tone: 'up', focus: '只处理高置信动作',
+      window: mins < 12 * 60 ? '09:30-11:30' : '13:00-15:00', next: '收盘后复盘信号质量', steps,
+    };
+  }
+  if (mins > 11 * 60 + 30 && mins < 13 * 60) {
+    return {
+      id: 'midday', label: '午间校准', tone: 'gold', focus: '复核早盘成交与异动',
+      window: '11:30-13:00', next: '13:00 下午盘执行', steps,
+    };
+  }
+  return {
+    id: 'postmarket', label: '盘后复盘', tone: 'down', focus: '记录原因，更新明日队列',
+    window: '15:00 后', next: '明日 09:15 重新校准', steps,
+  };
+}
+
+function actionLabel(action) {
+  const map = {
+    STRONG_BUY: '强买', BUY: '买入', CAUTION_BUY: '谨慎买入',
+    STRONG_HOLD: '强持有', HOLD: '持有', WATCH: '观察',
+    WEAK_HOLD: '弱持有', SELL: '卖出', STOP_LOSS: '止损',
+    TAKE_PROFIT: '止盈',
+  };
+  return map[action] || action || '观察';
+}
+
+function getFactorHighlights(d, code) {
+  const row = (d.factors || []).find(f => f.code === code);
+  if (!row) return [];
+  const labels = d.factor_labels || {};
+  return Object.keys(row)
+    .filter(k => !['code', 'name', 'signal'].includes(k) && row[k] != null && !isNaN(row[k]))
+    .map(k => ({ key: k, label: labels[k] || k, value: Number(row[k]) }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 3);
+}
+
+function getBuyQueue(d) {
+  const queue = new Map();
+  const scores = d.scores || [];
+  const scoreMap = {};
+  scores.forEach(s => { scoreMap[s.code] = s; });
+
+  function mergeCandidate(raw, source) {
+    if (!raw || !raw.code) return;
+    const score = scoreMap[raw.code] || {};
+    const current = queue.get(raw.code) || {};
+    queue.set(raw.code, {
+      code: raw.code,
+      name: raw.name || score.name || raw.code,
+      score: raw.score || raw.total_score || score.total_score || current.score || 0,
+      action: raw.action || raw.signal_action || score.signal_action || current.action || 'WATCH',
+      confidence: raw.confidence || raw.signal_confidence || score.signal_confidence || current.confidence || 0,
+      suggested_amount: raw.suggested_amount || current.suggested_amount || 0,
+      suggested_shares: raw.suggested_shares || current.suggested_shares || 0,
+      source,
+    });
+  }
+
+  ((d.signal_brief || {}).buy_candidates || []).forEach(c => mergeCandidate(c, 'signal'));
+  (((d.position_advice || {}).buy_candidates) || []).forEach(c => mergeCandidate(c, 'kelly'));
+  scores
+    .filter(s => ['STRONG_BUY', 'BUY', 'CAUTION_BUY'].includes(s.signal_action))
+    .slice(0, 8)
+    .forEach(s => mergeCandidate(s, 'score'));
+
+  return Array.from(queue.values()).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 6);
+}
+
+function generateActionItems(d, session) {
+  const sb = d.signal_brief || {};
+  const advice = d.position_advice || {};
+  const tt = d.target_tracker || {};
+  const items = [];
+
+  const phaseCopy = {
+    premarket: ['盘前校准', `先审 ${sb.buy_count || 0} 个候选，标记触发价和无效条件。`],
+    intraday: ['盘中执行', '只处理高置信信号和风险项，避免临盘追涨。'],
+    midday: ['午间校准', '复核早盘异动，下午只保留最高优先级动作。'],
+    postmarket: ['盘后复盘', '记录实际执行理由，准备明日候选队列。'],
+    closed: ['休市观察', '不做新动作，只更新观察名单和复盘备注。'],
+  }[session.id] || ['今日节奏', session.focus];
+  items.push({ tone: session.tone, title: phaseCopy[0], body: phaseCopy[1], meta: session.window });
+
+  (sb.risk_alerts || []).slice(0, 2).forEach(r => {
+    items.push({
+      tone: 'down',
+      title: `处理风险：${r.name}`,
+      body: `${actionLabel(r.action)} · 评分 ${fmt(r.score, 0)}，先确认是否触发减仓或退出。`,
+      meta: r.code,
+    });
+  });
+
+  (advice.holdings_advice || [])
+    .filter(a => a.suggest && !['HOLD', 'WATCH'].includes(a.suggest))
+    .slice(0, 2)
+    .forEach(a => {
+      const tone = ['EXIT', 'REDUCE'].includes(a.suggest) ? 'down' : 'up';
+      items.push({
+        tone,
+        title: `仓位动作：${a.name}`,
+        body: a.reason || `${a.suggest} · 当前收益 ${fmt(a.profit_pct, 1)}%。`,
+        meta: `${a.code} · ${a.suggest}`,
+      });
+    });
+
+  getBuyQueue(d).slice(0, 3).forEach(c => {
+    const amount = c.suggested_amount ? `建议金额 ${fmtCurrency(c.suggested_amount)}` : '等待仓位确认';
+    items.push({
+      tone: 'up',
+      title: `候选复核：${c.name}`,
+      body: `评分 ${fmt(c.score, 0)} · ${actionLabel(c.action)}，${amount}。`,
+      meta: c.code,
+    });
+  });
+
+  if ((tt.required_monthly_return || 0) > 15) {
+    items.push({
+      tone: 'gold',
+      title: '目标压力检查',
+      body: `目标需月收益 ${fmt(tt.required_monthly_return, 1)}%，控制单笔失误成本。`,
+      meta: 'Target',
+    });
+  }
+
+  return items.slice(0, 5);
+}
+
+function updateMarketTape() {
+  const d = STATE.data;
+  const el = $('market-tape');
+  if (!d || !el) return;
+
+  const pf = d.portfolio_summary || {};
+  const sb = d.signal_brief || {};
+  const mkt = d.market || {};
+  const sh = mkt.sh || {};
+  const hs300 = mkt.hs300 || {};
+  const marketView = getMarketView(mkt);
+  const session = getSessionView(d);
+  const pnl = pf.total_profit_pct || 0;
+
+  el.className = `market-tape market-tape-${marketView.cls}`;
+  el.innerHTML = `
+    <span class="tape-kicker">MARKET TAPE</span>
+    <div class="tape-track">
+      <span><b>上证</b><em>${sh.last_close ? fmt(sh.last_close, 0) : '--'} · ${sh.trend || marketView.label}</em></span>
+      <span><b>沪深300</b><em>${hs300.last_close ? fmt(hs300.last_close, 0) : '--'} · ${hs300.trend || marketView.label}</em></span>
+      <span><b>阶段</b><em class="${session.tone}">${session.label}</em></span>
+      <span><b>组合</b><em class="${pnl >= 0 ? 'up' : 'down'}">${(pnl >= 0 ? '+' : '') + fmt(pnl, 2)}%</em></span>
+      <span><b>信号</b><em>${sb.buy_count || 0} 买入 / ${sb.risk_count || 0} 风险</em></span>
+      <span><b>仓位</b><em>${pf.positions || 0} 只 · ${fmtCurrency(pf.cash || 0)} 现金</em></span>
+    </div>
+    <span class="tape-time">${d.timestamp || d.date || 'LIVE'}</span>`;
 }
 
 // ─── KPI 栏 ───────────────────────────────────────────────────
@@ -171,14 +443,14 @@ function updateTargetTracker() {
   const progress = Math.min(100, tt.progress_pct || 0);
   const monthlyReq = tt.required_monthly_return || 0;
   let adviceText = '';
-  if (monthlyReq > 25) adviceText = '⚠️ 月需收益偏高，需更积极策略';
+  if (monthlyReq > 25) adviceText = '月需收益偏高，需更积极策略';
   else if (monthlyReq > 15) adviceText = '⚡ 中等难度，精选标的';
-  else if (monthlyReq > 0) adviceText = '✅ 节奏正常，按计划执行';
+  else if (monthlyReq > 0) adviceText = '节奏正常，按计划执行';
   else adviceText = '🎉 已达成或接近目标！';
 
   el.innerHTML = `
     <div class="card-header">
-      <span class="card-title">🎯 翻倍目标追踪</span>
+      <span class="card-title">翻倍目标追踪</span>
       <span class="card-subtitle">
         ${tt.initial_capital ? fmtCurrency(tt.initial_capital) + ' → ' : ''}${tt.target_capital ? fmtCurrency(tt.target_capital) : '10.2万'} / ${tt.days_total || 90}天
       </span>
@@ -205,40 +477,49 @@ function updateTargetTracker() {
 // ─── OVERVIEW TAB ──────────────────────────────────────────────
 function renderOverview(d) {
   if (!d) {
-    $('tab-overview').innerHTML = '<div class="error-state">暂无数据</div>';
+    $('tab-overview').innerHTML = '<div class="loading-state"><span class="loading-spinner"></span><div class="loading-text">等待 Serenity 数据...</div></div>';
     return;
   }
 
   // Build the overview content
   let html = `
-    <!-- 信号简报 -->
-    ${buildSignalBrief(d)}
-    <!-- 今日策略 -->
-    ${buildDailyStrategyCard(d)}
-    <!-- 仓位优化 -->
-    <div class="card" id="position-advice-card">
-      <div class="card-header">
-        <span class="card-title">📐 仓位优化</span>
-        <span class="card-subtitle">Kelly公式 + 信号强度</span>
-      </div>
-      <div class="card-body" id="position-advice-content">
-        <div class="empty-state"><div class="icon">📊</div><div class="text">加载中...</div></div>
-      </div>
+    ${buildCommandHero(d)}
+    ${buildKPIBar()}
+    <div class="mission-grid">
+      ${buildSessionModeCard(d)}
+      ${buildActionChecklistCard(d)}
     </div>
-    <!-- 持仓 -->
-    ${buildHoldingsCard(d)}
-    <!-- 评分排行 -->
-    ${buildScoreCard(d)}
-    <!-- 大盘择时 -->
-    ${buildMarketCard(d)}
-    <!-- 操作模式 -->
-    ${buildOpModeCard(d)}
-    <!-- 大师智慧 -->
-    ${buildGuruCard(d)}
-    <!-- 盘中异动告警 -->
-    ${buildAnomalyCard(d)}`;
+    ${buildCandidateQueueCard(d)}
+    <div class="overview-grid">
+      <section class="overview-main">
+        ${buildDailyStrategyCard(d)}
+        ${buildHoldingsCard(d)}
+      </section>
+      <aside class="overview-side">
+        ${buildSignalBrief(d)}
+        <div class="card compact-card" id="position-advice-card">
+          <div class="card-header">
+            <span class="card-title">仓位优化</span>
+            <span class="card-subtitle">Kelly + 信号强度</span>
+          </div>
+          <div class="card-body" id="position-advice-content">
+            <div class="empty-state"><div class="text">加载中...</div></div>
+          </div>
+        </div>
+        ${buildMarketCard(d)}
+      </aside>
+    </div>
+    <div class="overview-grid overview-grid-secondary">
+      ${buildScoreCard(d)}
+      ${buildOpModeCard(d)}
+    </div>
+    <div class="overview-grid overview-grid-secondary">
+      ${buildGuruCard(d)}
+      ${buildAnomalyCard(d)}
+    </div>`;
 
   $('tab-overview').innerHTML = html;
+  updateKPI();
 
   // Load position advice async
   if (d.position_advice) renderPositionAdvice(d.position_advice);
@@ -249,26 +530,254 @@ function renderOverview(d) {
   loadAnomalyData();
 }
 
+function buildKPIBar() {
+  return `
+    <div class="kpi-bar">
+      <div class="kpi-card" id="kpi-pnl">
+        <div class="kpi-label">总收益</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-value">
+        <div class="kpi-label">总权益</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-cash">
+        <div class="kpi-label">可用资金</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-positions">
+        <div class="kpi-label">持仓</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-signals">
+        <div class="kpi-label">信号</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+      <div class="kpi-card" id="kpi-target">
+        <div class="kpi-label">目标进度</div>
+        <div class="kpi-value">--</div>
+        <div class="kpi-sub">--</div>
+      </div>
+    </div>`;
+}
+
+function buildSessionModeCard(d) {
+  const session = getSessionView(d);
+  const steps = session.steps.map(step => {
+    const active = step.id === session.id || (session.id === 'closed' && step.id === 'postmarket');
+    return `<span class="session-step${active ? ' active' : ''}">${step.short}</span>`;
+  }).join('');
+
+  return `
+    <div class="mission-card session-mode-card">
+      <div class="mission-kicker">Trading Session</div>
+      <div class="session-head">
+        <div>
+          <div class="session-label ${session.tone}">${session.label}</div>
+          <div class="session-focus">${session.focus}</div>
+        </div>
+        <span class="session-window">${session.window}</span>
+      </div>
+      <div class="session-timeline">${steps}</div>
+      <div class="session-next">下一检查点：${session.next}</div>
+    </div>`;
+}
+
+function buildActionChecklistCard(d) {
+  const session = getSessionView(d);
+  const items = generateActionItems(d, session);
+  const html = items.map((item, idx) => `
+    <div class="action-item action-${item.tone}">
+      <div class="action-index">${String(idx + 1).padStart(2, '0')}</div>
+      <div class="action-copy">
+        <div class="action-title">${item.title}</div>
+        <div class="action-body">${item.body}</div>
+      </div>
+      <div class="action-meta">${item.meta || '--'}</div>
+    </div>`).join('');
+
+  return `
+    <div class="mission-card action-checklist-card">
+      <div class="mission-header">
+        <div>
+          <div class="mission-kicker">Today Actions</div>
+          <div class="mission-title">今日行动清单</div>
+        </div>
+        <span class="mission-count">${items.length} 项</span>
+      </div>
+      <div class="action-list">${html}</div>
+    </div>`;
+}
+
+function buildCandidateQueueCard(d) {
+  const candidates = getBuyQueue(d);
+  const session = getSessionView(d);
+  const marketView = getMarketView(d.market || {});
+
+  if (!candidates.length) {
+    return `
+      <div class="candidate-queue candidate-queue-empty">
+        <div class="candidate-head">
+          <div>
+            <div class="mission-kicker">Explainable Queue</div>
+            <div class="mission-title">候选解释队列</div>
+          </div>
+          <span class="mission-count">0 项</span>
+        </div>
+        <div class="empty-state"><div class="text">暂无高置信买入候选，当前更适合观察和复盘。</div></div>
+      </div>`;
+  }
+
+  const rows = candidates.slice(0, 5).map((c, idx) => {
+    const factors = getFactorHighlights(d, c.code);
+    const factorChips = factors.length
+      ? factors.map(f => `<span>${f.label} ${fmt(f.value, 2)}</span>`).join('')
+      : '<span>评分与信号共振</span>';
+    const amount = c.suggested_amount ? fmtCurrency(c.suggested_amount) : '等仓位';
+    const trigger = session.id === 'intraday'
+      ? '盘中放量确认'
+      : (session.id === 'premarket' ? '开盘后回踩确认' : '明日重新确认');
+    const riskNote = marketView.label === '震荡'
+      ? '震荡市降低频率'
+      : `${marketView.label}环境跟随纪律`;
+
+    return `
+      <div class="candidate-row">
+        <div class="candidate-rank">#${idx + 1}</div>
+        <div class="candidate-main">
+          <div class="candidate-title">
+            <strong>${c.name}</strong>
+            <span>${c.code}</span>
+            <em>${actionLabel(c.action)}</em>
+          </div>
+          <div class="candidate-reason">
+            评分 ${fmt(c.score, 0)} · 置信 ${fmt((c.confidence || 0) * 100, 0)}% · ${trigger}
+          </div>
+          <div class="candidate-factors">${factorChips}</div>
+        </div>
+        <div class="candidate-side">
+          <div class="candidate-score up">${fmt(c.score, 0)}</div>
+          <div class="candidate-amount">${amount}</div>
+          <div class="candidate-risk">${riskNote}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="candidate-queue">
+      <div class="candidate-head">
+        <div>
+          <div class="mission-kicker">Explainable Queue</div>
+          <div class="mission-title">候选解释队列</div>
+        </div>
+        <span class="mission-count">${candidates.length} 项</span>
+      </div>
+      <div class="candidate-list">${rows}</div>
+    </div>`;
+}
+
+function buildCommandHero(d) {
+  const pf = d.portfolio_summary || {};
+  const mkt = d.market || {};
+  const op = d.operational_mode || {};
+  const tt = d.target_tracker || {};
+
+  const pnl = pf.total_profit_pct || 0;
+  const pnlCls = pnl >= 0 ? 'up' : 'down';
+  const marketView = getMarketView(mkt);
+  const session = getSessionView(d);
+  const execution = getExecutionView(d);
+  const modeLabels = { mean_revert: '均值回归', trend: '趋势跟踪', neutral: '中性' };
+  const modeLabel = modeLabels[op.mode] || op.mode || '中性';
+  const target = tt.progress_pct == null ? '--' : fmt(tt.progress_pct, 1) + '%';
+  const actionLabel = execution.label;
+  const dailyAdvisory = mkt.overall_advice || op.regime_label || '按评分、风险和反思闭环更新操作节奏';
+  const cashRatio = pf.total_value ? Math.max(0, Math.min(100, (pf.cash || 0) / pf.total_value * 100)) : 0;
+
+  return `
+    <section class="command-hero command-hero-${execution.tone}">
+      <div class="hero-primary">
+        <div class="hero-eyebrow">
+          <span class="deck-code">SM-ALPHA</span>
+          <span>Serenity Command Deck</span>
+        </div>
+        <h1 class="hero-title">${actionLabel}</h1>
+        <div class="hero-subline">${dailyAdvisory}</div>
+        <div class="hero-command-row">
+          <span class="command-pill command-pill-${marketView.cls}">市场 ${marketView.label}</span>
+          <span class="command-pill command-pill-${session.tone}">阶段 ${session.label}</span>
+          <span class="command-pill">模式 ${modeLabel}</span>
+          <span class="command-pill">主板池</span>
+          <span class="command-pill">现金 ${fmt(cashRatio, 0)}%</span>
+        </div>
+        <div class="hero-confidence">
+          <div class="confidence-head">
+            <span>执行置信度</span>
+            <strong>${fmt(execution.confidence, 0)}%</strong>
+          </div>
+          <div class="confidence-rail">
+            <span class="confidence-fill ${execution.tone}" style="width:${execution.confidence}%"></span>
+          </div>
+        </div>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-label">组合收益</span>
+        <strong class="${pnlCls}">${(pnl >= 0 ? '+' : '') + fmt(pnl, 2)}%</strong>
+        <small>${fmtCurrency(pf.total_profit_amount || 0)}</small>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-label">市场状态</span>
+        <strong class="${marketView.cls}">${marketView.label}</strong>
+        <small>${mkt.overall_trend || '--'}</small>
+      </div>
+      <div class="hero-metric">
+        <span class="hero-label">执行模式</span>
+        <strong>${modeLabel}</strong>
+        <small>目标 ${target}</small>
+      </div>
+    </section>`;
+}
+
 // ─── SIGNAL BRIEF ─────────────────────────────────────────────
 function buildSignalBrief(d) {
   const sb = d.signal_brief || {};
-  if (!sb.buy_count && !sb.risk_count) return '';
+  if (!sb.buy_count && !sb.risk_count) {
+    return `
+      <div class="signal-brief signal-brief-quiet">
+        <div class="signal-brief-title">今日信号 · 无高优先级动作</div>
+        <div class="signal-brief-items">
+          <div class="signal-chip quiet"><span class="signal-chip-label">继续观察，等待评分共振</span></div>
+        </div>
+      </div>`;
+  }
 
   let chips = '';
+  // Compare with previous signals to detect new signals
+  const prev = STATE.prevSignals || {};
+  const prevBuyCodes = new Set((prev.buy_candidates || []).map(b => b.code));
+  const prevRiskCodes = new Set((prev.risk_alerts || []).map(r => r.code));
+
   if (sb.buy_candidates) {
     sb.buy_candidates.forEach(b => {
-      chips += `<div class="signal-chip buy"><span class="signal-chip-label"><span class="dot-row"><span class="dot-indicator dot-up"></span>${b.name}</span></span><span class="signal-chip-score">${b.score}分</span></div>`;
+      const isNew = !prevBuyCodes.has(b.code);
+      chips += `<div class="signal-chip buy${isNew ? ' new' : ''}"><span class="signal-chip-label"><span class="dot-row"><span class="dot-indicator dot-up"></span>${b.name}</span></span><span class="signal-chip-score">${b.score}分${isNew ? '<span class="signal-new-badge">NEW</span>' : ''}</span></div>`;
     });
   }
   if (sb.risk_alerts) {
     sb.risk_alerts.forEach(r => {
-      chips += `<div class="signal-chip risk"><span class="signal-chip-label"><span class="dot-row"><span class="dot-indicator dot-down"></span>${r.name} (${r.action})</span></span><span class="signal-chip-score">${r.score}分</span></div>`;
+      const isNew = !prevRiskCodes.has(r.code);
+      chips += `<div class="signal-chip risk${isNew ? ' new' : ''}"><span class="signal-chip-label"><span class="dot-row"><span class="dot-indicator dot-down"></span>${r.name} (${r.action})</span></span><span class="signal-chip-score">${r.score}分${isNew ? '<span class="signal-new-badge">NEW</span>' : ''}</span></div>`;
     });
   }
 
   return `
     <div class="signal-brief">
-      <div class="signal-brief-title">📡 今日信号 · ${sb.buy_count || 0} 买入 / ${sb.risk_count || 0} 风险</div>
+      <div class="signal-brief-title">今日信号 · ${sb.buy_count || 0} 买入 / ${sb.risk_count || 0} 风险</div>
       <div class="signal-brief-items">${chips}</div>
     </div>`;
 }
@@ -284,7 +793,7 @@ function buildHoldingsCard(d) {
 
   let items;
   if (details.length === 0) {
-    items = '<div class="empty-state"><div class="icon">📈</div><div class="text">暂无持仓</div></div>';
+    items = '<div class="empty-state"><div class="text">暂无持仓</div></div>';
   } else {
     items = '<div class="holding-grid">' +
       details.map(p => {
@@ -308,7 +817,7 @@ function buildHoldingsCard(d) {
   return `
     <div class="card">
       <div class="card-header">
-        <span class="card-title">📈 持仓盈亏</span>
+        <span class="card-title">持仓盈亏</span>
         <span class="card-subtitle">
           ${pf.positions || 0}只 ·
           总权益 <strong class="gold">${fmtCurrency(pf.total_value)}</strong> ·
@@ -339,7 +848,7 @@ function buildScoreCard(d) {
   return `
     <div class="card">
       <div class="card-header">
-        <span class="card-title">🏆 评分排行</span>
+        <span class="card-title">评分排行</span>
         <span class="card-subtitle">综合评分 · ${scores.length} 只标的</span>
       </div>
       <div class="card-body">
@@ -370,7 +879,7 @@ function buildMarketCard(d) {
   return `
     <div class="card">
       <div class="card-header">
-        <span class="card-title">📊 大盘择时</span>
+        <span class="card-title">大盘择时</span>
         <span class="m-signal-badge ${sigCls}" style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;background:${sigCls === 'up' ? 'rgba(255,70,70,0.15)' : (sigCls === 'down' ? 'rgba(80,200,120,0.15)' : 'rgba(255,200,0,0.15)')};color:var(--${sigCls})">${sigLabel}</span>
       </div>
       <div class="card-body">
@@ -391,7 +900,7 @@ function buildMarketCard(d) {
             <div class="m-trend">${mkt.overall_trend || '--'}</div>
           </div>
         </div>
-        ${mkt.overall_advice ? `<div class="advice-banner" style="font-weight:700;text-align:center;padding:10px 12px;margin-top:8px;border:1px solid var(--accent-orange);border-radius:6px;background:rgba(255,160,0,0.08)">💡 ${mkt.overall_advice}</div>` : '<div class="advice-banner" style="text-align:center">等待数据...</div>'}
+        ${mkt.overall_advice ? `<div class="advice-banner" style="font-weight:700;text-align:center;padding:10px 12px;margin-top:8px;border:1px solid var(--accent-orange);border-radius:6px;background:rgba(255,160,0,0.08)">${mkt.overall_advice}</div>` : '<div class="advice-banner" style="text-align:center">等待数据...</div>'}
       </div>
     </div>`;
 }
@@ -400,13 +909,13 @@ function buildMarketCard(d) {
 function buildOpModeCard(d) {
   const op = d.operational_mode || {};
   const mode = op.mode || 'neutral';
-  const modeLabels = { mean_revert: '🔄 均值回归', trend: '📈 趋势跟踪', neutral: '⚖️ 中性' };
+  const modeLabels = { mean_revert: '均值回归', trend: '趋势跟踪', neutral: '中性' };
   const modeColors = { mean_revert: 'var(--accent-orange)', trend: 'var(--up)', neutral: 'var(--text-secondary)' };
 
   return `
     <div class="card">
       <div class="card-header">
-        <span class="card-title">🎯 操作模式</span>
+        <span class="card-title">操作模式</span>
       </div>
       <div class="card-body">
         <div class="opmode-grid">
@@ -416,7 +925,7 @@ function buildOpModeCard(d) {
           </div>
           <div class="opmode-item">
             <div class="opmode-label">因子翻转</div>
-            <div class="opmode-value" style="color:${op.factor_invert ? 'var(--accent-orange)' : 'var(--text-tertiary)'}">${op.factor_invert ? '🔄 ON' : '❌ OFF'}</div>
+            <div class="opmode-value" style="color:${op.factor_invert ? 'var(--accent-orange)' : 'var(--text-tertiary)'}">${op.factor_invert ? 'ON' : 'OFF'}</div>
           </div>
           <div class="opmode-item">
             <div class="opmode-label">卖出触发</div>
@@ -443,11 +952,11 @@ function buildGuruCard(d) {
   return `
     <div class="card" id="${cardId}">
       <div class="card-header">
-        <span class="card-title">🧠 大师智慧</span>
+        <span class="card-title">大师智慧</span>
         <span class="card-subtitle">投资大佬言论 · 市场情绪风向</span>
       </div>
       <div class="card-body" id="${placeholderId}">
-        <div class="empty-state"><div class="icon">🧠</div><div class="text">加载中...</div></div>
+        <div class="empty-state"><div class="text">加载中...</div></div>
       </div>
     </div>`;
 }
@@ -460,7 +969,7 @@ function loadGuruData(cardId, contentId) {
     .then(r => r.json())
     .then(d => {
       if (!d.ok || !d.stats) {
-        el.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><div class="text">暂无数据</div></div>';
+        el.innerHTML = '<div class="empty-state"><div class="text">暂无数据</div></div>';
         return;
       }
 
@@ -510,11 +1019,11 @@ function loadGuruData(cardId, contentId) {
         quotesHtml = '<div style="font-size:12px;color:var(--text-tertiary);text-align:center;padding:8px">暂无语录</div>';
       } else {
         quotesHtml = quotes.map(q => {
-          const emoji = q.sentiment === 'bullish' ? '🟢' : (q.sentiment === 'bearish' ? '🔴' : '⚪');
+          const sentimentLabel = q.sentiment === 'bullish' ? '看多' : (q.sentiment === 'bearish' ? '看空' : '中性');
           const borderColor = q.sentiment === 'bullish' ? '#2ECC71' : (q.sentiment === 'bearish' ? '#E74C3C' : '#95a5a6');
           return `
             <div style="padding:8px 10px;margin:4px 0;background:rgba(255,255,255,0.03);border-left:3px solid ${borderColor};border-radius:0 6px 6px 0">
-              <div style="font-size:11px;color:var(--text-secondary);font-weight:600">${emoji} ${q.guru} ${q.topic ? '· ' + q.topic : ''}</div>
+              <div style="font-size:11px;color:var(--text-secondary);font-weight:600">${sentimentLabel} · ${q.guru}${q.topic ? ' · ' + q.topic : ''}</div>
               <div style="font-size:13px;margin:2px 0;color:var(--text-primary);line-height:1.4">${escapeHtml(q.content)}</div>
               ${q.source ? '<div style="font-size:10px;color:var(--text-tertiary)">来源: ' + escapeHtml(q.source) + '</div>' : ''}
             </div>`;
@@ -527,7 +1036,7 @@ function loadGuruData(cardId, contentId) {
         ${statsRow}
         ${sentimentBar}
         <div style="margin-top:6px">
-          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">📜 最新语录</div>
+          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">最新语录</div>
           ${quotesHtml}
         </div>
         <div style="font-size:10px;color:var(--text-tertiary);text-align:right;margin-top:6px">
@@ -546,6 +1055,13 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function cleanDisplayText(str) {
+  return (str || '')
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '')
+    .replace(/\*\*/g, '')
+    .trim();
+}
+
 // ─── DAILY STRATEGY CARD ─────────────────────────────────────
 function buildDailyStrategyCard(d) {
   const mkt = d.market || {};
@@ -554,16 +1070,16 @@ function buildDailyStrategyCard(d) {
 
   // Determine market signal
   const rawSignal = (mkt.overall_signal || '').toLowerCase();
-  let sigLabel = '震荡', sigCls = 'neutral', sigIcon = '⚖️';
+  let sigLabel = '震荡', sigCls = 'neutral';
   if (rawSignal.includes('多') || rawSignal === 'bull' || rawSignal === 'bullish') {
-    sigLabel = '多头'; sigCls = 'bull'; sigIcon = '🐂';
+    sigLabel = '多头'; sigCls = 'bull';
   } else if (rawSignal.includes('空') || rawSignal === 'bear' || rawSignal === 'bearish') {
-    sigLabel = '空头'; sigCls = 'bear'; sigIcon = '🐻';
+    sigLabel = '空头'; sigCls = 'bear';
   }
 
   // Determine operational mode
   const mode = op.mode || 'neutral';
-  const modeLabels = { mean_revert: '🔄 均值回归', trend: '📈 趋势跟踪', neutral: '⚖️ 中性' };
+  const modeLabels = { mean_revert: '均值回归', trend: '趋势跟踪', neutral: '中性' };
   const modeColors = { mean_revert: 'var(--accent-orange)', trend: 'var(--up)', neutral: 'var(--text-secondary)' };
   const modeLabel = modeLabels[mode] || mode;
 
@@ -577,8 +1093,8 @@ function buildDailyStrategyCard(d) {
   return `
     <div class="strategy-card">
       <div class="strategy-banner ${sigCls}">
-        <span class="strategy-banner-icon">${sigIcon}</span>
-        <div class="strategy-banner-title ${sigCls}">📋 今日策略 · ${sigLabel}市场</div>
+        <div class="strategy-banner-kicker">今日策略</div>
+        <div class="strategy-banner-title ${sigCls}">${sigLabel}市场</div>
         <div class="strategy-banner-sub">综合信号 · 操作模式 · 风险提示</div>
       </div>
       <div class="strategy-body">
@@ -607,7 +1123,7 @@ function buildDailyStrategyCard(d) {
         </div>
 
         <div class="strategy-advice">
-          <span class="strategy-advice-icon">💡</span>
+          <span class="strategy-advice-icon">提示</span>
           <div class="strategy-advice-text">${advice}</div>
         </div>
 
@@ -659,7 +1175,7 @@ function generateStrategyAdvice(marketState, mode, buyCount, riskCount, op) {
 
   // Factor invert warning
   if (factorInvert) {
-    parts.push('⚠️ <strong>因子翻转已触发</strong>，多空逻辑反转，注意调整方向判断。');
+    parts.push('<strong>因子翻转已触发</strong>，多空逻辑反转，注意调整方向判断。');
   }
 
   // Signal-based advice
@@ -672,7 +1188,7 @@ function generateStrategyAdvice(marketState, mode, buyCount, riskCount, op) {
   }
 
   if (riskCount > 2) {
-    parts.push(`🔴 <strong>风险警示较多(${riskCount}个)</strong>，建议收缩仓位，降低风险敞口。卖出触发阈值为 ${sellWeight}%。`);
+    parts.push(`<strong>风险警示较多(${riskCount}个)</strong>，建议收缩仓位，降低风险敞口。卖出触发阈值为 ${sellWeight}%。`);
   } else if (riskCount > 0) {
     parts.push(`有 ${riskCount} 个风险提示，注意持仓防守。`);
   }
@@ -692,7 +1208,6 @@ function renderHoldingsTab(d) {
 
   // Target tracker
   html += `<div class="target-tracker" id="target-tracker"></div>`;
-  updateTargetTracker();
 
   // Holdings card (same as overview but larger)
   html += buildHoldingsCard(d);
@@ -743,6 +1258,7 @@ function renderHoldingsTab(d) {
   }
 
   $('tab-holdings').innerHTML = html;
+  updateTargetTracker();
 
   // Load position advice
   if (d.position_advice) renderFullAdvice(d.position_advice);
@@ -1550,7 +2066,7 @@ function submitTrade(e) {
   };
   fetch('/api/trades', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(data),
   })
     .then(r => r.json())
@@ -1596,7 +2112,7 @@ function submitConfig(e) {
   if (f.target_low.value) data.target_low = parseFloat(f.target_low.value);
   fetch('/api/config', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(data),
   })
     .then(r => r.json())
@@ -1638,11 +2154,11 @@ function loadStrategyEnhancement() {
       const gs = d.guru_summary;
       if (gs && gs.gurus) {
         parts.push(`<div class="enh-guru-bar">
-          <div class="enh-section-title">🧠 大师情绪 · ${gs.gurus}位大佬</div>
+          <div class="enh-section-title">大师情绪 · ${gs.gurus}位大佬</div>
           <div class="enh-sentiment-row">
-            <span class="enh-sent-bull">🟢 ${gs.bullish_pct}%</span>
-            <span class="enh-sent-neutral">⚪ ${gs.neutral_pct}%</span>
-            <span class="enh-sent-bear">🔴 ${gs.bearish_pct}%</span>
+            <span class="enh-sent-bull">看多 ${gs.bullish_pct}%</span>
+            <span class="enh-sent-neutral">中性 ${gs.neutral_pct}%</span>
+            <span class="enh-sent-bear">看空 ${gs.bearish_pct}%</span>
           </div>
           <div class="enh-quote">“${gs.latest_quote || ''}”</div>
         </div>`);
@@ -1655,7 +2171,7 @@ function loadStrategyEnhancement() {
           `<span class="enh-conviction-chip">${p.code} ${p.name} ${p.signal}·${p.score}分</span>`
         ).join('');
         parts.push(`<div class="enh-conviction-bar">
-          <div class="enh-section-title">🎯 最强买入信号</div>
+          <div class="enh-section-title">最强买入信号</div>
           <div class="enh-chip-row">${picks}</div>
         </div>`);
       }
@@ -1664,12 +2180,12 @@ function loadStrategyEnhancement() {
       const anom = d.anomaly_summary;
       if (anom) {
         let alerts = [];
-        if (anom.emergency > 0) alerts.push(`<span class="enh-alert enh-alert-a">🔴 ${anom.emergency}紧急</span>`);
-        if (anom.warning > 0) alerts.push(`<span class="enh-alert enh-alert-b">🟡 ${anom.warning}警告</span>`);
-        if (anom.info > 0) alerts.push(`<span class="enh-alert enh-alert-c">🔵 ${anom.info}提示</span>`);
+        if (anom.emergency > 0) alerts.push(`<span class="enh-alert enh-alert-a">${anom.emergency} 紧急</span>`);
+        if (anom.warning > 0) alerts.push(`<span class="enh-alert enh-alert-b">${anom.warning} 警告</span>`);
+        if (anom.info > 0) alerts.push(`<span class="enh-alert enh-alert-c">${anom.info} 提示</span>`);
         if (alerts.length > 0) {
           parts.push(`<div class="enh-anomaly-bar">
-            <div class="enh-section-title">⚠️ 盘中异动</div>
+            <div class="enh-section-title">盘中异动</div>
             <div>${alerts.join(' ')}</div>
           </div>`);
         }
@@ -1691,11 +2207,11 @@ function buildAnomalyCard(d) {
   return `
     <div class="card" id="anomaly-card">
       <div class="card-header">
-        <span class="card-title">🚨 盘中异动</span>
+        <span class="card-title">盘中异动</span>
         <span class="card-subtitle">价格异动 · 信号突变 · 实时告警</span>
       </div>
       <div class="card-body" id="anomaly-card-content">
-        <div class="empty-state"><div class="icon">🔍</div><div class="text">加载中...</div></div>
+        <div class="empty-state"><div class="text">加载中...</div></div>
       </div>
     </div>`;
 }
@@ -1708,7 +2224,7 @@ function loadAnomalyData() {
     .then(r => r.json())
     .then(d => {
       if (!d.ok || !d.anomalies) {
-        el.innerHTML = '<div class="empty-state"><div class="icon">✅</div><div class="text">暂无未确认异动</div></div>';
+        el.innerHTML = '<div class="empty-state"><div class="text">暂无未确认异动</div></div>';
         return;
       }
 
@@ -1717,29 +2233,29 @@ function loadAnomalyData() {
       const total = anomalies.length;
 
       if (total === 0) {
-        el.innerHTML = '<div class="empty-state"><div class="icon">✅</div><div class="text">暂无未确认异动</div></div>';
+        el.innerHTML = '<div class="empty-state"><div class="text">暂无未确认异动</div></div>';
         return;
       }
 
       // Stats chips
       let statChips = '';
-      if (stats.emergency > 0) statChips += `<span class="enh-alert enh-alert-a">🔴 紧急 ${stats.emergency}</span> `;
-      if (stats.warning > 0) statChips += `<span class="enh-alert enh-alert-b">🟡 警告 ${stats.warning}</span> `;
-      if (stats.info > 0) statChips += `<span class="enh-alert enh-alert-c">🔵 提示 ${stats.info}</span> `;
+      if (stats.emergency > 0) statChips += `<span class="enh-alert enh-alert-a">紧急 ${stats.emergency}</span> `;
+      if (stats.warning > 0) statChips += `<span class="enh-alert enh-alert-b">警告 ${stats.warning}</span> `;
+      if (stats.info > 0) statChips += `<span class="enh-alert enh-alert-c">提示 ${stats.info}</span> `;
 
       // Anomaly items
       const items = anomalies.slice(0, 10).map(a => {
         const levelClass = a.level === 'A' ? 'enh-alert-a' : (a.level === 'B' ? 'enh-alert-b' : 'enh-alert-c');
-        const levelIcon = a.level === 'A' ? '🔴' : (a.level === 'B' ? '🟡' : '🔵');
+        const levelLabel = a.level === 'A' ? '紧急' : (a.level === 'B' ? '警告' : '提示');
         const time = a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : '--';
         return `<div class="anomaly-item ${levelClass}">
           <div class="anomaly-item-header">
-            <span class="anomaly-level-badge ${levelClass}">${levelIcon} ${a.level}级</span>
+            <span class="anomaly-level-badge ${levelClass}">${levelLabel} · ${a.level}级</span>
             <span class="anomaly-code">${a.code || '--'}</span>
             <span class="anomaly-type">${a.alert_type || '--'}</span>
             <span class="anomaly-time">${time}</span>
           </div>
-          ${a.message ? `<div class="anomaly-msg">${escapeHtml(a.message)}</div>` : ''}
+          ${a.message ? `<div class="anomaly-msg">${escapeHtml(cleanDisplayText(a.message))}</div>` : ''}
         </div>`;
       }).join('');
 
@@ -1752,8 +2268,19 @@ function loadAnomalyData() {
     });
 }
 function showError(msg) {
+  const timeEl = $('header-time');
+  if (timeEl) timeEl.textContent = '刷新失败';
+
+  if (STATE.data) {
+    const active = qs('.tab-content.active');
+    if (!active || active.querySelector('.refresh-notice')) return;
+    active.insertAdjacentHTML('afterbegin', `<div class="refresh-notice">${msg}，保留上次稳定数据</div>`);
+    return;
+  }
+
   qsa('.tab-content.active').forEach(tc => {
-    tc.innerHTML = `<div class="error-state">❌ ${msg}</div>`;
+    const target = qs('#overview-content', tc) || tc;
+    target.innerHTML = `<div class="error-state">${msg}</div>`;
   });
 }
 

@@ -6,7 +6,7 @@ import os
 from datetime import datetime, date
 from typing import Optional, Any
 
-DB_PATH = os.path.expanduser("~/workspace/SerenityMonitor/serenity.db")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serenity.db")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -110,7 +110,7 @@ def init_db():
         )
     """)
     # 迁移：增加评分维度列
-    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score", "moat_score"]:
+    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score", "moat_score", "mr_score"]:
         try:
             conn.execute(f"ALTER TABLE scoring_history ADD COLUMN {col} REAL DEFAULT 0")
         except sqlite3.OperationalError:
@@ -307,6 +307,37 @@ def init_db():
             UNIQUE(date)
         )
     """)
+    # ── trading_journal（原在 trading_journal.py，内联到此打破循环依赖）──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trading_journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            action TEXT NOT NULL,
+            date TEXT NOT NULL,
+            price REAL,
+            shares INTEGER,
+            amount REAL,
+            reason TEXT,
+            reflection TEXT,
+            score_at_entry REAL,
+            score_at_exit REAL,
+            profit_pct REAL,
+            tags TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    # ── 性能索引（幂等创建，已存在的自动跳过）──
+    _index_sqls = [
+        "CREATE INDEX IF NOT EXISTS idx_alerts_ack_created ON alerts(acknowledged, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_anomalies_ack_created ON anomalies(acknowledged, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_code_date ON trades(code, date)",
+        "CREATE INDEX IF NOT EXISTS idx_execution_log_status_created ON execution_log(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_suggestions_new_created ON serenity_suggestions(is_new, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_journal_code_action_date ON trading_journal(code, action, date)",
+    ]
+    for sql in _index_sqls:
+        conn.execute(sql)
     conn.commit()
     conn.close()
 
@@ -424,6 +455,29 @@ def add_trade(code: str, action: str, price: float, quantity: int, date_str: str
     """, (code, action, price, quantity, date_str, note, trade_amount))
     conn.commit()
     conn.close()
+    # 同步到交易日志 (trading_journal)
+    _sync_to_journal(code, action, date_str, price, quantity, note)
+
+
+def _sync_to_journal(code: str, action: str, date_str: str, price: float,
+                     quantity: int, note: str):
+    """内部：将新增 trade 同步到 trading_journal 表（幂等）"""
+    try:
+        conn = get_conn()
+        exists = conn.execute(
+            "SELECT COUNT(*) FROM trading_journal WHERE code=? AND action=? AND date=?",
+            (code, action, date_str)
+        ).fetchone()[0]
+        if exists == 0:
+            conn.execute("""
+                INSERT INTO trading_journal (code, action, date, price, shares, amount, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (code, action, date_str, price, quantity, price * quantity,
+                  f"auto: {note[:100]}" if note else "auto"))
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass  # 静默容错，不阻塞主流程
 
 
 def get_trades(code: Optional[str] = None, limit: int = 20) -> list[dict]:
@@ -882,18 +936,20 @@ def save_reflection(code: str, reflection: dict):
     conn = get_conn()
     conn.execute("""
         INSERT INTO score_reflections (code, date, total_score, dimension_scores,
-            predicted_direction, reflection_text)
-        VALUES (?, ?, ?, ?, ?, ?)
+            predicted_direction, dimension_ic, reflection_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(code, date) DO UPDATE SET
             total_score=excluded.total_score,
             dimension_scores=excluded.dimension_scores,
             predicted_direction=excluded.predicted_direction,
+            dimension_ic=excluded.dimension_ic,
             reflection_text=excluded.reflection_text
     """, (
         code, reflection.get("date"),
         reflection.get("total_score", 0),
         json.dumps(reflection.get("dimension_scores", {})),
         reflection.get("predicted_direction", ""),
+        json.dumps(reflection.get("dimension_ic", {})),
         reflection.get("reflection_text", ""),
     ))
     conn.commit()
@@ -994,8 +1050,17 @@ def get_reflection_dimension_ic(days: int = 30) -> dict:
             continue
         for dim, val in ic_data.items():
             if val is not None:
-                ic_sums[dim] += float(val)
-                ic_counts[dim] += 1
+                try:
+                    ic_sums[dim] += float(val)
+                    ic_counts[dim] += 1
+                except (TypeError, ValueError):
+                    continue
+
+    return {
+        dim: round(ic_sums[dim] / ic_counts[dim], 4)
+        for dim in ic_sums
+        if ic_counts[dim] > 0
+    }
 
 # ---------- 权重辩论日志 ----------
 

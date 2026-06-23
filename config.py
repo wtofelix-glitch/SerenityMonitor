@@ -322,7 +322,7 @@ def get_effective_config() -> dict:
         cfg["exit_threshold"] = 36  # 翻倍目标: 38→36, 更宽松持有让利润奔跑
         risk["stop_loss_pct"] = -0.03      # 紧止损 -3%
         risk["trailing_stop_pct"] = 0.06   # 移动止盈回撤 6%
-        risk["max_daily_loss_pct"] = -0.04  # 翻倍目标: 给Kelly留空间 -4%
+        risk["max_daily_loss_pct"] = -0.06  # 翻倍目标: 允许更大单日波动 -6%, 与跟踪止损6%对齐
         risk["profit_take_level1"] = 0.08  # 止盈一档 +8%
         risk["profit_take_level2"] = 0.16  # 止盈二档 +16%
         risk["profit_take_level3"] = 0.28  # 止盈三档 +28%
@@ -351,7 +351,7 @@ RISK_CONFIG = {
     "partial_exit_level1": 0.50,       # 一档出50%（200股→出100股，与100股最小单位对齐）
     "partial_exit_level2": 0.50,       # 二档出剩余持仓的50%（剩余100股→全部卖出）
     "optimizer_min_signal": 0.05,      # 组合优化器最小有效信号阈值
-    "optimizer_max_position_pct": 0.70,  # 翻倍目标: 60%→70%, 更集中 # 组合优化器单只上限 40%→60%
+    "optimizer_max_position_pct": 0.85,  # 翻倍目标: 与max_single_weight(85%)对齐
     "optimizer_min_trade": 3000,       # 翻倍目标: 5000→3000, 更灵活       # 最小调仓金额
     # 🆕 硬止损规则 — 保护本金
     "max_single_loss_pct": -0.06,      # 单只亏损不超过 -6%

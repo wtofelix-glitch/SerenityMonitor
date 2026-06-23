@@ -18,21 +18,33 @@ from config import STOCK_MAP
 FACTOR_DIMS = [
     "total_score", "base_score", "zone_score", "momentum_score",
     "volume_score", "serenity_score", "factor_score", "technical_score",
+    "sentiment_score", "moat_score", "mr_score",
 ]
 DIM_LABELS = {
     "total_score": "综合", "base_score": "基本面", "zone_score": "位置",
     "momentum_score": "动量", "volume_score": "量能", "serenity_score": "Serenity",
-    "factor_score": "因子", "technical_score": "技术",
+    "factor_score": "因子", "technical_score": "技术", "sentiment_score": "情绪",
+    "moat_score": "护城河", "mr_score": "均值回归",
 }
+
+
+def _get_score_columns(conn) -> list[str]:
+    """检测 scoring_history 当前可用于归因的评分列。"""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(scoring_history)").fetchall()}
+    return [dim for dim in FACTOR_DIMS if dim in existing]
 
 
 def load_data():
     """加载评分 + 价格数据"""
     conn = get_conn()
+    score_columns = _get_score_columns(conn)
+    if not score_columns:
+        conn.close()
+        return {}, {}, []
 
     # 评分
     sc_rows = conn.execute(
-        f"SELECT code, date, {', '.join(FACTOR_DIMS)} FROM scoring_history ORDER BY date, code"
+        f"SELECT code, date, {', '.join(score_columns)} FROM scoring_history ORDER BY date, code"
     ).fetchall()
 
     # 价格
@@ -125,7 +137,9 @@ def factor_contribution(records):
     dim_data = defaultdict(list)
     for _, _, score_dict, fwd_ret in records:
         for dim in FACTOR_DIMS:
-            val = score_dict.get(dim, 0)
+            val = score_dict.get(dim)
+            if val is None:
+                continue
             dim_data[dim].append((val, fwd_ret))
 
     contributions = {}
@@ -226,7 +240,7 @@ def run_attribution(top_n=3, horizon=1):
     tn_result["n"] = top_n
 
     # 2. 等权基准
-    codes = list(prices.keys())
+    codes = sorted({code for _, code, _, _ in records})
     bm_ret, bm_n = benchmark_return(prices, codes, all_dates)
     bm_result = {"return_pct": bm_ret, "n_stocks": bm_n}
 
@@ -236,7 +250,7 @@ def run_attribution(top_n=3, horizon=1):
     # 4. 总结
     summary = "选股策略跑赢基准" if tn_result.get("total_return_pct", -999) > bm_ret else "选股策略跑输基准"
     if "sharpe" in tn_result and tn_result["sharpe"] > 1:
-        summary += f" | 夏普{tns.get('sharpe',0):.2f}有效"
+        summary += f" | 夏普{tn_result.get('sharpe', 0):.2f}有效"
 
     return {
         "top_n": tn_result,

@@ -4,6 +4,9 @@
 
 用法: python3 serenity_fundamental_update.py
 """
+from check_trading_day import require_trading_day
+require_trading_day()
+
 import sys
 import os
 

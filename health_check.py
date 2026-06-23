@@ -162,7 +162,17 @@ def main():
     icon_r = '✅' if ref_pct >= 50 else '⚠️' if ref_total > 0 else '⚪'
     print(f'🧠 反思收益: {ref_filled}/{ref_total} ({ref_pct}%) {icon_r}')
 
-    # 6. File integrity
+    # 6. Security boundary
+    try:
+        from security_check import build_security_report
+        sec = build_security_report()
+        icon_s = '✅' if sec['status'] == 'good' else '⚠️' if sec['status'] == 'watch' else '🔴'
+        print(f'🔐 写接口安全: {sec["score"]}/100 {icon_s} '
+              f'(失败 {sec["fail_count"]}, 提醒 {sec["warn_count"]})')
+    except Exception as e:
+        print(f'🔐 写接口安全: 检查失败 ({e}) 🔴')
+
+    # 7. File integrity
     print(f'\n📁 关键文件')
     required = ['config.py', 'scorer.py', 'db.py', 'data_engine.py',
                 'portfolio.py', 'signal_engine.py', 'monitor.py',

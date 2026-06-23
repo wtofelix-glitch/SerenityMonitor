@@ -19,13 +19,13 @@ class TestGetSignalLevel:
 
     def test_buy_at_mid_high_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        assert get_signal_level(75) == "BUY"
-        assert get_signal_level(78) == "STRONG_BUY"  # 78+ → strong_buy
+        assert get_signal_level(SC["buy_threshold"]) == "BUY"
+        assert get_signal_level(SC["strong_buy_threshold"]) == "STRONG_BUY"
 
     def test_caution_buy_at_moderate_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        assert get_signal_level(65) == "CAUTION_BUY"
-        assert get_signal_level(65) == "CAUTION_BUY"
+        assert get_signal_level(SC["hold_high"]) == "CAUTION_BUY"
+        assert get_signal_level(SC["buy_threshold"] - 0.1) == "CAUTION_BUY"
 
     def test_hold_at_neutral_score(self, monkeypatch):
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
@@ -46,14 +46,11 @@ class TestGetSignalLevel:
     def test_boundary_transitions(self, monkeypatch):
         """测试临界值转换"""
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        # 72: BUY
-        assert get_signal_level(70) == "BUY"
-        # 71.9: CAUTION_BUY (below buy_threshold)
-        assert get_signal_level(65) == "CAUTION_BUY"
-        # 50: HOLD
-        assert get_signal_level(50) == "HOLD"
-        # 49.9: WATCH (below hold_low)
-        assert get_signal_level(49.9) == "WATCH"
+        assert get_signal_level(SC["strong_buy_threshold"]) == "STRONG_BUY"
+        assert get_signal_level(SC["buy_threshold"]) == "BUY"
+        assert get_signal_level(SC["hold_high"]) == "CAUTION_BUY"
+        assert get_signal_level(SC["hold_low"]) == "HOLD"
+        assert get_signal_level(SC["hold_low"] - 0.1) == "WATCH"
 
     def test_monotonic(self, monkeypatch):
         """评分越高信号不应越弱"""
@@ -91,9 +88,9 @@ class TestGetPositionSignal:
     def test_not_holding_returns_base_signal(self, monkeypatch):
         """非持仓标的使用基础信号"""
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        assert get_position_signal(75, 0, False) == "BUY"
-        assert get_position_signal(85, 0, False) == "STRONG_BUY"
-        assert get_position_signal(50, 0, False) == "HOLD"
+        assert get_position_signal(SC["buy_threshold"], 0, False) == "BUY"
+        assert get_position_signal(SC["strong_buy_threshold"], 0, False) == "STRONG_BUY"
+        assert get_position_signal(SC["hold_low"], 0, False) == "HOLD"
         assert get_position_signal(30, 0, False) == "SELL"
 
     def test_boundary_48_is_hold_not_weak_hold(self, monkeypatch):
@@ -109,8 +106,8 @@ class TestGetPositionSignal:
     def test_buy_upgraded_to_strong_hold_for_positions(self, monkeypatch):
         """持仓中BUY信号升级为STRONG_HOLD"""
         monkeypatch.setattr(signal_engine, '_apply_conviction_to_signal_config', lambda: SC)
-        result = get_position_signal(73, 2.0, True)
-        assert result in ("STRONG_HOLD",)  # should be STRONG_HOLD (since profit > 0 and score >= 72 → BUY → upgraded)
+        result = get_position_signal(SC["buy_threshold"], 2.0, True)
+        assert result == "STRONG_HOLD"
 
     def test_sell_not_blocked_by_position_buffers(self, monkeypatch):
         """持仓中评分<48不受买入缓冲，但标记为WEAK_HOLD"""

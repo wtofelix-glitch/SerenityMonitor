@@ -46,8 +46,12 @@ def main():
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
     step('0/8 参考数据拉取')
     try:
-        from fetch_reference import main as fetch_ref
-        fetch_ref()
+        from check_trading_day import is_trading_day
+        if is_trading_day():
+            from fetch_reference import main as fetch_ref
+            fetch_ref()
+        else:
+            print("  ⏭️ 非交易日，跳过参考数据拉取")
     except Exception as e:
         print(f"  ⚠️ 参考数据拉取失败: {e}")
 
@@ -119,8 +123,11 @@ def main():
     # ── 5. 反思收益补填 ──────────────────────────────
     step('5/8 反思收益补填')
     try:
-        from reflection_engine import fill_outcomes
+        from reflection_engine import fill_outcomes, persist_dimension_ic
         fill_outcomes(days_back=30)
+        ic_stats = persist_dimension_ic(days_back=30, window=20)
+        if ic_stats.get("rows"):
+            print(f"  ✅ 维度IC写回: {ic_stats['rows']} 行 / {ic_stats['dates']} 天")
     except Exception as e:
         print(f"  ⚠️ 反思收益补填失败: {e}")
 
@@ -288,6 +295,29 @@ def main():
             adjust_weights()
         except Exception as e:
             print(f"  ⚠️ IC 评估失败: {e}")
+
+    # ── 操作摘要 ────────────────────────────────────────
+    try:
+        from db import get_conn
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT code, action, total_score, is_holding
+            FROM signal_log
+            WHERE date = (SELECT MAX(date) FROM signal_log)
+            ORDER BY total_score DESC
+        """).fetchall()
+        conn.close()
+        if rows:
+            held = [f"⭐{r[0]}({r[2]:.0f})" for r in rows if r[3]]
+            buys = [f"{r[0]}({r[2]:.0f})" for r in rows if not r[3] and r[1] in ('STRONG_BUY','BUY','CAUTION_BUY')]
+            sells = [f"{r[0]}({r[2]:.0f})" for r in rows if r[1] in ('SELL','WEAK_HOLD')]
+            print(f"\n{'='*50}")
+            print(f"📋 Serenity 操作摘要")
+            print(f"  持有: {', '.join(held) if held else '无'}")
+            print(f"  可买: {', '.join(buys[:3]) if buys else '无'}{'...' if len(buys) > 3 else ''}")
+            print(f"  卖出: {', '.join(sells[:3]) if sells else '无'}{'...' if len(sells) > 3 else ''}")
+    except Exception:
+        pass
 
     print(f"\n{'='*50}")
     mode = "执行" if do_execute else "分析"

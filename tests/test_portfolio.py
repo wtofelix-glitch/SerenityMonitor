@@ -27,24 +27,40 @@ def _make_stock(code: str, name: str, buy_price: float,
     return base
 
 
-def _mock_trades_db(monkeypatch):
-    """创建内存 SQLite DB，注入 trades 表，patch portfolio_module.get_conn"""
+def _mock_trades_db(monkeypatch, tmp_path=None):
+    """创建临时文件 SQLite DB，注入 trades 表，patch get_conn"""
     import sqlite3
     import db
 
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
+    # 使用临时文件而非内存 DB，避免 :memory: 隔离和共享锁问题
+    import tempfile, os as _os
+    if tmp_path:
+        db_path = str(tmp_path / "serenity_test.db")
+    else:
+        db_path = _os.path.join(tempfile.mkdtemp(), "serenity_test.db")
+
+    def _get_test_conn():
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        return c
+
+    # 初始化表结构
+    conn = _get_test_conn()
     conn.execute("""
-        CREATE TABLE trades (
+        CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT, action TEXT, price REAL,
             quantity INTEGER, trade_amount REAL, date TEXT
         )
     """)
     conn.commit()
-    monkeypatch.setattr(portfolio_module, 'get_conn', lambda: conn)
+    conn.close()
+
+    monkeypatch.setattr(portfolio_module, 'get_conn', _get_test_conn)
     monkeypatch.setattr(db, 'init_db', lambda: None)
-    return conn
+
+    # 返回连接供测试插入数据
+    return _get_test_conn()
 
 
 # ============================================================
@@ -88,6 +104,7 @@ class TestGetCash:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (code, action, price, qty, amt, "2026-06-01"),
         )
+        conn.commit()
 
     def test_empty_trades_returns_initial_capital(self, monkeypatch):
         conn = _mock_trades_db(monkeypatch)
@@ -220,8 +237,13 @@ class TestGetPortfolioValue:
     def test_single_position_value(self, monkeypatch):
         stocks = [_make_stock("600487", "亨通光电", 94.39, 18878.0)]
         self._mock_stocks_and_realtime(monkeypatch, stocks, {"600487": 105.02})
+        conn = _mock_trades_db(monkeypatch)
+        conn.execute(
+            "INSERT INTO trades (code, action, price, quantity, trade_amount, date) "
+            "VALUES ('600487', 'buy', 94.39, 200, 18878.0, '2026-06-08')"
+        )
+        conn.commit()
         pm = PortfolioManager(initial_capital=50000)
-        # removed: get_actual_cash mock no longer needed
         pv = pm.get_portfolio_value()
         assert pv["position_count"] == 1
         assert round(pv["holdings_value"], 0) == 21004.0
@@ -303,14 +325,23 @@ class TestExecuteSell:
         """在临时目录中执行完整卖出流程"""
         import os
         import db
+        import data_engine
         os.chdir(tmp_path)
         db.init_db()
 
         stocks = [_make_stock("600487", "亨通光电", 94.39, 18878.0,
                               buy_date="2026-06-08")]
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: stocks)
+        monkeypatch.setattr(data_engine, 'fetch_single',
+                            lambda code: {"code": "600487", "price": 105.02})
         monkeypatch.setattr(portfolio_module, 'fetch_realtime',
                             lambda codes: [{"code": "600487", "price": 105.02}])
+        conn = _mock_trades_db(monkeypatch)
+        conn.execute(
+            "INSERT INTO trades (code, action, price, quantity, trade_amount, date) "
+            "VALUES ('600487', 'buy', 94.39, 200, 18878.0, '2026-06-08')"
+        )
+        conn.commit()
 
         pm = PortfolioManager(initial_capital=50000)
         result = pm.execute_sell("600487")
@@ -322,13 +353,22 @@ class TestExecuteSell:
         """亏损卖出返回负盈亏"""
         import os
         import db
+        import data_engine
         os.chdir(tmp_path)
         db.init_db()
 
         stocks = [_make_stock("600036", "招商银行", 40.0, 12000.0)]
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: stocks)
+        monkeypatch.setattr(data_engine, 'fetch_single',
+                            lambda code: {"code": "600036", "price": 35.0})
         monkeypatch.setattr(portfolio_module, 'fetch_realtime',
                             lambda codes: [{"code": "600036", "price": 35.0}])
+        conn = _mock_trades_db(monkeypatch)
+        conn.execute(
+            "INSERT INTO trades (code, action, price, quantity, trade_amount, date) "
+            "VALUES ('600036', 'buy', 40.0, 300, 12000.0, '2026-06-08')"
+        )
+        conn.commit()
 
         pm = PortfolioManager(initial_capital=100000)
         result = pm.execute_sell("600036")

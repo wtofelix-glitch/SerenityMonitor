@@ -42,6 +42,9 @@ Serenity Monitor CLI
      python3 cli.py trade-record <BUY/SELL> <code> <price> [amount] [note]  # 🆕 记录实际交易
      python3 cli.py trade-log [--compare]  # 🆕 查看交易记录 / 对比系统信号
      python3 cli.py health                 # 🔬 系统健康诊断
+     python3 cli.py fusion                 # 🧬 GitHub A股量化精华融合体检
+     python3 cli.py alpha-gate             # Alpha Gate 选股候选研究闸门
+     python3 cli.py security-check         # 🔐 写接口安全体检
      python3 cli.py auto                  # 🆕 自动调仓计划
      python3 cli.py auto-exec             # 🚀 强制信号执行（含重试）
      python3 cli.py auto-stats            # 📊 信号执行统计
@@ -54,6 +57,7 @@ Serenity Monitor CLI
      python3 cli.py tier1-reentry --status # 🔄 查看当前状态
 """
 import sys
+import importlib
 import os
 from datetime import date
 
@@ -124,21 +128,7 @@ for sec_name, sec_info in SECTORS.items():
     for tag in sec_info["serenity_tags"]:
         TAG_SECTOR[tag] = sec_name
 
-FACTOR_NAMES = {
-    "ksft": "K线形态", "rank_20": "Rank", "rsv_20": "RSV",
-    "beta_20": "Beta", "resi_20": "残差", "macd_signal": "MACD",
-    "obv_trend": "OBV", "mfi_signal": "MFI", "cci_signal": "CCI",
-    "wq_alpha1": "A1日内", "wq_alpha3": "A3均价", "wq_alpha5": "A5价偏",
-    "wq_alpha15": "A15波幅", "wq_alpha19": "A19动量",
-}
-
-FACTOR_EMOJIS = {
-    "ksft": "📊", "rank_20": "🏆", "rsv_20": "📈",
-    "beta_20": "📉", "resi_20": "📐", "macd_signal": "🔄",
-    "obv_trend": "📦", "mfi_signal": "💰", "cci_signal": "🌡️",
-    "wq_alpha1": "📌", "wq_alpha3": "⚖️", "wq_alpha5": "🎯",
-    "wq_alpha15": "📏", "wq_alpha19": "⏩",
-}
+from factor_metadata import FACTOR_NAMES, FACTOR_EMOJIS
 
 
 def cmd_rebalance():
@@ -1673,6 +1663,21 @@ def cmd_health():
     from health_check import main as health_main
     health_main()
 
+def cmd_quant_fusion():
+    """🧬 GitHub A股量化精华融合体检"""
+    from quant_fusion import format_fusion_report
+    print(format_fusion_report())
+
+def cmd_alpha_gate():
+    """Alpha Gate 选股候选研究闸门"""
+    from alpha_gate import format_alpha_gate_report
+    print(format_alpha_gate_report())
+
+def cmd_security_check():
+    """🔐 写接口安全体检"""
+    from security_check import format_security_report
+    print(format_security_report())
+
 def cmd_tier1_reentry():
     """🔄 T1 回补检查 — Tier 1 标的回调至买入区提醒"""
     from tier1_reentry import check_tier1_reentry, cmd_status
@@ -1870,15 +1875,19 @@ def main():
         "council": cmd_council,
         "council-report": cmd_council_report,
         "health": cmd_health,
+        "fusion": cmd_quant_fusion,
+        "quant-fusion": cmd_quant_fusion,
+        "alpha-gate": cmd_alpha_gate,
+        "security-check": cmd_security_check,
         "tier1-reentry": cmd_tier1_reentry,
         "auto": lambda: cmd_auto_execute(),
-        "auto-exec": lambda: (__import__('sys').argv.append('--force-execute'), cmd_auto_execute())[1],
-        "auto-stats": lambda: (__import__('sys').argv.append('--stats'), cmd_auto_execute())[1],
-        "auto-premarket": lambda: (__import__('sys').argv.append('--premarket'), cmd_auto_execute())[1],
-        "auto-push": lambda: (__import__('sys').argv.append('--push'), cmd_auto_execute())[1],
+        "auto-exec": lambda: (sys.argv.append('--force-execute'), cmd_auto_execute())[1],
+        "auto-stats": lambda: (sys.argv.append('--stats'), cmd_auto_execute())[1],
+        "auto-premarket": lambda: (sys.argv.append('--premarket'), cmd_auto_execute())[1],
+        "auto-push": lambda: (sys.argv.append('--push'), cmd_auto_execute())[1],
         "backtest-quick": lambda: quick_backtest.main(),
-        "workflow": lambda: (__import__('daily_workflow').main()),
-        "advise": lambda: (__import__('portfolio_advisor').main()),
+        "workflow": lambda: importlib.import_module('daily_workflow').main(),
+        "advise": lambda: importlib.import_module('portfolio_advisor').main(),
         "dash": lambda: cmd_dash_dashboard(),
         "journal": lambda: cmd_journal(),
         "reflect": lambda: cmd_reflect(),

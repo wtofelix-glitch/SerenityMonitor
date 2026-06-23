@@ -5,6 +5,10 @@ Serenity 异动预警 — 持仓价格急跌/放量监控
 
 用法: python3 anomaly_alerter.py
 """
+
+from check_trading_day import require_trading_day
+require_trading_day()
+
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -163,14 +167,17 @@ if __name__ == "__main__":
         print(msg)
         # Push via Telegram bot (proxy)
         try:
-            import asyncio
-            from telegram import Bot
-            from telegram.request import HTTPXRequest
-            request = HTTPXRequest(proxy='http://127.0.0.1:7890', connect_timeout=15, read_timeout=15)
-            bot = Bot(token="8668009256:AAHe8wNCeY85pp4t41A-jBs_EAJqjl_cPuw", request=request)
-            async def _send():
-                await bot.send_message(chat_id=8703799832, text=msg)
-            asyncio.run(_send())
+            telegram_token = os.environ.get("TELEGRAM_TOKEN", "")
+            telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+            if telegram_token and telegram_chat_id:
+                import asyncio
+                from telegram import Bot
+                from telegram.request import HTTPXRequest
+                request = HTTPXRequest(proxy='http://127.0.0.1:7890', connect_timeout=15, read_timeout=15)
+                bot = Bot(token=telegram_token, request=request)
+                async def _send():
+                    await bot.send_message(chat_id=telegram_chat_id, text=msg)
+                asyncio.run(_send())
         except Exception:
             pass
     else:

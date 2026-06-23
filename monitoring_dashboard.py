@@ -84,7 +84,10 @@ signal.signal(signal.SIGTERM, _ignore_term)
 
 import json
 import time
+import hmac
+import ipaddress
 from datetime import datetime, timedelta
+from functools import wraps
 from flask import Flask, jsonify, render_template, request
 
 from serenity_logger import get_logger
@@ -93,10 +96,21 @@ from db import get_conn
 log = get_logger(__name__)
 
 # --- 项目模块 ---
-from config import ALL_CODES, STOCK_MAP
+from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG
 from data_engine import fetch_realtime, sina_fetch_raw
+import concurrent.futures
 from scorer import score_all
 from factor_engine import get_current_signals, SIGNAL_FACTORS
+
+def _score_all_with_timeout(timeout=20):
+    """score_all 的带超时包装，防止 Sina API 挂死阻塞看板"""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(score_all)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            log.warning("score_all() timed out after %ss, falling back to DB cache", timeout)
+            return None
 from market_timing import get_market_signal
 from market_sense import MarketSense
 from sector_rotation import SectorRotationEngine
@@ -106,15 +120,68 @@ from etf_momentum import ETFMomentumStrategy
 from portfolio import PortfolioManager
 
 app = Flask(__name__)
+DASHBOARD_PORT = int(os.environ.get("SERENITY_DASHBOARD_PORT", "8401"))
+MONITOR_API_TIMEOUT = float(os.environ.get("SERENITY_MONITOR_API_TIMEOUT", "7"))
+
+
+def _dashboard_token() -> str:
+    return (
+        os.environ.get("SERENITY_DASHBOARD_TOKEN")
+        or os.environ.get("SERENITY_API_TOKEN")
+        or ""
+    )
+
+
+from utils import host_part as _host_part
+
+def _is_private_host(value: str) -> bool:
+    host = _host_part(value)
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local") or host.endswith(".lan")
+    return ip.is_loopback or ip.is_private
+
+
+def _request_token() -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return request.headers.get("X-Serenity-Token", "") or request.args.get("token", "")
+
+
+def _write_request_authorized() -> bool:
+    token = _dashboard_token()
+    if token:
+        return hmac.compare_digest(_request_token(), token)
+
+    # No token configured: permit only direct local/LAN access. Public tunnels
+    # keep a public Host header even when they proxy from 127.0.0.1.
+    return _is_private_host(request.host) and _is_private_host(request.remote_addr or "")
+
+
+def require_write_auth(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not _write_request_authorized():
+            return jsonify({
+                "ok": False,
+                "msg": "写接口需要本地/LAN访问，或设置并提交 SERENITY_DASHBOARD_TOKEN",
+            }), 401
+        return func(*args, **kwargs)
+    return wrapper
 
 # 模块级缓存（避免每30秒重复跑引擎）
 _cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None}
 _cache_time = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None}
 # 分级 TTL：ETF数据每日收盘后更新 → 30分钟，评分 → 2分钟，行业轮动 → 5分钟
+# pf(组合) → 30秒：配合前端30秒刷新，确保交易后数据快速更新
 CACHE_TTL = {
     "etf": timedelta(minutes=30),
     "dividend": timedelta(minutes=5),
-    "pf": timedelta(minutes=5),
+    "pf": timedelta(seconds=30),
     "scores": timedelta(minutes=2),
     "sectors": timedelta(minutes=5),
 }
@@ -191,21 +258,41 @@ def _lightweight_scores():
         s["rank"] = i + 1
 
     return scores
+
+
+def _load_db_scores():
+    """从数据库加载最新评分（实时行情不可用时的降级）"""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT code, total_score, action
+        FROM signal_log
+        WHERE date = (SELECT MAX(date) FROM signal_log)
+        ORDER BY total_score DESC
+    """).fetchall()
+    conn.close()
+    scores = []
+    for row in rows:
+        code, score, action = row
+        name = STOCK_MAP.get(code, {}).get("name", code)
+        scores.append({
+            "code": code,
+            "name": name,
+            "total_score": score,
+            "signal_action": action or "HOLD",
+            "signal_confidence": 0.5,
+        })
+    return scores
+
 def gather_monitor_data():
-    """收集看板所需全部数据（分级缓存）"""
+    """收集看板所需全部数据（直接从 DB 加载，不触发实时评分）"""
     now = datetime.now()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now.strftime("%Y-%m-%d")
 
-    # 1. 评分数据（2分钟缓存）
-    if _cache["scores"] and _cache_time["scores"] and (now - _cache_time["scores"]) < CACHE_TTL["scores"]:
-        scores = _cache["scores"]
-    else:
-        scores = score_all()
-        _cache["scores"] = scores
-        _cache_time["scores"] = now
-
-    # 2. 14因子数据
-    factor_raw = get_current_signals()
+    scores = _load_db_scores()
+    try:
+        factor_raw = get_current_signals()
+    except Exception:
+        factor_raw = []
     factors = []
     for fr in factor_raw:
         signals = fr.get("factors", {}).get("signals", {})
@@ -214,59 +301,50 @@ def gather_monitor_data():
             item[fn] = signals.get(fn, None)
         factors.append(item)
 
-    # 3. 大盘择时
-    market = get_market_signal()
-    
-    # 3.5 操作模式（均值回归/趋势跟踪）
     try:
-        _ms_dash = MarketSense()
-        operational_mode = _ms_dash.get_operational_mode()
+        market = get_market_signal()
     except Exception:
-        operational_mode = {"mode": "neutral", "factor_invert": False, 
+        market = {}
+    try:
+        operational_mode = MarketSense().get_operational_mode()
+    except Exception:
+        operational_mode = {"mode": "neutral", "factor_invert": False,
                            "sell_trigger_weight": 1.0, "buy_threshold_shift": 0,
                            "regime_label": "震荡市", "avg_20d_return": 0}
 
-    # 4. 行业轮动（5分钟缓存）
-    if _cache["sectors"] and _cache_time["sectors"] and (now - _cache_time["sectors"]) < CACHE_TTL["sectors"]:
-        sectors = _cache["sectors"]
-    else:
+    try:
         sector_engine = SectorRotationEngine()
         sectors = sector_engine.get_sector_rank()
-        _cache["sectors"] = sectors
-        _cache_time["sectors"] = now
+    except Exception:
+        sectors = []
 
-    # 5. 综合评级（所有标的）
     ratings = []
     for code in ALL_CODES:
         name = STOCK_MAP.get(code, {}).get("name", code)
         try:
             r = get_rating(code)
-            ratings.append({
-                "code": code,
-                "name": name,
-                "rating": r.get("rating", "N/A"),
-                "rating_emoji": r.get("rating_emoji", "❓"),
-                "score": r.get("score", 0),
-                "signal_label": r.get("signal_label", "N/A"),
-                "signal_emoji": r.get("signal_emoji", "⚪"),
-            })
+            ratings.append({"code": code, "name": name,
+                            "rating": r.get("rating", "N/A"),
+                            "rating_emoji": r.get("rating_emoji", "❓"),
+                            "score": r.get("score", 0),
+                            "signal_label": r.get("signal_label", "N/A"),
+                            "signal_emoji": r.get("signal_emoji", "⚪")})
         except Exception:
-            ratings.append({
-                "code": code, "name": name, "rating": "N/A",
-                "rating_emoji": "❓", "score": 0, "signal_label": "N/A", "signal_emoji": "⚪",
-            })
+            ratings.append({"code": code, "name": name, "rating": "N/A",
+                            "rating_emoji": "❓", "score": 0,
+                            "signal_label": "N/A", "signal_emoji": "⚪"})
 
-    # 每日净值快照（异步保存，不影响响应）
+    # 每日净值快照（后台保存，不影响响应）
     try:
         import json as _json
         pf = _get_portfolio_summary()
         conn = get_conn()
-        conn.execute("""
-            INSERT OR REPLACE INTO nav_history (date, total_value, cash, holdings_value, profit_pct, positions_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (today, pf["total_value"], pf["cash"], pf["holdings_value"], pf["total_profit_pct"], _json.dumps(pf.get("positions", []))))
-        conn.commit()
-        conn.close()
+        conn.execute("""INSERT OR REPLACE INTO nav_history
+            (date, total_value, cash, holdings_value, profit_pct, positions_json)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (today, pf["total_value"], pf["cash"], pf["holdings_value"],
+             pf["total_profit_pct"], _json.dumps(pf.get("positions", []))))
+        conn.commit(); conn.close()
     except Exception:
         pass
 
@@ -539,24 +617,129 @@ def _get_portfolio_summary():
         return _cache["pf"] or {"positions": 0, "total_value": 0}
 
 
+@app.route("/monitor")
 @app.route("/")
 def index():
-    """root → ngrok 隧道入口，重定向到移动端看板"""
-    from flask import redirect
-    return redirect("/monitor")
+    """Serenity 移动端看板"""
+    return render_template("monitor.html")
 
 
 @app.route("/api/monitor-data")
 def api_monitor_data():
     API_CALLS.labels(source="dashboard_api").inc()
     try:
-        data = gather_monitor_data()
+        # ?force=1 时跳过缓存，强制拉实时数据
+        force = request.args.get("force", "").lower() in ("1", "true", "yes")
+        if force:
+            for key in _cache:
+                _cache[key] = None
+                _cache_time[key] = None
+
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            data = ex.submit(gather_monitor_data).result(timeout=MONITOR_API_TIMEOUT)
+        except concurrent.futures.TimeoutError:
+            log.warning("monitor-data timeout after %ss, using DB fallback", MONITOR_API_TIMEOUT)
+            data = _quick_db_fallback()
+        finally:
+            # 关键：wait=False 避免等 gather_monitor_data 跑完才返回
+            ex.shutdown(wait=False)
         return jsonify({"ok": True, "data": data})
     except Exception as e:
         API_ERRORS.labels(source="dashboard_api").inc()
         SCORE_ERRORS.labels(module="dashboard").inc()
         log.error("API monitor-data failed: %s", e, exc_info=True)
-        return jsonify({"ok": False, "error": str(e)})
+        return jsonify({"ok": False, "data": _quick_db_fallback()}), 200
+
+
+def _db_only_portfolio_summary():
+    """纯 DB 持仓摘要（不碰 Sina 实时行情）—— 给超时降级用"""
+    conn = get_conn()
+    try:
+        # 可用资金
+        cash = 0.0
+        cash_row = conn.execute(
+            "SELECT price FROM trades WHERE code='CASH' AND action='sell' AND rowid IN (SELECT max(rowid) FROM trades WHERE code='CASH')"
+        ).fetchone()
+        if cash_row and cash_row["price"] and cash_row["price"] > 0:
+            cash = cash_row["price"]
+        else:
+            cash = CAPITAL_CONFIG.get("initial_capital", 200000.0)
+
+        # 持仓（用 DB 存储的 buy_price 作为近似估值，不拉实时价）
+        stocks = conn.execute(
+            "SELECT code, buy_price, trade_amount, name FROM stocks WHERE is_active=1 AND code != 'CASH'"
+        ).fetchall()
+
+        details = []
+        holdings_value = 0.0
+        total_cost = 0.0
+        for s in stocks:
+            code = s["code"]
+            name = s["name"] or STOCK_MAP.get(code, {}).get("name", code)
+            buy_price = s["buy_price"] or 0
+            amount = s["trade_amount"] or 0
+            total_cost += amount
+            shares = int(amount / buy_price / 100) * 100 if buy_price > 0 and amount > 0 else 0
+            # 无实时价，用买入价做参考，盈亏设 0
+            current_value = amount
+            holdings_value += current_value
+            details.append({
+                "code": code, "name": name,
+                "buy_price": buy_price,
+                "current_price": buy_price,
+                "shares": shares,
+                "cost": amount,
+                "current_value": current_value,
+                "profit_pct": 0.0,
+                "profit_amount": 0.0,
+                "weight": round(current_value / (cash + holdings_value) * 100, 1) if (cash + holdings_value) > 0 else 0,
+            })
+
+        total_value = cash + holdings_value
+        total_profit_pct = (total_value - CAPITAL_CONFIG.get("initial_capital", 200000.0)) / CAPITAL_CONFIG.get("initial_capital", 200000.0) * 100
+
+        return {
+            "positions": len(details),
+            "total_value": round(total_value, 0),
+            "cash": round(cash, 0),
+            "holdings_value": round(holdings_value, 0),
+            "total_profit_pct": round(total_profit_pct, 2),
+            "total_profit_amount": round(total_value - CAPITAL_CONFIG.get("initial_capital", 200000.0), 0),
+            "position_details": details,
+        }
+    except Exception as e:
+        log.warning("DB-only portfolio fallback failed: %s", e)
+        return {"positions": 0, "total_value": 0, "cash": 0,
+                "holdings_value": 0, "total_profit_pct": 0, "total_profit_amount": 0, "position_details": []}
+    finally:
+        conn.close()
+
+
+def _quick_db_fallback():
+    """monitor-data 超时降级：直接从 DB 获取评分 + 持仓，确保前端能渲染。0 次 API 调用。"""
+    now = datetime.now()
+    scores = _load_db_scores()
+    pf = _db_only_portfolio_summary()  # ← 纯 DB，不碰 Sina
+    return {
+        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "scores": scores or [],
+        "factors": [],
+        "market": {},
+        "sectors": [],
+        "ratings": [],
+        "signal_factors": SIGNAL_FACTORS,
+        "factor_labels": FACTOR_LABELS,
+        "etf_top5": [],
+        "dividend_top5": [],
+        "portfolio_summary": pf,
+        "signal_brief": _build_signal_brief(scores or [], pf),
+        "target_tracker": [],
+        "position_advice": [],
+        "stop_conditions": [],
+        "operational_mode": {},
+    }
 
 
 # =============================================================
@@ -648,12 +831,19 @@ def api_signal_performance():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# ===== Prometheus 指标 =====
-from metrics import metrics_endpoint, API_CALLS, API_ERRORS, SCORE_ERRORS, SIGNAL_ACTIONS
+# ===== Prometheus 指标（可选） =====
+try:
+    from metrics import metrics_endpoint, API_CALLS, API_ERRORS, SCORE_ERRORS, SIGNAL_ACTIONS
+    _HAS_PROMETHEUS = True
+except ImportError:
+    _HAS_PROMETHEUS = False
+    metrics_endpoint = None
 
 @app.route("/metrics")
 def api_metrics():
-    """Prometheus 指标端点"""
+    """Prometheus 指标端点（需安装 prometheus_client）"""
+    if not _HAS_PROMETHEUS:
+        return jsonify({"ok": False, "error": "prometheus_client 未安装"}), 501
     return metrics_endpoint()
 
 
@@ -791,18 +981,14 @@ def api_guru():
         return jsonify({"ok": False, "error": str(e)})
 
 
-@app.route("/monitor")
-def monitor_page():
-    return render_template("monitor.html")
-
-
 # ===== 调仓 API =====
 @app.route("/api/trades", methods=["POST"])
+@require_write_auth
 def api_trades():
     from flask import request
     from db import add_trade, set_active, clear_active
     from datetime import datetime
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     code = data.get("code", "")
     action = data.get("action", "buy")
     price = float(data.get("price", 0))
@@ -820,12 +1006,25 @@ def api_trades():
         return jsonify({"ok": False, "msg": str(e)}), 400
 
 
+# ===== 缓存管理 API =====
+@app.route("/api/clear-cache")
+@require_write_auth
+def api_clear_cache():
+    """清空所有API缓存，前端立即看到最新数据"""
+    for key in _cache:
+        _cache[key] = None
+        _cache_time[key] = None
+    log.info("全部API缓存已清除")
+    return jsonify({"ok": True, "msg": "缓存已清除"})
+
+
 # ===== 设置 API =====
 @app.route("/api/config", methods=["POST"])
+@require_write_auth
 def api_config():
     from flask import request
     from db import upsert_stock, get_stock
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     code = data.get("code", "")
     stock = get_stock(code)
     if not stock:
@@ -846,16 +1045,21 @@ def api_config():
 # ===== 交易日志 API =====
 @app.route("/api/journal")
 def api_journal():
-    """返回近期交易日志和统计"""
+    """返回近期交易日志和统计（自动从 trades 同步缺失记录）"""
     try:
-        from trading_journal import get_journal, get_stats
+        from trading_journal import get_journal, get_stats, sync_from_trades
         from config import STOCK_MAP
-        entries = get_journal(limit=10)
+        # 自动同步缺失记录
+        synced = sync_from_trades(reason_prefix="auto")
+        entries = get_journal(limit=20)
         stats = get_stats()
         # Attach name to each entry
         for e in entries:
             e["name"] = STOCK_MAP.get(e["code"], {}).get("name", e["code"])
-        return jsonify({"ok": True, "entries": entries, "stats": stats})
+        result = {"ok": True, "entries": entries, "stats": stats}
+        if synced > 0:
+            result["synced"] = synced
+        return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -883,6 +1087,7 @@ def api_execution_plan():
 
 
 @app.route("/api/execute", methods=["POST"])
+@require_write_auth
 def api_execute():
     """执行当前交易计划（仅记录到本地DB，不在券商下单）"""
     try:
@@ -1094,6 +1299,7 @@ def api_today_strategy():
 # ===== 快捷查询 API（手机书签一键直达） =====
 
 @app.route("/api/nl-query")
+@require_write_auth
 def api_nl_query():
     """自然语言查询 — 中文意图识别，调用现有分析函数"""
     q = request.args.get("q", "").strip()
@@ -1401,8 +1607,9 @@ def api_quick_alerts():
         return jsonify({"ok": False, "error": str(e)})
 
 
+
 if __name__ == "__main__":
-    log.info("🅳 Serenity Monitor 移动端看板启动 — http://localhost:8401/monitor")
-    log.info("📊 Prometheus 指标: http://localhost:8401/metrics")
+    log.info("🅳 Serenity Monitor 移动端看板启动 — http://localhost:%s/monitor", DASHBOARD_PORT)
+    log.info("📊 Prometheus 指标: http://localhost:%s/metrics", DASHBOARD_PORT)
     log.info("⚡ 快捷: /api/quick /api/quick/pnl /api/quick/alerts")
-    app.run(host="0.0.0.0", port=8401, debug=False)
+    app.run(host="0.0.0.0", port=DASHBOARD_PORT, debug=False, threaded=True)

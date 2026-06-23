@@ -7,13 +7,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── 确保 Playwright 可导入（优先 brew site-packages，已有浏览器缓存）
+# ── 确保 Playwright 可导入
 try:
     import playwright  # noqa: F401
 except ImportError:
-    brew_site = "/opt/homebrew/lib/python3.13/site-packages"
-    if os.path.isdir(brew_site):
-        sys.path.insert(0, brew_site)
+    # 注意：不要插入系统 Python 3.13 的 site-packages，这会导致 numpy/其他
+    # C 扩展的版本冲突。请在 venv 中安装 playwright 替代:
+    #   pip install playwright && python -m playwright install chromium
+    pass
 
 
 # ── 命令行选项 ──────────────────────────────────────────────────

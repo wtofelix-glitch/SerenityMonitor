@@ -19,19 +19,7 @@ from backtest_engine import MultiFactorWithSignalsStrategy, BacktestTrade
 from db import get_price_history
 from config import STOCK_MAP
 
-# ── 14因子名称 & 展示名 ──
-FACTOR_KEYS = [
-    "ksft", "rank_20", "rsv_20", "beta_20", "resi_20",
-    "macd_signal", "obv_trend", "mfi_signal", "cci_signal",
-    "wq_alpha1", "wq_alpha3", "wq_alpha5", "wq_alpha15", "wq_alpha19",
-]
-FACTOR_LABELS = {
-    "ksft": "K线形态", "rank_20": "Rank", "rsv_20": "RSV",
-    "beta_20": "Beta", "resi_20": "残差", "macd_signal": "MACD",
-    "obv_trend": "OBV", "mfi_signal": "MFI", "cci_signal": "CCI",
-    "wq_alpha1": "A1日内", "wq_alpha3": "A3均价", "wq_alpha5": "A5价偏",
-    "wq_alpha15": "A15波幅", "wq_alpha19": "A19动量",
-}
+from factor_metadata import FACTOR_KEYS, FACTOR_LABELS
 
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 

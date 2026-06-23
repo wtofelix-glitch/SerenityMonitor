@@ -16,28 +16,8 @@ import numpy as np
 from collections import defaultdict
 from db import get_conn, get_price_history
 
-# ── 14 信号因子列表（对齐 factor_engine.SIGNAL_FACTORS） ──
-SIGNAL_FACTORS = [
-    "ksft", "rank_20", "rsv_20", "beta_20", "resi_20",
-    "macd_signal", "obv_trend", "mfi_signal", "cci_signal",
-    "wq_alpha1", "wq_alpha3", "wq_alpha5", "wq_alpha15", "wq_alpha19",
-]
-
-FACTOR_LABELS = {
-    "ksft": "K线形态", "rank_20": "Rank", "rsv_20": "RSV",
-    "beta_20": "Beta", "resi_20": "残差", "macd_signal": "MACD",
-    "obv_trend": "OBV", "mfi_signal": "MFI", "cci_signal": "CCI",
-    "wq_alpha1": "A1日内", "wq_alpha3": "A3均价", "wq_alpha5": "A5价偏",
-    "wq_alpha15": "A15波幅", "wq_alpha19": "A19动量",
-}
-
-FACTOR_EMOJIS = {
-    "ksft": "📊", "rank_20": "🏆", "rsv_20": "📈",
-    "beta_20": "📉", "resi_20": "📐", "macd_signal": "🔄",
-    "obv_trend": "📦", "mfi_signal": "💰", "cci_signal": "🌡️",
-    "wq_alpha1": "📌", "wq_alpha3": "⚖️", "wq_alpha5": "🎯",
-    "wq_alpha15": "📏", "wq_alpha19": "⏩",
-}
+from factor_metadata import SIGNAL_FACTORS, FACTOR_LABELS, FACTOR_EMOJIS
+from factor_engine import _to_arrays, _ema, _linear_regression
 
 # 需要回溯的天数（各因子中最大窗口）
 MAX_FACTOR_WINDOW = 65  # obv/macd 需要~35d，留余量
@@ -46,56 +26,6 @@ MAX_FACTOR_WINDOW = 65  # obv/macd 需要~35d，留余量
 # ═══════════════════════════════════════════════════════════
 # 内部：将 price_history rows 转为正序 numpy 数组
 # ═══════════════════════════════════════════════════════════
-
-def _to_arrays(rows):
-    """将价格历史行列表转为正序 numpy 数组"""
-    n = len(rows)
-    if n == 0:
-        return {}
-    dates = [r["date"] for r in reversed(rows)]
-    opens   = np.array([float(r["open"])   for r in reversed(rows)], dtype=float)
-    closes  = np.array([float(r["close"])  for r in reversed(rows)], dtype=float)
-    highs   = np.array([float(r["high"])   for r in reversed(rows)], dtype=float)
-    lows    = np.array([float(r["low"])    for r in reversed(rows)], dtype=float)
-    volumes = np.array([float(r["volume"]) for r in reversed(rows)], dtype=float)
-    return {"dates": dates, "open": opens, "close": closes,
-            "high": highs, "low": lows, "volume": volumes}
-
-
-# ═══════════════════════════════════════════════════════════
-# 内部：在单个时间点计算 14 因子的值
-# ═══════════════════════════════════════════════════════════
-
-def _ema(arr, span):
-    """纯 numpy EMA"""
-    alpha = 2.0 / (span + 1)
-    out = np.empty_like(arr)
-    out[0] = arr[0]
-    for i in range(1, len(arr)):
-        out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
-    return out
-
-
-def _linear_regression(y):
-    """OLS 斜率、R²、残差"""
-    n = len(y)
-    if n < 3:
-        return 0.0, 0.0, 0.0, np.zeros_like(y)
-    x = np.arange(n, dtype=float)
-    x_m, y_m = x.mean(), y.mean()
-    cov = ((x - x_m) * (y - y_m)).sum()
-    var_x = ((x - x_m) ** 2).sum()
-    if var_x == 0:
-        return 0.0, 0.0, 0.0, np.zeros_like(y)
-    slope = cov / var_x
-    intercept = y_m - slope * x_m
-    y_pred = slope * x + intercept
-    ss_res = ((y - y_pred) ** 2).sum()
-    ss_tot = ((y - y_m) ** 2).sum()
-    r_sq = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-    residuals = y - y_pred
-    return slope, intercept, r_sq, residuals
-
 
 def _compute_daily_factors(opens, closes, highs, lows, volumes):
     """

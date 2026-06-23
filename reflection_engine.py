@@ -64,7 +64,15 @@ DIMENSION_KEYS = [
 ]
 
 
-def compute_dimension_ic(days: int = 20) -> dict:
+def _coerce_as_of_date(as_of=None):
+    if as_of is None:
+        return date.today()
+    if isinstance(as_of, str):
+        return date.fromisoformat(as_of[:10])
+    return as_of
+
+
+def compute_dimension_ic(days: int = 20, as_of=None) -> dict:
     """
     计算各评分维度与次日收益的 Rank IC。
 
@@ -74,7 +82,7 @@ def compute_dimension_ic(days: int = 20) -> dict:
     Returns:
         {dimension: mean_ic, ...}
     """
-    today = date.today()
+    today = _coerce_as_of_date(as_of)
     dim_ic_sums = defaultdict(float)
     dim_ic_counts = defaultdict(int)
 
@@ -213,7 +221,8 @@ def generate_reflection(code: str) -> dict:
             "technical_score": latest.get("technical_score", 0),
             "sentiment_score": latest.get("sentiment_score", 0),
         },
-        "dimension_ic": dim_ic_filtered,
+        "dimension_ic": dim_ic,
+        "effective_dimension_ic": dim_ic_filtered,
         "reflection_text": reflection_text,
     }
 
@@ -241,6 +250,33 @@ def generate_all_reflections() -> list[dict]:
         except Exception as e:
             print(f"⚠️ {code} 反思生成失败: {e}")
     return results
+
+
+def persist_dimension_ic(days_back: int = 30, window: int = 20) -> dict:
+    """把滚动维度 IC 写回最近的 score_reflections 记录。"""
+    refs = get_reflections(days=days_back)
+    if not refs:
+        return {"dates": 0, "rows": 0}
+
+    refs_by_date = defaultdict(list)
+    for ref in refs:
+        ref_date = ref.get("date")
+        code = ref.get("code")
+        if ref_date and code:
+            refs_by_date[ref_date].append(code)
+
+    updated_rows = 0
+    for ref_date, codes in refs_by_date.items():
+        try:
+            dim_ic = compute_dimension_ic(days=window, as_of=ref_date)
+        except Exception as e:
+            print(f"⚠️ {ref_date} 维度IC计算失败: {e}")
+            continue
+        for code in codes:
+            update_reflection_outcome(code, ref_date, dimension_ic=dim_ic)
+            updated_rows += 1
+
+    return {"dates": len(refs_by_date), "rows": updated_rows}
 
 
 # -----------------------------------------------------------------
@@ -355,7 +391,7 @@ def show_reflections(days: int = 7):
     print("=" * 80)
 
 
-def show_dimension_ic(days: int = 20):
+def show_dimension_ic(days: int = 20, persist: bool = True):
     """显示维度IC报告"""
     print(f"📊 全市场维度 IC 报告 — 最近 {days} 天")
     print("=" * 70)
@@ -369,6 +405,12 @@ def show_dimension_ic(days: int = 20):
         print(f"  {dim:<20} {ic:>+8.4f} {bar} {label:>6}")
     print("=" * 70)
     print()
+
+    if persist:
+        stats = persist_dimension_ic(days_back=days, window=days)
+        if stats["rows"]:
+            print(f"✅ 维度IC已写回 score_reflections: {stats['rows']} 行 / {stats['dates']} 天")
+            print()
 
     suggestions = suggest_weight_adjustments(days=days)
     if suggestions:

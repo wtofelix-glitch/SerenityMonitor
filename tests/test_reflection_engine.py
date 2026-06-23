@@ -4,13 +4,14 @@ import sys
 sys.path.insert(0, '/Users/mac/workspace/SerenityMonitor')
 
 import json
+import sqlite3
 from datetime import date as RealDate
 from unittest.mock import ANY
 
 import reflection_engine
 from reflection_engine import (
     compute_dimension_ic, generate_reflection, generate_all_reflections,
-    fill_outcomes, suggest_weight_adjustments,
+    fill_outcomes, persist_dimension_ic, suggest_weight_adjustments,
     show_reflections, show_dimension_ic, apply_reflection_adjustments,
     DIMENSION_KEYS,
 )
@@ -134,6 +135,21 @@ class TestComputeDimensionIC:
         for dim in DIMENSION_KEYS:
             assert result[dim] == 0.0
 
+    def test_as_of_date_uses_historical_window(self, monkeypatch):
+        """指定 as_of 时使用该日期之前的窗口，而不是系统当天"""
+        calls = []
+
+        def mock_scores(day):
+            calls.append(day)
+            return {}
+
+        monkeypatch.setattr(reflection_engine, '_get_scores_on_date', mock_scores)
+        compute_dimension_ic(days=2, as_of="2026-06-10")
+        assert calls == [
+            "2026-06-09", "2026-06-10",
+            "2026-06-08", "2026-06-09",
+        ]
+
 
 # ── Generate Reflection ──────────────────────────────────
 
@@ -166,8 +182,9 @@ class TestGenerateReflection:
         assert result["code"] == "002281"
         assert result["total_score"] == 75
         assert result["dimension_ic"].get("base_score") == 0.12
-        # IC > |0.05| 才包含
-        assert "volume_score" not in result["dimension_ic"]
+        # dimension_ic 保存完整 IC，effective_dimension_ic 仅保留有效维度
+        assert result["dimension_ic"].get("volume_score") == 0.02
+        assert "volume_score" not in result["effective_dimension_ic"]
         assert "reflection_text" in result
         assert "002281" in result["reflection_text"]
 
@@ -218,6 +235,57 @@ class TestGenerateAllReflections:
         assert len(results) == len(reflection_engine.ALL_CODES) - 1
         # generate_reflection was still called for all
         assert call_count[0] == len(reflection_engine.ALL_CODES)
+
+
+class TestSaveReflection:
+    def test_save_reflection_persists_dimension_ic(self, monkeypatch, tmp_path):
+        """DB 保存反思时同步持久化维度 IC"""
+        import db
+
+        db_path = tmp_path / "serenity_test.db"
+
+        def get_test_conn():
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        conn = get_test_conn()
+        conn.execute("""
+            CREATE TABLE score_reflections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                date TEXT NOT NULL,
+                total_score REAL DEFAULT 0,
+                dimension_scores TEXT DEFAULT '{}',
+                predicted_direction TEXT DEFAULT '',
+                actual_return_1d REAL DEFAULT NULL,
+                actual_return_3d REAL DEFAULT NULL,
+                actual_return_5d REAL DEFAULT NULL,
+                dimension_ic TEXT DEFAULT '{}',
+                reflection_text TEXT DEFAULT '',
+                UNIQUE(code, date)
+            )
+        """)
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(db, 'get_conn', get_test_conn)
+
+        db.save_reflection("002281", {
+            "date": "2026-06-05",
+            "total_score": 75,
+            "dimension_scores": {"base_score": 80},
+            "predicted_direction": "BUY",
+            "dimension_ic": {"base_score": 0.12},
+            "reflection_text": "ok",
+        })
+
+        conn = get_test_conn()
+        row = conn.execute(
+            "SELECT dimension_ic FROM score_reflections WHERE code=? AND date=?",
+            ("002281", "2026-06-05"),
+        ).fetchone()
+        conn.close()
+        assert json.loads(row["dimension_ic"]) == {"base_score": 0.12}
 
 
 # ── Fill Outcomes ────────────────────────────────────────
@@ -284,6 +352,39 @@ class TestFillOutcomes:
                             lambda *a, **kw: called.append(True))
         fill_outcomes(days_back=10)
         assert len(called) == 0
+
+
+class TestPersistDimensionIC:
+    def test_persist_dimension_ic_updates_recent_reflection_rows(self, monkeypatch):
+        """把每个反思日期对应的滚动 IC 写回 DB"""
+        monkeypatch.setattr(reflection_engine, 'get_reflections',
+                            lambda days=30: [
+                                {"code": "002281", "date": "2026-06-05"},
+                                {"code": "000988", "date": "2026-06-05"},
+                                {"code": "600141", "date": "2026-06-06"},
+                            ])
+        monkeypatch.setattr(reflection_engine, 'compute_dimension_ic',
+                            lambda days=20, as_of=None: {
+                                "base_score": 0.1 if as_of == "2026-06-05" else -0.1,
+                                "momentum_score": 0.2,
+                            })
+        updated = []
+        monkeypatch.setattr(reflection_engine, 'update_reflection_outcome',
+                            lambda code, date_str, **kw: updated.append((code, date_str, kw)))
+
+        stats = persist_dimension_ic(days_back=30, window=20)
+
+        assert stats == {"dates": 2, "rows": 3}
+        assert updated[0][0:2] == ("002281", "2026-06-05")
+        assert updated[0][2]["dimension_ic"]["base_score"] == 0.1
+        assert updated[-1][0:2] == ("600141", "2026-06-06")
+        assert updated[-1][2]["dimension_ic"]["base_score"] == -0.1
+
+    def test_persist_dimension_ic_no_rows(self, monkeypatch):
+        """没有反思记录时不写回"""
+        monkeypatch.setattr(reflection_engine, 'get_reflections', lambda days=30: [])
+        stats = persist_dimension_ic(days_back=30, window=20)
+        assert stats == {"dates": 0, "rows": 0}
 
 
 # ── Suggest Weight Adjustments ──────────────────────────
@@ -361,11 +462,14 @@ class TestShowFunctions:
         """维度 IC 报告输出"""
         monkeypatch.setattr(reflection_engine, 'compute_dimension_ic',
                             lambda days=20: dict.fromkeys(DIMENSION_KEYS, 0.05))
+        monkeypatch.setattr(reflection_engine, 'persist_dimension_ic',
+                            lambda days_back=20, window=20: {"dates": 1, "rows": 2})
         monkeypatch.setattr(reflection_engine, 'suggest_weight_adjustments',
                             lambda days=20: {})
         show_dimension_ic(days=20)
         captured = capsys.readouterr()
         assert "维度 IC" in captured.out
+        assert "已写回" in captured.out
 
     def test_apply_adjustments_saves(self, monkeypatch):
         """apply_reflection_adjustments 保存权重（通过 weight_adjuster）"""
@@ -392,5 +496,7 @@ class TestShowFunctions:
         saved = {}
         monkeypatch.setattr(wa, 'save_adjusted_weights',
                             lambda w, ic_report=None: saved.update(w))
+        monkeypatch.setattr(reflection_engine, 'show_dimension_ic',
+                            lambda days=20: None)
         apply_reflection_adjustments(days=20)
         assert len(saved) > 0

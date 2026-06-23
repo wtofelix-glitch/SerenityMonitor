@@ -16,6 +16,8 @@ n8n HTTP Request 节点调用:
 """
 
 import json
+import hmac
+import ipaddress
 import os
 import signal
 import shutil
@@ -37,6 +39,7 @@ SEND_RETRIES = 2               # retry count for hermes send
 SEND_RETRY_DELAY = 2           # seconds between retries
 TASK_TIMEOUT = 120             # seconds per serenity script
 SEND_TIMEOUT = 30              # seconds per hermes send
+BRIDGE_TOKEN = os.environ.get("SERENITY_BRIDGE_TOKEN") or os.environ.get("SERENITY_API_TOKEN") or ""
 
 TASKS = {
     "fetch-history":   ["python3", "fetch_history.py"],
@@ -49,6 +52,19 @@ TASKS = {
 }
 
 _SHUTDOWN = False
+
+
+from utils import host_part as _host_part
+
+def _is_private_host(value: str) -> bool:
+    host = _host_part(value)
+    if host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local") or host.endswith(".lan") or host.endswith(".internal")
+    return ip.is_loopback or ip.is_private
 
 
 def _rate_limit(max_per_sec=10):
@@ -71,10 +87,31 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, data: dict) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+    def _request_token(self) -> str:
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return self.headers.get("X-Serenity-Token", "")
+
+    def _authorized(self) -> bool:
+        if BRIDGE_TOKEN:
+            return hmac.compare_digest(self._request_token(), BRIDGE_TOKEN)
+        host = self.headers.get("Host", "")
+        client = self.client_address[0] if self.client_address else ""
+        return _is_private_host(host) and _is_private_host(client)
+
+    def _require_auth(self) -> bool:
+        if self._authorized():
+            return True
+        self._json(401, {
+            "ok": False,
+            "error": "bridge write/task endpoints require local/LAN access or SERENITY_BRIDGE_TOKEN",
+        })
+        return False
 
     def _read_body(self) -> dict:
         """Read and parse request body with size limit."""
@@ -94,8 +131,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/health":
             return self._json(200, {"ok": True, "service": "serenity-bridge"})
         if path.startswith("/api/serenity/"):
-            task = path[len("/api/serenity/"):]
-            return self._run_task(task)
+            return self._json(405, {"ok": False, "error": "use POST for serenity tasks"})
         self._json(404, {"ok": False, "error": f"not found: {path}"})
 
     def do_POST(self):
@@ -104,8 +140,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/api/send":
+            if not self._require_auth():
+                return
             return self._handle_send()
         if path.startswith("/api/serenity/"):
+            if not self._require_auth():
+                return
             task = path[len("/api/serenity/"):]
             return self._run_task(task)
         self._json(404, {"ok": False, "error": f"not found: {path}"})

@@ -6,6 +6,9 @@
 用法:
     python3 fetch_reference.py              # 拉取全部参考标的
 """
+from check_trading_day import require_trading_day
+require_trading_day()
+
 import sys, os, json, urllib.request, ssl
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

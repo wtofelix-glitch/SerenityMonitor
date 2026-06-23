@@ -57,11 +57,28 @@ class PortfolioManager:
                     (_tiers[1], _exits[1]),
                     (_tiers[2] if len(_tiers) > 2 else _tiers[1] * 2, 1.0),
                 ]
-                log.info("📊 operational_mode 止盈覆盖: %s", self.profit_take_levels)
+                log.debug("📊 operational_mode 止盈覆盖: %s", self.profit_take_levels)
         except Exception:
             pass
 
     # ── 核心查询 ──────────────────────────────────────────
+
+    def _get_net_shares(self, code: str) -> int:
+        """从 trades 表计算该代码的净持仓股数 = 总买入量 - 总卖出量"""
+        conn = get_conn()
+        try:
+            bought = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades WHERE code=? AND LOWER(action)='buy'",
+                (code,)
+            ).fetchone()[0]
+            sold = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades WHERE code=? AND LOWER(action)='sell'",
+                (code,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        net = bought - sold
+        return max(net, 0)
 
     @property
     def positions(self) -> list[dict]:
@@ -136,10 +153,11 @@ class PortfolioManager:
             rt = rt_map.get(code, {})
             price = rt.get("price", 0)
             buy_price = p["buy_price"]
-            amount = p.get("trade_amount", 0) or 0
-            shares = int(amount / buy_price / 100) * 100 if buy_price > 0 and amount > 0 else 0
+            # 从 trades 表计算净持股（扣减已卖出部分）
+            shares = self._get_net_shares(code)
             current_value = shares * price
             holdings_value += current_value
+            cost = shares * buy_price if buy_price > 0 else 0
             profit_pct = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
             details.append({
                 "code": code,
@@ -147,10 +165,10 @@ class PortfolioManager:
                 "buy_price": buy_price,
                 "current_price": price,
                 "shares": shares,
-                "cost": amount,
-                "current_value": current_value,
+                "cost": round(cost, 2),
+                "current_value": round(current_value, 2),
                 "profit_pct": round(profit_pct, 2),
-                "profit_amount": round(current_value - amount, 2),
+                "profit_amount": round(current_value - cost, 2),
                 "weight": round(current_value / (cash + holdings_value) * 100, 1) if (cash + holdings_value) > 0 else 0,
             })
 
@@ -271,8 +289,9 @@ class PortfolioManager:
             if not risk_check["allowed"]:
                 log.warning("风控拦截买入 %s: %s", code, "; ".join(risk_check["reasons"]))
                 return {"status": "blocked", "reason": "; ".join(risk_check["reasons"])}
-        except Exception:
-            pass  # 风险模块异常不阻断执行
+        except Exception as exc:
+            log.exception("风控模块异常，阻断买入 %s: %s", code, exc)
+            return {"status": "blocked", "reason": f"风控模块异常: {exc}"}
 
         # 计算仓位
         if force_amount > 0:
@@ -337,6 +356,10 @@ class PortfolioManager:
         """执行卖出（全部清仓），返回盈亏"""
         from data_engine import fetch_single
 
+        # 防止空原因自动记录到 trades
+        if not reason or not reason.strip():
+            reason = "手动卖出"
+
         stock = None
         for p in self.positions:
             if p["code"] == code:
@@ -352,8 +375,10 @@ class PortfolioManager:
             price = float(rows[0]["close"]) if rows else 0
 
         buy_price = stock["buy_price"]
-        amount = stock.get("trade_amount", 0) or 0
-        shares = int(amount / buy_price / 100) * 100 if buy_price > 0 and amount > 0 else 0
+        # 从 trades 表计算实际持股（扣减已卖出部分）
+        shares = self._get_net_shares(code)
+        if shares <= 0:
+            return {"status": "error", "reason": f"{code} 净持仓为 0，无需卖出"}
         sell_value = shares * price
         cost = shares * buy_price
         fee = sell_value * (self.commission_rate + self.stamp_tax_rate)
@@ -401,8 +426,6 @@ class PortfolioManager:
         检查所有持仓的止盈止损条件
         返回触发的操作建议
         """
-        from data_engine import fetch_realtime
-
         positions = self.positions
         if not positions:
             return []

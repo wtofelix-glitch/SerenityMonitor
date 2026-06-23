@@ -15,6 +15,9 @@
     7. 输出规则: 有异常才输出, 无异常完全静默
 """
 
+from check_trading_day import require_trading_day
+require_trading_day()
+
 import sys
 import json
 import os

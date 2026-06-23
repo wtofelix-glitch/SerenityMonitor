@@ -562,6 +562,13 @@ def _fmt(val, suffix="", na="N/A"):
     return f"{val}{suffix}"
 
 
+def _fmt_ratio_pct(val, na="N/A"):
+    """格式化 0~1 比例为百分比，仅用于 CLI 展示。"""
+    if val is None:
+        return na
+    return f"{val * 100:.1f}%"
+
+
 def cmd_signal_performance():
     """命令行入口：更新统计表 + 打印完整报告"""
     print(f"\n📊  信号绩效分析  |  {datetime.now():%Y-%m-%d %H:%M}")
@@ -584,10 +591,10 @@ def cmd_signal_performance():
     print(f"📈  全局统计")
     print(f"  信号总数: {summary['total_signals']}")
     print(f"  有 outcome: {summary['signals_with_outcome']}")
-    print(f"  整体 1 日胜率: {_fmt(summary['overall_win_rate_1d'], '%')}")
+    print(f"  整体 1 日胜率: {_fmt_ratio_pct(summary['overall_win_rate_1d'])}")
     print(f"  整体 1 日平均收益: {_fmt(summary['overall_avg_return_1d'], '%')}")
     if summary["best_action"]:
-        print(f"  最佳信号: {summary['best_action']} ({_fmt(summary['best_action_win_rate'], '%')})")
+        print(f"  最佳信号: {summary['best_action']} ({_fmt_ratio_pct(summary['best_action_win_rate'])})")
     if summary["best_dimension"]:
         print(f"  最佳预测维度: {summary['best_dimension']} (corr={summary['best_dimension_corr']})")
     print()
@@ -601,8 +608,8 @@ def cmd_signal_performance():
     for s in report["signal_by_action"]:
         ar1 = _fmt(s["avg_return_1d"], "%")
         ar3 = _fmt(s["avg_return_3d"], "%")
-        wr1 = _fmt(s["win_rate_1d"], "%") if s["win_rate_1d"] is not None else "   N/A"
-        wr3 = _fmt(s["win_rate_3d"], "%") if s["win_rate_3d"] is not None else "   N/A"
+        wr1 = _fmt_ratio_pct(s["win_rate_1d"]) if s["win_rate_1d"] is not None else "   N/A"
+        wr3 = _fmt_ratio_pct(s["win_rate_3d"]) if s["win_rate_3d"] is not None else "   N/A"
         print(f"  {s['action']:<16s} {s['total']:>5d} {ar1:>8s} {ar3:>8s} {wr1:>8s} {wr3:>8s}")
 
     # 步骤 5: 维度有效性
@@ -618,7 +625,7 @@ def cmd_signal_performance():
             bb_label = best_bin.get("range", "") if best_bin else ""
             print(
                 f"  {d['dimension']:<20s} {d['samples']:>6d}"
-                f" {_fmt(d['positive_pct'], '%'):>8s}"
+                f" {_fmt_ratio_pct(d['positive_pct']):>8s}"
                 f" {d['rank_corr_1d']:>9.3f}"
                 f"  {bb_label}"
             )

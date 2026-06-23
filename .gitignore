@@ -3,6 +3,9 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
+!.env.example
 .intraday_state.json
 logs/
 reports/
@@ -38,3 +41,5 @@ data/
 node_modules/
 package*.json
 xcrun_db
+1
+tests/screenshots/

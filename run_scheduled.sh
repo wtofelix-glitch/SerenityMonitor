@@ -36,6 +36,8 @@ run_task() {
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ $label 失败 (exit=$rc)" >> "$LOG_DIR/scheduler.log"
         return $rc
     fi
+    # WAL checkpoint: 将 WAL 数据合并回主 DB 文件
+    sqlite3 "$SCRIPT_DIR/serenity.db" "PRAGMA wal_checkpoint(TRUNCATE);" >> "$LOG_DIR/scheduler.log" 2>&1 || true
 }
 
 # ── 时段分发 ──────────────────────────────────────────
@@ -56,4 +58,6 @@ case "$HOUR" in
 esac
 
 echo "" >> "$LOG_DIR/scheduler.log"
+# DB 文件权限加固
+chmod 600 "$SCRIPT_DIR/serenity.db" 2>/dev/null || true
 exit 0

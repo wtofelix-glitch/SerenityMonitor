@@ -3,9 +3,9 @@
 import sys
 sys.path.insert(0, '/Users/mac/workspace/SerenityMonitor')
 
-import json
 import os
 import tempfile
+from datetime import date, timedelta
 
 from risk_manager import (
     RiskManager, get_risk_manager,
@@ -141,7 +141,7 @@ class TestBlacklist:
 
     def test_in_blacklist(self, monkeypatch):
         rm = _fresh_rm()
-        rm._blacklist["002281"] = "2026-06-20"  # future date
+        rm._blacklist["002281"] = (date.today() + timedelta(days=2)).isoformat()
         result = rm.check_blacklist("002281")
         assert result is not None
         assert result["triggered"] is True
@@ -229,7 +229,7 @@ class TestIsTradeAllowed:
 
     def test_buy_blocked_blacklist(self, monkeypatch):
         rm = _fresh_rm()
-        rm._blacklist["002281"] = "2026-06-20"
+        rm._blacklist["002281"] = (date.today() + timedelta(days=2)).isoformat()
         result = rm.is_trade_allowed(
             code="002281", action="BUY",
             current_total_value=60000,
@@ -240,7 +240,7 @@ class TestIsTradeAllowed:
 
     def test_buy_blocked_cooldown(self, monkeypatch):
         rm = _fresh_rm()
-        rm._cooldown_until = "2026-06-15"
+        rm._cooldown_until = (date.today() + timedelta(days=2)).isoformat()
         result = rm.is_trade_allowed(
             code="002281", action="BUY",
             current_total_value=60000,
@@ -283,7 +283,7 @@ class TestIsTradeAllowed:
         assert result["risk_level"] == "low"
 
         # With active blacklist, should be critical
-        rm._blacklist["999999"] = "2026-06-20"
+        rm._blacklist["999999"] = (date.today() + timedelta(days=2)).isoformat()
         result = rm.is_trade_allowed(
             code="999999", action="BUY",
             current_total_value=60000,

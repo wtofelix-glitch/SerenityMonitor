@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """每日信号 outcome 补填 - 收盘后计算1d/3d/5d/10d收益表现"""
+from check_trading_day import require_trading_day
+require_trading_day()
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db import get_unfilled_outcomes, get_price_history, update_signal_outcome

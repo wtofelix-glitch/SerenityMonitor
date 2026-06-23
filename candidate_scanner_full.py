@@ -21,15 +21,7 @@ from signal_engine import _factor_engine, _fund_engine
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# 主板代码前缀（无科创板688/创业板300/301）
-# ============================================================
-MAINBOARD_PREFIXES = ("000", "002", "600", "601", "603", "605")
-
-
-def _is_mainboard(code: str) -> bool:
-    """检查是否为可交易的主板标的"""
-    return any(code.startswith(p) for p in MAINBOARD_PREFIXES)
+from utils import is_mainboard as _is_mainboard
 
 
 # ============================================================
