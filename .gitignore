@@ -43,3 +43,8 @@ package*.json
 xcrun_db
 1
 tests/screenshots/
+
+# Test & debug artifacts
+.coverage
+.playwright-cli/
+output/
