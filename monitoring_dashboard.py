@@ -118,6 +118,7 @@ from rating_engine import get_rating
 from dividend_engine import DividendEngine
 from etf_momentum import ETFMomentumStrategy
 from portfolio import PortfolioManager
+from quant_fusion import build_quantdinger_consensus
 
 app = Flask(__name__)
 DASHBOARD_PORT = int(os.environ.get("SERENITY_DASHBOARD_PORT", "8401"))
@@ -174,8 +175,8 @@ def require_write_auth(func):
     return wrapper
 
 # 模块级缓存（避免每30秒重复跑引擎）
-_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None}
-_cache_time = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None}
+_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None}
+_cache_time = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None}
 # 分级 TTL：ETF数据每日收盘后更新 → 30分钟，评分 → 2分钟，行业轮动 → 5分钟
 # pf(组合) → 30秒：配合前端30秒刷新，确保交易后数据快速更新
 CACHE_TTL = {
@@ -184,6 +185,7 @@ CACHE_TTL = {
     "pf": timedelta(seconds=30),
     "scores": timedelta(minutes=2),
     "sectors": timedelta(minutes=5),
+    "qd": timedelta(minutes=2),
 }
 
 # =============================================================
@@ -261,25 +263,67 @@ def _lightweight_scores():
 
 
 def _load_db_scores():
-    """从数据库加载最新评分（实时行情不可用时的降级）"""
+    """从数据库加载最新评分（含 UZI details；不可用时降级到 signal_log）"""
     conn = get_conn()
-    rows = conn.execute("""
-        SELECT code, total_score, action
-        FROM signal_log
-        WHERE date = (SELECT MAX(date) FROM signal_log)
-        ORDER BY total_score DESC
-    """).fetchall()
+    try:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(scoring_history)").fetchall()}
+        uzi_expr = "uzi_score" if "uzi_score" in cols else "NULL AS uzi_score"
+        rows = conn.execute(f"""
+            SELECT code, date, total_score, details, {uzi_expr}
+            FROM scoring_history
+            WHERE date = (SELECT MAX(date) FROM scoring_history)
+            ORDER BY total_score DESC
+        """).fetchall()
+    except Exception:
+        rows = []
+    if not rows:
+        rows = conn.execute("""
+            SELECT code, total_score, action
+            FROM signal_log
+            WHERE date = (SELECT MAX(date) FROM signal_log)
+            ORDER BY total_score DESC
+        """).fetchall()
+        conn.close()
+        scores = []
+        for i, row in enumerate(rows, 1):
+            code, score, action = row
+            name = STOCK_MAP.get(code, {}).get("name", code)
+            scores.append({
+                "code": code,
+                "name": name,
+                "total_score": score,
+                "signal_action": action or "HOLD",
+                "signal_confidence": 0.5,
+                "rank": i,
+            })
+        return scores
     conn.close()
     scores = []
-    for row in rows:
-        code, score, action = row
+    for i, row in enumerate(rows, 1):
+        code = row["code"]
+        score = row["total_score"]
         name = STOCK_MAP.get(code, {}).get("name", code)
+        try:
+            details = json.loads(row["details"] or "{}")
+        except Exception:
+            details = {}
+        uzi = details.get("uzi_insight", {})
+        uzi_score = row["uzi_score"] if row["uzi_score"] is not None else uzi.get("uzi_score", 0)
         scores.append({
             "code": code,
             "name": name,
             "total_score": score,
-            "signal_action": action or "HOLD",
+            "signal_action": details.get("signal_action", "HOLD"),
             "signal_confidence": 0.5,
+            "zone_label": details.get("zone_label", ""),
+            "uzi_score": uzi_score or 0,
+            "uzi_rating": uzi.get("rating", "none"),
+            "uzi_verdict": uzi.get("verdict", "Skip"),
+            "uzi_evidence": uzi.get("evidence_grade", "none"),
+            "uzi_penalty_total": uzi.get("penalty_total", 0),
+            "uzi_chain_tier": uzi.get("ai_chain_tier", "未分层"),
+            "uzi_trap_count": len(uzi.get("trap_signals", [])),
+            "rank": i,
         })
     return scores
 
@@ -348,6 +392,32 @@ def gather_monitor_data():
     except Exception:
         pass
 
+    # 🆕 v3.0 UZI AI产业链卡位面板
+    try:
+        from uzi_insight import get_chain_summary_table
+        uzi_chain = get_chain_summary_table()
+    except Exception:
+        uzi_chain = []
+
+    # 🆕 v3.0 维度IC分析简报（缓存避免每次加载跑IC）
+    try:
+        import json, os
+        _ic_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 ".cache", "ic_recommend.json")
+        _ic_data = None
+        if os.path.exists(_ic_cache):
+            with open(_ic_cache) as f:
+                _ic_data = json.load(f)
+        if not _ic_data or _ic_data.get("date") != today:
+            from factor_ic import recommend_dimension_changes
+            _ic_data = recommend_dimension_changes(days=30, window=14)
+            _ic_data["date"] = today
+            os.makedirs(os.path.dirname(_ic_cache), exist_ok=True)
+            with open(_ic_cache, "w") as f:
+                json.dump(_ic_data, f, ensure_ascii=False, default=str)
+    except Exception:
+        _ic_data = {"summary": "IC分析暂不可用", "warnings": [], "promotions": []}
+
     return {
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": today,
@@ -366,6 +436,15 @@ def gather_monitor_data():
         "position_advice": _get_position_advice(scores),
         "stop_conditions": _get_stop_conditions(),
         "operational_mode": operational_mode,
+        "quantdinger_consensus": _get_quantdinger_consensus(),
+        # v3.0 新增
+        "uzi_chain": uzi_chain,
+        "ic_analysis": {
+            "summary": _ic_data.get("summary", ""),
+            "warnings": _ic_data.get("warnings", []),
+            "promotions": _ic_data.get("promotions", []),
+            "window": _ic_data.get("analysis_window", "30d"),
+        },
     }
 
 
@@ -524,6 +603,31 @@ def _get_target_tracker():
         return pm.get_target_tracker()
     except Exception:
         return {}
+
+def _get_quantdinger_consensus():
+    """QuantDinger 风格客观共识（只读，短缓存）。"""
+    now = datetime.now()
+    if _cache["qd"] and _cache_time["qd"] and (now - _cache_time["qd"]) < CACHE_TTL["qd"]:
+        return _cache["qd"]
+    try:
+        data = build_quantdinger_consensus(limit=6)
+        _cache["qd"] = data
+        _cache_time["qd"] = now
+        return data
+    except Exception as e:
+        log.warning("QuantDinger consensus fallback failed: %s", e)
+        return _cache["qd"] or {
+            "latest_date": None,
+            "coverage": "0/0",
+            "coverage_pct": 0,
+            "universe_score": 0,
+            "universe_decision": "NO_DATA",
+            "quality_multiplier": 0,
+            "agreement_ratio": 0,
+            "signals": [],
+            "top_opportunities": [],
+            "risk_flags": [],
+        }
 
 def _build_signal_brief(scores, pf_summary):
     """从评分+持仓中提取可执行信号简报"""
@@ -761,6 +865,7 @@ def _quick_db_fallback():
         "position_advice": [],
         "stop_conditions": [],
         "operational_mode": {},
+        "quantdinger_consensus": _get_quantdinger_consensus(),
     }
 
 
@@ -2154,6 +2259,16 @@ def api_health():
         health["checks"]["system"] = {"ok": True, "note": "psutil not installed"}
 
     return jsonify(health)
+
+
+@app.route("/api/quantdinger-consensus")
+def api_quantdinger_consensus():
+    """QuantDinger 风格多周期客观共识（只读）。"""
+    try:
+        return jsonify({"ok": True, "data": _get_quantdinger_consensus()})
+    except Exception as e:
+        log.error("API quantdinger-consensus failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 # ===== 数据源状态 API =====

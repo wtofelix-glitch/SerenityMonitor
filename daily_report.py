@@ -12,6 +12,7 @@ from db import save_snapshot, load_all_stocks, get_snapshots, save_price_history
 from price_alert import check_alerts
 from scorer import score_all
 from notifier import push_daily_report, push_signal_summary
+from quant_fusion import build_quantdinger_consensus
 
 
 def _format_position_profit(current_price: float, buy_price: float) -> tuple[str, str, Optional[float]]:
@@ -23,6 +24,60 @@ def _format_position_profit(current_price: float, buy_price: float) -> tuple[str
     if buy_price < 0:
         return "🔴", f"免费仓/净成本 {buy_price:.2f} | 现价 {current_price:.2f}", None
     return "⚪", "未记录成本 | 盈亏暂不可算", None
+
+
+def _qd_decision_label(decision: str) -> str:
+    return {
+        "BUY": "偏进攻",
+        "WATCH": "观察",
+        "REDUCE": "降风险",
+        "NO_DATA": "无数据",
+    }.get(decision, decision or "观察")
+
+
+def _format_qd_signal_line(label: str, items: list[dict], empty_text: str = "") -> str | None:
+    sliced = items[:3]
+    if not sliced:
+        return f"  {label}: {empty_text}" if empty_text else None
+    body = " | ".join(
+        f"{item.get('name') or item['code']} {item['consensus_score']:.1f}/信{item['confidence']}"
+        for item in sliced
+    )
+    return f"  {label}: {body}"
+
+
+def _format_quantdinger_consensus_lines() -> list[str]:
+    """格式化 QuantDinger 客观共识，日报只读展示，不改变仓位建议。"""
+    try:
+        consensus = build_quantdinger_consensus(limit=5)
+    except Exception:
+        return []
+
+    if not consensus.get("latest_date"):
+        return []
+
+    lines = [
+        "🧭 **QuantDinger 客观共识（只读闸门）**",
+        (
+            f"  全局 {consensus['universe_score']:.1f}"
+            f"（{_qd_decision_label(consensus['universe_decision'])}）"
+            f" | 质量 {consensus['quality_multiplier']:.2f}"
+            f" | 一致 {consensus['agreement_ratio']:.2f}"
+            f" | 覆盖 {consensus['coverage']}"
+        ),
+    ]
+
+    opportunity_line = _format_qd_signal_line("🔴机会", consensus.get("top_opportunities", []))
+    if opportunity_line:
+        lines.append(opportunity_line)
+    lines.append(_format_qd_signal_line(
+        "🟢风险",
+        consensus.get("risk_flags", []),
+        "暂无多周期强降风险标的",
+    ))
+
+    lines.append("")
+    return lines
 
 
 def generate_daily_report() -> str:
@@ -80,8 +135,12 @@ def generate_daily_report() -> str:
     for r in scores[:4]:
         rank_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}.get(r["rank"], f"{r['rank']}.")
         serenity_str = f" | Serenity匹配 {r.get('serenity_score', 0):.0f}分" if r.get("serenity_score") else ""
-        lines.append(f"{rank_emoji} {r['name']} {r['total_score']:.0f}分{serenity_str} | {r['zone_label']}")
+        trap_str = f" 陷阱{r.get('uzi_trap_count', 0)}" if r.get("uzi_trap_count", 0) else ""
+        uzi_str = f" | UZI {r.get('uzi_score', 0):.0f}/{r.get('uzi_rating', '-')}{trap_str}" if "uzi_score" in r else ""
+        lines.append(f"{rank_emoji} {r['name']} {r['total_score']:.0f}分{serenity_str}{uzi_str} | {r['zone_label']}")
     lines.append("")
+
+    lines.extend(_format_quantdinger_consensus_lines())
 
     # ====== 因子信号矩阵 ======
     try:

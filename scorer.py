@@ -13,8 +13,12 @@ from moat_factor import compute_moat_score  # v2.0 护城河因子
 from signal_engine import generate_signals, compute_technical_factors, compute_trend_score, confirm_buy_signal, get_signal_level, get_position_signal
 from sentiment_engine import compute_sentiment_score
 from serenity_logger import get_logger
+from uzi_insight import evaluate_uzi_insight
 
 log = get_logger(__name__)
+
+# v3.0: UZI 不再作为评分维度，仅用于看板信息展示
+_UZI_INFO_ONLY = True
 
 try:
     from metrics import observe_score_duration, SCORE_COUNT, SCORE_ERRORS, SIGNAL_ACTIONS
@@ -47,26 +51,26 @@ try:
     score_weight = load_adjusted_weights()
 except Exception:
     score_weight = {
-        "base": 0.14,       # 基本面适配度
-        "zone": 0.14,       # 价格位置
-        "momentum": 0.14,   # 动量
-        "volume": 0.04,     # 成交量
-        "serenity": 0.14,   # Serenity 框架匹配度
-        "factor": 0.14,     # 因子引擎评分
-        "technical": 0.09,  # 技术面评分
-        "sentiment": 0.08,  # 🆕 新闻情绪评分
-        "moat": 0.07,       # v2.0 护城河因子
-        "guru_wisdom": 0.04,  # 🆕 大师智慧因子
+        "zone": 0.20,        # 价格位置（v3.0: 动态60日通道）
+        "momentum": 0.18,     # 动量
+        "volume": 0.04,       # 成交量
+        "serenity": 0.18,     # Serenity 框架匹配度
+        "factor": 0.20,       # 因子引擎（三周期融合）
+        "technical": 0.10,    # 技术面 + 情绪
+        "moat": 0.10,         # 护城河因子
     }
 
-# 非侵入式 fallback：确保所有 10 个维度都有默认值
+# v3.0: 7 维核心（移除 base — IC=-0.13 持续14天为负，静态手动评分无预测力）
 _SCORE_WEIGHT_DEFAULTS = {
-    "base": 0.14, "zone": 0.14, "momentum": 0.13, "volume": 0.04,
-    "serenity": 0.13, "factor": 0.13, "technical": 0.08, "sentiment": 0.07,
-    "moat": 0.07, "guru_wisdom": 0.04,
+    "zone": 0.20, "momentum": 0.18, "volume": 0.04,
+    "serenity": 0.18, "factor": 0.20, "technical": 0.10, "moat": 0.10,
 }
 for k, v in _SCORE_WEIGHT_DEFAULTS.items():
     score_weight.setdefault(k, v)
+# 确保移除 base 键（旧缓存可能有）
+score_weight.pop("base", None)
+score_weight.pop("guru_wisdom", None)
+score_weight.pop("sentiment", None)
 
 # 归一化：确保权重和为 1.0（防止旧缓存权重缺少新维度）
 _sw_total = sum(score_weight.values())
@@ -88,10 +92,10 @@ if abs(_sw_total - 1.0) > 0.001:
 # 熊市   → 提护城河/基本面，降动量/情绪（防御优先）
 # ============================================================
 REGIME_WEIGHT_SHIFTS = {
-    "牛市":     {"momentum": +0.06, "sentiment": +0.04, "factor": +0.02, "moat": -0.04, "base": -0.04, "zone": -0.04},
-    "熊市":     {"moat": +0.08, "base": +0.04, "zone": -0.02, "momentum": -0.06, "sentiment": -0.04},
-    "震荡市":   {"technical": +0.04, "zone": +0.04, "momentum": -0.02, "sentiment": -0.02, "moat": -0.04},
-    "结构性牛市": {"momentum": +0.04, "sentiment": +0.03, "moat": -0.03, "base": -0.02, "zone": -0.02},
+    "牛市":     {"momentum": +0.06, "factor": +0.04, "moat": -0.06, "zone": -0.04},
+    "熊市":     {"moat": +0.10, "momentum": -0.08, "volume": -0.04, "zone": +0.02},
+    "震荡市":   {"technical": +0.04, "zone": +0.04, "momentum": -0.04, "moat": -0.04},
+    "结构性牛市": {"momentum": +0.04, "factor": +0.02, "moat": -0.04, "zone": -0.02},
 }
 
 
@@ -147,19 +151,26 @@ _IC_TO_SCORE_KEY = {
 _CACHED_INVERT_DIMS = None  # 缓存IC驱动的待翻转因子集合
 
 def _get_invert_score_keys() -> set:
-    """返回应永久翻转的因子评分键集合（基于mean_IC数据，非硬编码）
-    
-    策略: 任何因子的 mean_IC < -0.02 即永久翻转其评分方向。
-    这不等同于均值回归模式 — 均值回归模式额外调整信号门槛和止盈参数。
-    每次调用会刷新缓存（评分周期通常一天一次，IC变化不频繁）。
+    """返回应翻转的因子评分键集合（条件翻转，仅均值回归模式）
+
+    🔧 v3.0 重大变更: 因子翻转从"永久"改为"条件"。
+    仅在均值回归模式（MarketSense 检测到下跌通道，factor_invert=True）时翻转。
+    趋势市和中性市保留原始因子方向，避免强趋势中卖强买弱。
+
+    数据依据:
+    - STRONG_BUY(最高信心) 5日胜率仅21.4% — 在趋势市中翻转动量=买弱卖强
+    - SELL信号后80%概率上涨 — 翻转技术面=在局部底部卖出
+    - 但均值回归模式(下跌通道)下翻转仍有效 — MeanReversionStrategy 回测显著优于趋势策略
+
+    每次调用检查当前操作模式，不使用持久缓存。
     """
-    global _CACHED_INVERT_DIMS
-    if _CACHED_INVERT_DIMS is not None:
-        return _CACHED_INVERT_DIMS
-    
+    # 仅在均值回归模式时翻转因子
+    if not _OPERATIONAL_MODE or not _OPERATIONAL_MODE.get("factor_invert"):
+        return set()
+
+    # MR 模式：从 IC 缓存读取负 IC 因子
     neg_dims = set()
     try:
-        # 1. 优先从缓存的 adjusted_weights 中读取 mean_ic
         import json, os
         aw_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".adjusted_weights.json")
         if os.path.exists(aw_path):
@@ -170,8 +181,7 @@ def _get_invert_score_keys() -> set:
             from factor_ic import compute_rank_ic
             ic_data = compute_rank_ic(days=30, window=14)
             mean_ic = ic_data.get("mean_ic", {})
-        
-        # 2. 也纳入 scoring_history 直接计算的 IC（补充 sentiment 等无缓存维度）
+
         try:
             from factor_ic import compute_rank_ic as _ic_direct
             _direct = _ic_direct(days=21, window=14)
@@ -181,17 +191,16 @@ def _get_invert_score_keys() -> set:
                     mean_ic[k] = v
         except Exception:
             pass
-        
+
         for ic_key, score_key in _IC_TO_SCORE_KEY.items():
             if mean_ic.get(ic_key, 0) < -0.02:
                 neg_dims.add(score_key)
     except Exception:
-        # 回退：动量/量能/技术面在A股长期负IC(追涨杀跌反效)
+        # 回退：MR模式下默认翻转动量/量能/技术面
         neg_dims = {"momentum", "volume", "technical"}
-    
-    _CACHED_INVERT_DIMS = neg_dims
+
     if neg_dims:
-        log.info("🔧 因子永久翻转(IC<0): %s", sorted(neg_dims))
+        log.info("🔧 [MR模式] 因子翻转激活: %s", sorted(neg_dims))
     return neg_dims
 
 try:
@@ -214,14 +223,12 @@ def get_operational_mode() -> dict:
 
 
 def apply_factor_inversion(factor_scores: dict) -> dict:
-    """永久翻转负IC因子的得分方向（IC数据驱动，不限市场状态）
-    
-    只翻转 mean_IC < -0.02 的因子，而非硬编码。
-    动量高 → 已涨多 → 应减分 (翻转: 100-动量分)
-    量能高 → 放量跌 → 应减分 (翻转: 100-量能分)  
-    技术面高 → 死叉前高 → 应减分 (翻转: 100-技术分)
-    
-    注意: 此函数不检查操作模式。均值回归模式额外调整买入门槛和止盈参数。
+    """条件翻转负IC因子的得分方向（仅均值回归模式）
+
+    🔧 v3.0: 仅在 MarketSense 检测到均值回归模式(factor_invert=True)时翻转。
+    趋势市/中性市保留原始因子方向。
+
+    翻转逻辑: 100 - 原始分（动量高=已涨多→应减分, 量能高=放量跌→应减分）
     """
     invert_keys = _get_invert_score_keys()
     if not invert_keys:
@@ -270,29 +277,79 @@ def compute_mean_reversion_score(rsi: float, in_mr_mode: bool = False) -> tuple:
     return score, signal, label
 
 
-def compute_zone_score(price: float, detail: dict) -> tuple:
+def compute_zone_score(price: float, detail: dict, code: str = None) -> tuple:
+    """v3.0 动态价格位置评分 — 基于近期价格区间
+
+    旧版问题: 纯静态买入区配置（月前手写），zone_score IC=-0.19
+    新版逻辑: 引入60日价格通道作为动态参照
+      - 动态区: 价格在60日低点附近 → 折扣机会
+      - 静态区: 价格在买入区内 → 兼顾配置
+      - 过热区: 价格逼近60日高点 → 风险提示
+
+    返回: (score_0_100, label, class)
+    """
     zone_low = detail.get("buy_zone_low", 0)
     zone_high = detail.get("buy_zone_high", 0)
     target = detail.get("target_sell", 0)
 
+    # 获取60日价格通道（动态参照）
+    dynamic_low = 0
+    dynamic_high = 0
+    if code:
+        try:
+            from db import get_price_history
+            rows = get_price_history(code, 60)
+            if len(rows) >= 20:
+                closes = [r["close"] for r in rows]
+                dynamic_low = min(closes)
+                dynamic_high = max(closes)
+        except Exception:
+            pass
+
+    has_dynamic = dynamic_high > dynamic_low and dynamic_low > 0
+
+    # 已达目标价 → 强烈卖出信号
     if target > 0 and price >= target:
         return 20, "已达目标", "done"
-    elif zone_low > 0 and zone_high > 0 and zone_low <= price <= zone_high:
-        ratio = (price - zone_low) / (zone_high - zone_low) if zone_high > zone_low else 0.5
-        score = 100 - (ratio * 40)
-        return score, "买入区 ✓", ""
-    elif zone_low > 0 and price < zone_low:
+
+    # 动态区：仅在有真实历史数据时启用
+    if has_dynamic:
+        dynamic_range = dynamic_high - dynamic_low
+
+        # 动态深度折扣：价格接近60日低点 → 高分
+        if price <= dynamic_low * 1.05:
+            discount_pct = (dynamic_low - price) / dynamic_low * 100 if dynamic_low > 0 else 0
+            return min(95, 80 + max(0, discount_pct)), "接近60日低点", "dynamic_low"
+
+        # 动态折扣：价格在60日区间低位30%以内
+        price_position = (price - dynamic_low) / dynamic_range
+        if price_position < 0.30:
+            return 75, "动态折扣区间", "dynamic_discount"
+
+        # 动态高位：接近60日高点
+        if price_position > 0.85:
+            return 30, "接近60日高点", "dynamic_high"
+        elif price_position > 0.60:
+            return 45, "价格偏高", "above_high"
+
+    # 静态买入区（兼顾配置）
+    if zone_low > 0 and zone_high > 0 and zone_low <= price <= zone_high:
+        ratio = (price - zone_low) / (zone_high - zone_low)
+        return 85 - (ratio * 20), "买入区 ✓", ""
+
+    # 低于买入区 → 折扣
+    if zone_low > 0 and price < zone_low:
         discount = ((zone_low - price) / zone_low * 100)
         if discount <= 10:
-            return 90, f"低于买入区 {discount:.0f}%", "below"
+            return 88, f"低于买入区 {discount:.0f}%", "below"
         else:
-            return 95, f"深度折扣 {discount:.0f}%", "below"
-    else:
-        if target > 0:
-            progress = ((price - zone_high) / (target - zone_high) * 100) if target > zone_high else 50
-            score = max(30, 60 - progress * 0.3)
-            return score, "高于买入区", "above"
-        return 40, "高于买入区", "above"
+            return 92, f"深度折扣 {discount:.0f}%", "below"
+
+    # 高于买入区
+    if target > 0:
+        progress = ((price - zone_high) / (target - zone_high) * 100) if target > zone_high else 50
+        return max(30, 60 - progress * 0.3), "高于买入区", "above"
+    return 40, "高于买入区", "above"
 
 
 def compute_momentum_score(change_pct: float, price: float, detail: dict) -> float:
@@ -374,7 +431,7 @@ def score_all() -> list[dict]:
             _moat = compute_moat_score(code)["moat_score"]
         except Exception:
             _moat = 50
-        # 🔧 quick pass 也永久翻转负IC因子
+        # 🔧 v3.0 条件翻转（仅MR模式）
         _qmom = compute_momentum_score(change_pct, price, detail)
         _qvol = compute_volume_score(code, snap.get("volume", 0) or 0)
         _qinv = _get_invert_score_keys()
@@ -382,17 +439,15 @@ def score_all() -> list[dict]:
             _qmom = max(0, min(100, 100 - _qmom))
         if "volume" in _qinv:
             _qvol = max(0, min(100, 100 - _qvol))
+        # v3.0: 7维简化评分（移除 base, guru_wisdom, sentiment独立, mean_reversion, multi_cycle, UZI附加层）
         _qs_total = (
-            detail.get("score", 50) * score_weight["base"] +
-            compute_zone_score(price, detail)[0] * score_weight["zone"] +
-            _qmom * score_weight["momentum"] +
-            _qvol * score_weight["volume"] +
-            _ser * score_weight["serenity"] +
-            50 * score_weight["factor"] +         # factor=50 fallback for quick pass
-            50 * score_weight["technical"] +      # technical=50 fallback
-            50 * score_weight["sentiment"] +      # sentiment=50 fallback
-            _moat * score_weight["moat"] +
-            50 * score_weight.get("guru_wisdom", 0.04)  # guru=50 fallback
+            compute_zone_score(price, detail, code)[0] * score_weight.get("zone", 0.20) +
+            _qmom * score_weight.get("momentum", 0.18) +
+            _qvol * score_weight.get("volume", 0.04) +
+            _ser * score_weight.get("serenity", 0.18) +
+            50 * score_weight.get("factor", 0.20) +
+            50 * score_weight.get("technical", 0.10) +
+            _moat * score_weight.get("moat", 0.10)
         )
         _quick_scores[code] = round(_qs_total, 1)
     
@@ -409,7 +464,7 @@ def score_all() -> list[dict]:
 
         # 五大因子评分
         base_score = detail.get("score", 50)
-        zone_score, zone_label, zone_class = compute_zone_score(price, detail)
+        zone_score, zone_label, zone_class = compute_zone_score(price, detail, code)
         momentum_score = compute_momentum_score(change_pct, price, detail)
         volume_score = compute_volume_score(code, volume)
 
@@ -510,7 +565,8 @@ def score_all() -> list[dict]:
             except Exception:
                 sentiment_score = 50.0
 
-        # 🆕 大师智慧因子（段永平/巴菲特/芒格/但斌等13位大师对个股的情绪信号）
+        # 📊 大师智慧因子（v3.0: 仅信息展示，不计入评分）
+        # 大多数股票无大师提及（guru_score=50常数），作为评分因子无区分力
         try:
             from guru_wisdom import get_guru_factor, get_guru_sentiment
             guru_factor_value = get_guru_factor(code)
@@ -524,47 +580,44 @@ def score_all() -> list[dict]:
             guru_gurus_count = 0
             guru_net_score = 0
 
-        # 🔧 永久翻转负IC因子（不限市场状态，IC数据驱动）
-        invert_keys = _get_invert_score_keys()
-        _flipped = []
-        if "momentum" in invert_keys:
-            _orig = momentum_score
-            momentum_score = max(0, min(100, 100 - momentum_score))
-            _flipped.append(f"动量{_orig:.0f}→{momentum_score:.0f}")
-        if "volume" in invert_keys:
-            _orig = volume_score
-            volume_score = max(0, min(100, 100 - volume_score))
-            _flipped.append(f"量能{_orig:.0f}→{volume_score:.0f}")
-        if "technical" in invert_keys:
-            _orig = technical_score
-            technical_score = max(0, min(100, 100 - technical_score))
-            _flipped.append(f"技术{_orig:.0f}→{technical_score:.0f}")
-        # 翻转说明（输出到日志，仅首个标的）
-        if code == ALL_CODES[0] and _flipped:
-            log.info("🔧 因子翻转: %s", " ".join(_flipped))
+        try:
+            uzi_result = evaluate_uzi_insight(
+                code,
+                snapshot=snap,
+                detail=detail,
+                moat_result=moat_result,
+                serenity_score=serenity_score,
+                sentiment_score=sentiment_score,
+            )
+        except Exception as e:
+            log.warning(f"[scorer] {code}: UZI insight 计算异常: {e}")
+            uzi_result = {
+                "uzi_score": 50.0,
+                "rating": "unknown",
+                "verdict": "Watch",
+                "ai_chain_hit": False,
+                "ai_chain_keywords": [],
+                "ai_chain_tier": "未知",
+                "evidence_grade": "unknown",
+                "evidence_ledger": {"total": 0, "counts": {}, "titles": []},
+                "trap_signals": [],
+                "penalty_total": 0.0,
+                "reasons": ["UZI insight 计算异常"],
+            }
 
-        # 加权总分（11维度 → 含均值回归 + 护城河 + 大师智慧）
-        # 均值回归维度: MR模式下动态提权(15%), 正常模式低权(5%)
-        _mr_weight = 0.15 if (_OPERATIONAL_MODE and _OPERATIONAL_MODE.get("factor_invert")) else 0.05
-        # 调整其他权重使总权重保持≈1.0（从base/zone/factor中均摊）
-        _adj_scale = (1.0 - _mr_weight) / (1.0 - 0.05)  # 从正常100%压缩到(100-mr_weight)%
-        # 🆕 多周期融合维度权重（从低IC维度匀出5%）
-        _mc_weight = 0.05
-        _adj_scale2 = _adj_scale * (1.0 - _mc_weight)  # 二次压缩
+        # v3.0 7维简化加权总分（移除 base: IC=-0.13）
+        # sentiment 合并入 technical（80% 技术面 + 20% 情绪）
+        _merged_technical = technical_score * 0.80 + sentiment_score * 0.20
         total = (
-            base_score * score_weight["base"] * _adj_scale2 +
-            zone_score * score_weight["zone"] * _adj_scale2 +
-            momentum_score * score_weight["momentum"] * _adj_scale2 +
-            volume_score * score_weight["volume"] * _adj_scale2 +
-            serenity_score * score_weight["serenity"] * _adj_scale2 +
-            factor_score * score_weight["factor"] * _adj_scale2 +
-            technical_score * score_weight["technical"] * _adj_scale2 +
-            sentiment_score * score_weight["sentiment"] * _adj_scale2 +
-            moat_score * score_weight["moat"] * _adj_scale2 +
-            guru_score * score_weight.get("guru_wisdom", 0.04) * _adj_scale2 +
-            mr_score * _mr_weight +  # 🆕 均值回归维度
-            multi_cycle_score * _mc_weight  # 🆕 多周期共振维度
+            zone_score * score_weight.get("zone", 0.20) +
+            momentum_score * score_weight.get("momentum", 0.18) +
+            volume_score * score_weight.get("volume", 0.04) +
+            serenity_score * score_weight.get("serenity", 0.18) +
+            factor_score * score_weight.get("factor", 0.20) +
+            _merged_technical * score_weight.get("technical", 0.10) +
+            moat_score * score_weight.get("moat", 0.10)
         )
+        total = round(total, 1)
 
         # 🆕 信号集成 — 使用 scorer 统一 9 维度评分体系
         signal_info = signal_map.get(code, {})
@@ -616,6 +669,7 @@ def score_all() -> list[dict]:
             "sentiment_score": round(sentiment_score, 1),  # 🆕 情绪
             "moat_score": moat_score,                      # v2.0 护城河因子
             "guru_score": round(guru_score, 1),            # 🆕 大师智慧因子
+            "uzi_score": round(uzi_result["uzi_score"], 1), # UZI卡位/证据层
             "multi_cycle_factor": round(multi_cycle_score, 1),  # 🅱 三周期融合分
             "cycle_factors": cycle_factors_raw,  # 🅱 三周期原始值
             "details": {
@@ -634,6 +688,7 @@ def score_all() -> list[dict]:
                 "mr_signal": mr_signal_strength,  # 🆕 均值回归信号强度
                 "mr_label": mr_label,              # 🆕 均值回归标签
                 "factor_signals": factor_details.get("signals", {}),
+                "uzi_insight": uzi_result,
             }
         }
         save_score_history(code, scores)
@@ -663,6 +718,14 @@ def score_all() -> list[dict]:
             "guru_score": round(guru_score, 1),            # 🆕 大师智慧因子
             "guru_net_score": round(guru_net_score, 3),    # 🆕 大师净情绪
             "guru_gurus_count": guru_gurus_count,          # 🆕 提及大师数
+            "uzi_score": round(uzi_result["uzi_score"], 1),
+            "uzi_rating": uzi_result["rating"],
+            "uzi_verdict": uzi_result["verdict"],
+            "uzi_evidence": uzi_result["evidence_grade"],
+            "uzi_penalty_total": uzi_result["penalty_total"],
+            "uzi_trap_count": len(uzi_result.get("trap_signals", [])),
+            "uzi_chain_tier": uzi_result["ai_chain_tier"],
+            "uzi_reasons": uzi_result["reasons"],
             "multi_cycle_factor": round(multi_cycle_score, 1),  # 🅱 三周期融合分
             "cycle_factors": cycle_factors_raw,  # 🅱 三周期原始值
             "zone_label": zone_label,

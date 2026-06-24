@@ -338,6 +338,19 @@ class PortfolioManager:
         today = date.today().isoformat()
         detail = STOCK_DETAILS.get(code, {})
 
+        # 🛡️ v3.0 幂等检查：防止重复买入记录
+        conn_check = get_conn()
+        try:
+            dup = conn_check.execute(
+                "SELECT id FROM trades WHERE code=? AND action='buy' AND date=? AND quantity=? AND ABS(price-?)<0.01",
+                (code, today, shares, price)
+            ).fetchone()
+            if dup:
+                log.warning("⛔ 跳过重复买入: %s %d股@%.2f (已有记录#%d)", code, shares, price, dup[0])
+                return {"status": "skipped", "reason": f"重复买入(已有记录#{dup[0]})"}
+        finally:
+            conn_check.close()
+
         # 计算动态止损价
         from signal_engine import get_dynamic_stop_loss
         dynamic_stop = get_dynamic_stop_loss(code, price)
@@ -405,6 +418,19 @@ class PortfolioManager:
 
         today = date.today().isoformat()
         clear_active(code)
+
+        # 🛡️ v3.0 幂等检查：防止重复卖出记录
+        conn_check = get_conn()
+        try:
+            dup = conn_check.execute(
+                "SELECT id FROM trades WHERE code=? AND action='sell' AND date=? AND quantity=? AND ABS(price-?)<0.01",
+                (code, today, shares, price)
+            ).fetchone()
+            if dup:
+                log.warning("⛔ 跳过重复卖出: %s %d股@%.2f (已有记录#%d)", code, shares, price, dup[0])
+                return {"status": "skipped", "reason": f"重复卖出(已有记录#{dup[0]})"}
+        finally:
+            conn_check.close()
 
         # 记录风险事件：亏损卖出 → 连续亏损计数 + 黑名单
         try:

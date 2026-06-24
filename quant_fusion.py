@@ -10,8 +10,9 @@ import sqlite3
 from datetime import date
 from typing import Any
 
-from config import ALL_CODES
+from config import ALL_CODES, STOCK_MAP
 from db import get_conn
+from security_check import build_security_report
 
 
 TOP_GITHUB_PROJECTS: list[dict[str, Any]] = [
@@ -97,18 +98,58 @@ TOP_GITHUB_PROJECTS: list[dict[str, Any]] = [
     },
 ]
 
+QUANTDINGER_SOURCE = {
+    "repo": "brokermr810/QuantDinger",
+    "url": "https://github.com/brokermr810/QuantDinger",
+    "stars": 8682,
+    "updated_at": "2026-06-24",
+}
+
+QUANTDINGER_ESSENCE: list[dict[str, str]] = [
+    {
+        "pattern": "研究 -> 策略 -> 回测 -> 执行 -> 监控闭环",
+        "fusion": "Serenity 的 fusion 报告不只列健康项，还输出客观共识与下一步命令。",
+    },
+    {
+        "pattern": "objective_score 先于 LLM",
+        "fusion": "九维评分、UZI、技术面先归一到 -100~+100，LLM 只能解释，不能覆盖规则分。",
+    },
+    {
+        "pattern": "多周期客观共识",
+        "fusion": "用最新分、5日均分、20日均分加权投票，输出 agreement 与 quality_multiplier。",
+    },
+    {
+        "pattern": "结构化输出与趋势展望",
+        "fusion": "每只标的返回 decision、confidence、timeframes、trend_outlook，便于 CLI/API/看板复用。",
+    },
+    {
+        "pattern": "Agent Gateway 安全模型",
+        "fusion": "Serenity 先只暴露只读共识 API；写操作仍走现有 token/硬闸，不引入外部下单通道。",
+    },
+    {
+        "pattern": "回测执行对齐实盘",
+        "fusion": "把回测准备度纳入 fusion 体检，避免数据不足时过早优化策略。",
+    },
+]
+
 
 ASSESSMENT_LABELS = {
     "data_resilience": "数据源韧性",
     "feedback_loop": "信号反馈闭环",
     "execution_boundary": "执行安全边界",
     "backtest_readiness": "回测/研究就绪度",
+    "quantdinger_consensus": "QuantDinger客观共识",
 }
 
 
 def get_top_projects() -> list[dict[str, Any]]:
     """返回本次调研沉淀的 Top10 项目清单副本。"""
     return [dict(project) for project in TOP_GITHUB_PROJECTS]
+
+
+def get_quantdinger_essence() -> list[dict[str, str]]:
+    """返回 QuantDinger 可复用设计模式清单副本。"""
+    return [dict(item) for item in QUANTDINGER_ESSENCE]
 
 
 def _pct(part: int | float, total: int | float) -> float:
@@ -161,6 +202,345 @@ def _status_text(status: str) -> str:
 def _stock_filter_sql(column: str = "code") -> tuple[str, tuple[str, ...]]:
     placeholders = ", ".join("?" for _ in ALL_CODES)
     return f"{column} IN ({placeholders})", tuple(ALL_CODES)
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        columns = set()
+        for row in conn.execute(f"PRAGMA table_info({table})"):
+            try:
+                columns.add(row["name"])
+            except (TypeError, KeyError, IndexError):
+                columns.add(row[1])
+        return columns
+    except sqlite3.Error:
+        return set()
+
+
+def _row_get(row: sqlite3.Row | dict[str, Any], key: str, default: Any = None) -> Any:
+    try:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        if key in row.keys():
+            return row[key]
+    except Exception:
+        pass
+    return default
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _center_score(score_0_100: Any) -> float | None:
+    try:
+        value = float(score_0_100)
+    except (TypeError, ValueError):
+        return None
+    return _clamp((value - 50.0) * 2.0, -100.0, 100.0)
+
+
+def _decision_from_objective(score: float) -> str:
+    if score >= 20:
+        return "BUY"
+    if score <= -20:
+        return "REDUCE"
+    return "WATCH"
+
+
+def _decision_text(decision: str) -> str:
+    return {
+        "BUY": "偏进攻",
+        "WATCH": "观察",
+        "REDUCE": "降风险",
+    }.get(decision, decision)
+
+
+def _trend_strength(score: float) -> str:
+    value = abs(float(score))
+    if value >= 70:
+        return "strong"
+    if value >= 40:
+        return "moderate"
+    if value >= 20:
+        return "mild"
+    return "neutral"
+
+
+def _objective_from_scoring_row(
+    row: sqlite3.Row | dict[str, Any],
+    columns: set[str],
+) -> dict[str, Any]:
+    weights = [
+        ("total_score", 0.40, "总分"),
+        ("technical_score", 0.18, "技术"),
+        ("factor_score", 0.14, "Alpha"),
+        ("sentiment_score", 0.10, "情绪"),
+        ("serenity_score", 0.08, "Serenity匹配"),
+        ("moat_score", 0.06, "护城河"),
+        ("uzi_score", 0.04, "UZI"),
+    ]
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    breakdown = []
+    for column, weight, label in weights:
+        if column not in columns:
+            continue
+        centered = _center_score(_row_get(row, column))
+        if centered is None:
+            continue
+        weighted_sum += centered * weight
+        weight_sum += weight
+        breakdown.append({
+            "key": column,
+            "label": label,
+            "score": round(centered, 2),
+            "weight": weight,
+        })
+
+    overall = weighted_sum / weight_sum if weight_sum else 0.0
+    return {
+        "overall_score": round(overall, 2),
+        "decision": _decision_from_objective(overall),
+        "components": breakdown,
+        "component_coverage": round(weight_sum, 2),
+    }
+
+
+def _recent_total_scores(conn: sqlite3.Connection, code: str, limit: int) -> list[float]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT total_score
+            FROM scoring_history
+            WHERE code = ?
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (code, limit),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    scores = []
+    for row in rows:
+        centered = _center_score(row["total_score"])
+        if centered is not None:
+            scores.append(centered)
+    return scores
+
+
+def _price_return_score(conn: sqlite3.Connection, code: str, limit: int) -> float | None:
+    try:
+        rows = conn.execute(
+            """
+            SELECT close
+            FROM price_history
+            WHERE code = ? AND close IS NOT NULL
+            ORDER BY date DESC
+            LIMIT ?
+            """,
+            (code, max(2, limit)),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    if len(rows) < 2:
+        return None
+    latest = float(rows[0]["close"] or 0)
+    oldest = float(rows[-1]["close"] or 0)
+    if latest <= 0 or oldest <= 0:
+        return None
+    return _clamp(((latest - oldest) / oldest) * 400.0, -50.0, 50.0)
+
+
+def _timeframe_score(
+    conn: sqlite3.Connection,
+    code: str,
+    days: int,
+    current_score: float,
+    base_weight: float,
+) -> dict[str, Any]:
+    recent = _recent_total_scores(conn, code, days)
+    if not recent:
+        score = current_score
+        data_points = 0
+    else:
+        avg_score = sum(recent) / len(recent)
+        score = avg_score * 0.75 + current_score * 0.25
+        data_points = len(recent)
+
+    price_score = _price_return_score(conn, code, days)
+    if price_score is not None:
+        score = score * 0.85 + price_score * 0.15
+
+    return {
+        "days": days,
+        "score": round(score, 2),
+        "decision": _decision_from_objective(score),
+        "strength": _trend_strength(score),
+        "weight": base_weight,
+        "data_points": data_points,
+        "price_return_score": round(price_score, 2) if price_score is not None else None,
+    }
+
+
+def _build_code_consensus(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    columns: set[str],
+) -> dict[str, Any]:
+    code = row["code"]
+    name = STOCK_MAP.get(code, {}).get("name", code)
+    objective = _objective_from_scoring_row(row, columns)
+    current_score = float(objective["overall_score"])
+    timeframes = {
+        "latest": {
+            "days": 1,
+            "score": round(current_score, 2),
+            "decision": objective["decision"],
+            "strength": _trend_strength(current_score),
+            "weight": 1.30,
+            "data_points": 1,
+            "price_return_score": None,
+        },
+        "week": _timeframe_score(conn, code, 5, current_score, 1.15),
+        "month": _timeframe_score(conn, code, 20, current_score, 1.00),
+    }
+
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for item in timeframes.values():
+        score = float(item["score"])
+        weight = float(item["weight"]) * (1.0 + min(1.0, abs(score) / 100.0))
+        weighted_sum += score * weight
+        weight_sum += weight
+    consensus_score = weighted_sum / weight_sum if weight_sum else current_score
+    decision = _decision_from_objective(consensus_score)
+    agreement = sum(1 for item in timeframes.values() if item["decision"] == decision)
+    agreement_ratio = agreement / max(1, len(timeframes))
+
+    history_points = max(item["data_points"] for item in timeframes.values())
+    history_quality = _clamp(history_points / 20.0, 0.45, 1.0)
+    component_quality = _clamp(float(objective["component_coverage"]), 0.45, 1.0)
+    quality_multiplier = round(history_quality * component_quality, 3)
+    confidence = int(_clamp(
+        (50 + abs(consensus_score) * 0.35)
+        * (0.85 + 0.30 * agreement_ratio)
+        * quality_multiplier,
+        0,
+        98,
+    ))
+
+    return {
+        "code": code,
+        "name": name,
+        "date": row["date"],
+        "objective_score": objective,
+        "timeframes": timeframes,
+        "consensus_score": round(consensus_score, 2),
+        "consensus_decision": decision,
+        "agreement_ratio": round(agreement_ratio, 3),
+        "quality_multiplier": quality_multiplier,
+        "confidence": confidence,
+        "trend_outlook": {
+            "next_1d": timeframes["latest"],
+            "next_1w": timeframes["week"],
+            "next_1m": timeframes["month"],
+        },
+    }
+
+
+def _empty_quantdinger_consensus(
+    *,
+    latest_date: str | None = None,
+    covered: int = 0,
+    total: int | None = None,
+) -> dict[str, Any]:
+    total = len(ALL_CODES) if total is None else total
+    return {
+        "source": dict(QUANTDINGER_SOURCE),
+        "latest_date": latest_date,
+        "coverage": f"{covered}/{total}",
+        "coverage_pct": _pct(covered, total),
+        "universe_score": 0.0,
+        "universe_decision": "NO_DATA",
+        "quality_multiplier": 0.0,
+        "agreement_ratio": 0.0,
+        "signals": [],
+        "top_opportunities": [],
+        "risk_flags": [],
+    }
+
+
+def build_quantdinger_consensus(
+    conn: sqlite3.Connection | None = None,
+    *,
+    limit: int = 8,
+) -> dict[str, Any]:
+    """构建 QuantDinger 风格的多周期客观共识，只读 DB。"""
+    should_close = conn is None
+    if conn is None:
+        conn = get_conn()
+    try:
+        stock_filter, stock_params = _stock_filter_sql()
+        columns = _table_columns(conn, "scoring_history")
+        if "total_score" not in columns:
+            return _empty_quantdinger_consensus(total=0)
+
+        latest_date = _safe_scalar(
+            conn,
+            f"SELECT MAX(date) FROM scoring_history WHERE {stock_filter}",
+            stock_params,
+            default=None,
+        )
+        if not latest_date:
+            return _empty_quantdinger_consensus()
+
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM scoring_history
+            WHERE date = ? AND {stock_filter}
+            ORDER BY total_score DESC
+            """,
+            (latest_date, *stock_params),
+        ).fetchall()
+        signals = [_build_code_consensus(conn, row, columns) for row in rows]
+        signals.sort(key=lambda item: item["consensus_score"], reverse=True)
+
+        coverage_pct = _pct(len(signals), len(ALL_CODES))
+        if signals:
+            universe_score = sum(item["consensus_score"] for item in signals) / len(signals)
+            avg_quality = sum(item["quality_multiplier"] for item in signals) / len(signals)
+            avg_agreement = sum(item["agreement_ratio"] for item in signals) / len(signals)
+        else:
+            universe_score = avg_quality = avg_agreement = 0.0
+
+        top_opportunities = [
+            item for item in signals
+            if item["consensus_decision"] == "BUY"
+        ][:limit]
+        risk_flags = [
+            item for item in reversed(signals)
+            if item["consensus_decision"] == "REDUCE"
+        ][:limit]
+
+        return {
+            "source": dict(QUANTDINGER_SOURCE),
+            "latest_date": latest_date,
+            "coverage": f"{len(signals)}/{len(ALL_CODES)}",
+            "coverage_pct": coverage_pct,
+            "universe_score": round(universe_score, 2),
+            "universe_decision": _decision_from_objective(universe_score),
+            "quality_multiplier": round(avg_quality, 3),
+            "agreement_ratio": round(avg_agreement, 3),
+            "signals": signals[:limit],
+            "top_opportunities": top_opportunities,
+            "risk_flags": risk_flags,
+            "policy": "BUY>=+20, REDUCE<=-20；A股 REDUCE 表示降风险/回避，不表示做空。",
+        }
+    finally:
+        if should_close:
+            conn.close()
 
 
 def _score_data_resilience(coverage_pct: float, days_stale: int | None,
@@ -293,8 +673,6 @@ def assess_feedback_loop(conn: sqlite3.Connection) -> dict[str, Any]:
 
 def assess_execution_boundary(conn: sqlite3.Connection) -> dict[str, Any]:
     """评估执行侧是否保持安全边界。"""
-    from security_check import build_security_report
-
     security = build_security_report()
     execution_total = int(_safe_scalar(conn, "SELECT COUNT(*) FROM execution_log"))
     execution_failed = int(_safe_scalar(
@@ -397,6 +775,49 @@ def assess_backtest_readiness(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def assess_quantdinger_consensus(conn: sqlite3.Connection) -> dict[str, Any]:
+    """评估 QuantDinger 风格客观共识层是否可用。"""
+    consensus = build_quantdinger_consensus(conn)
+    coverage_score = min(35, round(consensus["coverage_pct"] * 0.35))
+    quality_score = min(40, round(float(consensus["quality_multiplier"]) * 40))
+    agreement_score = min(15, round(float(consensus["agreement_ratio"]) * 15))
+    signal_score = 10 if consensus["signals"] else 0
+    score = int(coverage_score + quality_score + agreement_score + signal_score)
+    status = _status(score)
+    if consensus["universe_decision"] == "NO_DATA":
+        status = "risk"
+
+    top = consensus["top_opportunities"][:1] or consensus["signals"][:1]
+    if top:
+        lead = top[0]
+        lead_text = (
+            f"{lead['code']} {_decision_text(lead['consensus_decision'])} "
+            f"{lead['consensus_score']:.1f}"
+        )
+    else:
+        lead_text = "无有效信号"
+
+    return {
+        "key": "quantdinger_consensus",
+        "label": ASSESSMENT_LABELS["quantdinger_consensus"],
+        "score": score,
+        "status": status,
+        "summary": (
+            f"全局共识 {consensus['universe_score']:.1f}"
+            f"({_decision_text(consensus['universe_decision'])})，领先信号 {lead_text}"
+        ),
+        "metrics": {
+            "source": f"{consensus['source']['repo']} ({consensus['source']['stars']:,} stars)",
+            "latest_scoring_date": consensus["latest_date"] or "无",
+            "coverage": f"{consensus['coverage']} ({consensus['coverage_pct']}%)",
+            "quality_multiplier": consensus["quality_multiplier"],
+            "agreement_ratio": consensus["agreement_ratio"],
+            "policy": consensus.get("policy", ""),
+        },
+        "consensus": consensus,
+    }
+
+
 def _build_recommendations(assessments: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
     recommendations: list[dict[str, str]] = []
 
@@ -448,11 +869,30 @@ def _build_recommendations(assessments: dict[str, dict[str, Any]]) -> list[dict[
             "command": "python3 cli.py factor-ic && python3 cli.py perf-attr",
         })
 
+    qd_status = assessments["quantdinger_consensus"]["status"]
+    qd_consensus = assessments["quantdinger_consensus"].get("consensus", {})
+    if qd_status == "risk":
+        recommendations.append({
+            "priority": "P1",
+            "area": "QuantDinger客观共识",
+            "inspired_by": "QuantDinger fast_analysis.py",
+            "action": "先补齐 scoring_history 与 price_history，再启用共识裁决作为每日选股闸门。",
+            "command": "python3 cli.py rescore && python3 cli.py workflow",
+        })
+    elif qd_consensus.get("risk_flags"):
+        recommendations.append({
+            "priority": "P1",
+            "area": "QuantDinger客观共识",
+            "inspired_by": "多周期共识 + 质量降权",
+            "action": "存在多周期降风险信号；先复核风险标的，再决定是否继续持有。",
+            "command": "python3 cli.py fusion && python3 cli.py portfolio",
+        })
+
     if not recommendations:
         recommendations.append({
             "priority": "OK",
             "area": "融合状态",
-            "inspired_by": "Top10 综合",
+            "inspired_by": "QuantDinger + Top10 综合",
             "action": "核心闭环健康；保持每日 workflow、health 与 fusion 三联检查。",
             "command": "python3 cli.py workflow && python3 cli.py health && python3 cli.py fusion",
         })
@@ -471,14 +911,18 @@ def build_fusion_report(conn: sqlite3.Connection | None = None) -> dict[str, Any
             "feedback_loop": assess_feedback_loop(conn),
             "execution_boundary": assess_execution_boundary(conn),
             "backtest_readiness": assess_backtest_readiness(conn),
+            "quantdinger_consensus": assess_quantdinger_consensus(conn),
         }
         total_score = round(
             sum(item["score"] for item in assessments.values()) / len(assessments)
         )
         return {
-            "title": "Serenity GitHub A股量化融合体检",
+            "title": "Serenity x QuantDinger 量化融合体检",
+            "quantdinger_source": dict(QUANTDINGER_SOURCE),
+            "quantdinger_essence": get_quantdinger_essence(),
             "top_projects": get_top_projects(),
             "assessments": assessments,
+            "quantdinger_consensus": assessments["quantdinger_consensus"]["consensus"],
             "fusion_score": total_score,
             "status": _status(total_score),
             "recommendations": _build_recommendations(assessments),
@@ -496,8 +940,49 @@ def format_fusion_report(report: dict[str, Any] | None = None) -> str:
         "=" * 72,
         f"融合总分: {report['fusion_score']}/100 ({_status_text(report['status'])})",
         "",
-        "GitHub Top10 精华源",
+        "QuantDinger 精华已融合",
     ]
+    qd_source = report["quantdinger_source"]
+    lines.append(
+        f"- 来源: {qd_source['repo']} ({qd_source['stars']:,} stars, updated {qd_source['updated_at']})"
+    )
+    for item in report["quantdinger_essence"]:
+        lines.append(f"- {item['pattern']}: {item['fusion']}")
+
+    qd = report["quantdinger_consensus"]
+    lines.extend([
+        "",
+        "QuantDinger 客观共识",
+        f"- 最新评分日: {qd['latest_date'] or '无'} | 覆盖: {qd['coverage']} ({qd['coverage_pct']}%)",
+        (
+            f"- 全局倾向: {qd['universe_score']:.1f} "
+            f"({_decision_text(qd['universe_decision'])}) | "
+            f"agreement {qd['agreement_ratio']:.2f} | quality {qd['quality_multiplier']:.2f}"
+        ),
+    ])
+    if qd["top_opportunities"]:
+        lines.append("- Top 机会:")
+        for item in qd["top_opportunities"][:5]:
+            lines.append(
+                f"  · {item['code']}: {item['consensus_score']:.1f} "
+                f"{_decision_text(item['consensus_decision'])}, "
+                f"confidence {item['confidence']}, agreement {item['agreement_ratio']:.2f}"
+            )
+    if qd["risk_flags"]:
+        lines.append("- 风险标的:")
+        for item in qd["risk_flags"][:5]:
+            lines.append(
+                f"  · {item['code']}: {item['consensus_score']:.1f} "
+                f"{_decision_text(item['consensus_decision'])}, "
+                f"confidence {item['confidence']}, quality {item['quality_multiplier']:.2f}"
+            )
+    if not qd["top_opportunities"] and not qd["risk_flags"]:
+        lines.append("- 当前无强方向标的，按 WATCH 处理。")
+
+    lines.extend([
+        "",
+        "GitHub Top10 精华源",
+    ])
     for idx, project in enumerate(report["top_projects"], 1):
         lines.append(
             f"{idx:>2}. {project['repo']} ({project['stars']:,} stars) - "

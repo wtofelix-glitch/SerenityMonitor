@@ -69,6 +69,22 @@ function actionLabel(a) {
   return map[a] || a || '观察';
 }
 
+function qdDecisionLabel(decision) {
+  const map = { BUY: '偏进攻', WATCH: '观察', REDUCE: '降风险', NO_DATA: '无数据' };
+  return map[decision] || decision || '观察';
+}
+
+function qdTone(decision) {
+  if (decision === 'BUY') return 'up';
+  if (decision === 'REDUCE') return 'down';
+  if (decision === 'NO_DATA') return 'muted';
+  return 'gold';
+}
+
+function qdName(item) {
+  return item.name || item.code || '—';
+}
+
 // ─── 防抖 ────────────────────────────────────────────────────
 function debounce(fn, delay) {
   let timer = null;
@@ -234,6 +250,7 @@ function renderOverview(d) {
   </div>`;
 
   // ── Merged Actions ──────────────────────────────────────
+  html += buildQuantDingerConsensus(d);
   html += buildMergedActions(d, session);
 
   // ── Position Quick View ─────────────────────────────────
@@ -252,7 +269,88 @@ function renderOverview(d) {
       <div class="card-body" style="display:flex;flex-wrap:wrap;gap:6px">${chips || '<span class="text-dim">暂无高优先级信号</span>'}</div></div>`;
   }
 
+  // 🆕 v3.0 UZI AI产业链卡位面板
+  if (d.uzi_chain && d.uzi_chain.length) {
+    const inChain = d.uzi_chain.filter(u => u.is_ai_chain);
+    html += `<div class="card" style="margin-top:10px"><div class="card-header"><span class="card-title">🔗 AI产业链卡位</span><span class="card-subtitle">${inChain.length}链上 · ${d.uzi_chain.length - inChain.length}链外</span></div>
+      <div class="card-body" style="display:flex;flex-wrap:wrap;gap:4px;font-size:11px">`;
+    d.uzi_chain.slice(0, 10).forEach(u => {
+      const cls = u.is_ai_chain ? `chip-up` : `chip-flat`;
+      const traps = u.trap_count > 0 ? ` ⚠️${u.trap_count}` : '';
+      html += `<span class="hero-pill ${cls}" style="font-size:10px" title="${u.summary_line}">${u.name} · ${u.evidence_grade}${traps}</span>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // 🆕 v3.0 IC 维度分析面板
+  if (d.ic_analysis && d.ic_analysis.summary) {
+    html += `<div class="card" style="margin-top:10px"><div class="card-header"><span class="card-title">🧬 维度IC分析</span><span class="card-subtitle">${d.ic_analysis.window}</span></div>
+      <div class="card-body" style="font-size:12px;color:var(--text-dim)">${d.ic_analysis.summary}</div></div>`;
+  }
+
   $('tab-overview').innerHTML = html;
+}
+
+// ── QuantDinger Consensus ────────────────────────────────────
+function buildQuantDingerConsensus(d) {
+  const qd = d.quantdinger_consensus || {};
+  if (!qd || !qd.latest_date) {
+    return `<div class="card qd-card"><div class="card-header"><span class="card-title">QuantDinger 共识</span><span class="card-subtitle">只读闸门</span></div>
+      <div class="card-body"><div class="qd-empty">暂无客观共识数据</div></div></div>`;
+  }
+
+  const tone = qdTone(qd.universe_decision);
+  const top = (qd.top_opportunities || []).slice(0, 3);
+  const risks = (qd.risk_flags || []).slice(0, 3);
+
+  const row = (item, kind) => {
+    const itemTone = qdTone(item.consensus_decision);
+    const label = qdDecisionLabel(item.consensus_decision);
+    const score = fmt(item.consensus_score, 1);
+    const meta = `Q ${fmt((item.quality_multiplier || 0) * 100, 0)} · A ${fmt((item.agreement_ratio || 0) * 100, 0)}`;
+    return `<div class="qd-row ${kind}">
+      <div class="qd-row-main">
+        <span class="qd-name">${qdName(item)}</span>
+        <span class="qd-code">${item.code || ''}</span>
+      </div>
+      <div class="qd-row-side">
+        <span class="qd-row-score ${itemTone}">${score}</span>
+        <span class="qd-row-meta">${label} · ${meta}</span>
+      </div>
+    </div>`;
+  };
+
+  const topRows = top.length
+    ? top.map(item => row(item, 'buy')).join('')
+    : '<div class="qd-row empty">暂无强机会</div>';
+  const riskRows = risks.length
+    ? risks.map(item => row(item, 'risk')).join('')
+    : '<div class="qd-row empty">暂无强风险</div>';
+
+  return `<div class="card qd-card">
+    <div class="card-header">
+      <span class="card-title">QuantDinger 共识</span>
+      <span class="card-subtitle">${qd.latest_date} · ${qd.coverage || '--'}</span>
+    </div>
+    <div class="card-body">
+      <div class="qd-summary">
+        <div class="qd-compass ${tone}">
+          <span>全局</span>
+          <strong>${fmt(qd.universe_score, 1)}</strong>
+          <em>${qdDecisionLabel(qd.universe_decision)}</em>
+        </div>
+        <div class="qd-metrics">
+          <div><span>Quality</span><b>${fmt((qd.quality_multiplier || 0) * 100, 0)}%</b></div>
+          <div><span>Agree</span><b>${fmt((qd.agreement_ratio || 0) * 100, 0)}%</b></div>
+          <div><span>Cover</span><b>${fmt(qd.coverage_pct || 0, 0)}%</b></div>
+        </div>
+      </div>
+      <div class="qd-lanes">
+        <div class="qd-lane"><div class="qd-lane-title up">机会</div>${topRows}</div>
+        <div class="qd-lane"><div class="qd-lane-title down">风险</div>${riskRows}</div>
+      </div>
+    </div>
+  </div>`;
 }
 
 // ── Merged Actions Builder ────────────────────────────────────
@@ -288,7 +386,8 @@ function buildMergedActions(d, session) {
   const heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(p => p.code) : []);
   const buyCandidates = scores.filter(s => !heldCodes.has(s.code) && ['STRONG_BUY', 'BUY', 'CAUTION_BUY'].includes(s.signal_action)).slice(0, 2);
   buyCandidates.forEach(s => {
-    items.push({ tone: 'up', title: `候选复核：${s.name}`, desc: `评分 ${fmt(s.total_score, 0)} · ${actionLabel(s.signal_action)}`, tag: s.code, tagType: 'buy' });
+    const uziText = s.uzi_score ? ` · UZI ${fmt(s.uzi_score, 0)}/${s.uzi_rating || '-'}` : '';
+    items.push({ tone: 'up', title: `候选复核：${s.name}`, desc: `评分 ${fmt(s.total_score, 0)} · ${actionLabel(s.signal_action)}${uziText}`, tag: s.code, tagType: 'buy' });
   });
 
   const top5 = items.slice(0, 5);
@@ -373,10 +472,15 @@ function renderHoldingsTab(d) {
     const chips = scores.slice(0, 12).map(s => {
       const sc = s.total_score || 0;
       const color = sc >= 65 ? 'var(--up)' : sc >= 50 ? 'var(--gold)' : 'var(--down)';
+      const uzi = s.uzi_score || 0;
+      const uziColor = uzi >= 65 ? 'var(--up)' : uzi >= 45 ? 'var(--gold)' : 'var(--text-tertiary)';
+      const trap = s.uzi_trap_count || 0;
       return `<div class="score-chip">
         <div class="sc-rank">#${s.rank || '-'}</div>
         <div class="sc-name">${s.name}</div>
         <div class="sc-value" style="color:${color}">${fmt(sc, 0)}</div>
+        <div class="sc-uzi" style="color:${uziColor}">UZI ${fmt(uzi, 0)} · ${s.uzi_rating || '-'}</div>
+        <div class="sc-tier">${s.uzi_chain_tier || '未分层'}${trap ? ` · 陷阱${trap}` : ''}</div>
       </div>`;
     }).join('');
     html += `<div class="card"><div class="card-header"><span class="card-title">评分排行</span><span class="card-subtitle">${scores.length} 只标的</span></div><div class="card-body"><div class="score-hscroll">${chips}</div></div></div>`;

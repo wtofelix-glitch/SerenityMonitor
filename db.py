@@ -1,6 +1,7 @@
 """
 数据库层 — SQLite 存储股票配置、每日快照、交易记录、预警历史
 """
+from __future__ import annotations
 import sqlite3
 import os
 from datetime import datetime, date
@@ -110,11 +111,33 @@ def init_db():
         )
     """)
     # 迁移：增加评分维度列
-    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score", "moat_score", "mr_score"]:
+    for col in ["factor_score", "serenity_score", "technical_score", "sentiment_score", "moat_score", "mr_score", "uzi_score", "multi_cycle_factor"]:
         try:
             conn.execute(f"ALTER TABLE scoring_history ADD COLUMN {col} REAL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+
+    # UZI 证据账本：公告/订单/量产/认证/研报/风险事件等可验证证据
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS uzi_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            strength TEXT NOT NULL DEFAULT 'medium', -- strong / medium / weak
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            title TEXT NOT NULL,
+            summary TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            impact REAL DEFAULT 0,
+            expires_on TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_uzi_evidence_code_active
+        ON uzi_evidence(code, active, event_date)
+    """)
 
     # 异常事件表（市场异动/黑天鹅预警）
     cur.execute("""
@@ -554,12 +577,17 @@ def _safe_json_dumps(obj):
 def save_score_history(code: str, scores: dict):
     """保存每日评分"""
     conn = get_conn()
+    for col in ["uzi_score", "multi_cycle_factor"]:
+        try:
+            conn.execute(f"ALTER TABLE scoring_history ADD COLUMN {col} REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
     conn.execute("""
         INSERT INTO scoring_history (code, date, total_score, base_score,
             zone_score, momentum_score, volume_score, details,
             serenity_score, factor_score, technical_score, sentiment_score,
-            moat_score, mr_score)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            moat_score, mr_score, uzi_score, multi_cycle_factor)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(code, date) DO UPDATE SET
             total_score=excluded.total_score, base_score=excluded.base_score,
             zone_score=excluded.zone_score, momentum_score=excluded.momentum_score,
@@ -568,7 +596,9 @@ def save_score_history(code: str, scores: dict):
             technical_score=excluded.technical_score,
             sentiment_score=excluded.sentiment_score,
             moat_score=excluded.moat_score,
-            mr_score=excluded.mr_score
+            mr_score=excluded.mr_score,
+            uzi_score=excluded.uzi_score,
+            multi_cycle_factor=excluded.multi_cycle_factor
     """, (
         code, scores["date"], scores["total_score"],
         scores.get("base_score", 0), scores.get("zone_score", 0),
@@ -578,7 +608,9 @@ def save_score_history(code: str, scores: dict):
         scores.get("technical_score", 0),
         scores.get("sentiment_score", 0),
         scores.get("moat_score", 50),
-        scores.get("mr_score", 50.0)
+        scores.get("mr_score", 50.0),
+        scores.get("uzi_score", 0),
+        scores.get("multi_cycle_factor", 0)
     ))
     conn.commit()
     conn.close()
@@ -609,6 +641,134 @@ def get_latest_scores(codes: list[str] = None) -> list[dict]:
         """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ---------- UZI 证据账本 ----------
+
+def _ensure_uzi_evidence_table(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS uzi_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            strength TEXT NOT NULL DEFAULT 'medium',
+            source_type TEXT NOT NULL DEFAULT 'manual',
+            title TEXT NOT NULL,
+            summary TEXT DEFAULT '',
+            url TEXT DEFAULT '',
+            impact REAL DEFAULT 0,
+            expires_on TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_uzi_evidence_code_active
+        ON uzi_evidence(code, active, event_date)
+    """)
+
+
+def add_uzi_evidence(
+    code: str,
+    title: str,
+    *,
+    strength: str = "medium",
+    source_type: str = "manual",
+    event_date: str | None = None,
+    summary: str = "",
+    url: str = "",
+    impact: float = 0,
+    expires_on: str = "",
+) -> int:
+    """新增一条 UZI 证据记录，返回记录 id。"""
+    strength = (strength or "medium").lower()
+    if strength not in {"strong", "medium", "weak"}:
+        raise ValueError("strength must be one of: strong, medium, weak")
+    if not code or not title:
+        raise ValueError("code and title are required")
+    conn = get_conn()
+    _ensure_uzi_evidence_table(conn)
+    cur = conn.execute("""
+        INSERT INTO uzi_evidence
+            (code, event_date, strength, source_type, title, summary, url, impact, expires_on)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        code,
+        event_date or date.today().isoformat(),
+        strength,
+        source_type or "manual",
+        title,
+        summary,
+        url,
+        float(impact or 0),
+        expires_on or "",
+    ))
+    conn.commit()
+    new_id = int(cur.lastrowid)
+    conn.close()
+    return new_id
+
+
+def list_uzi_evidence(code: str | None = None, *, active_only: bool = True, limit: int = 50) -> list[dict]:
+    """按时间倒序读取 UZI 证据账本。"""
+    conn = get_conn()
+    _ensure_uzi_evidence_table(conn)
+    clauses = []
+    params: list[Any] = []
+    if code:
+        clauses.append("code = ?")
+        params.append(code)
+    if active_only:
+        clauses.append("active = 1")
+        today = date.today().isoformat()
+        clauses.append("(expires_on = '' OR expires_on IS NULL OR expires_on >= ?)")
+        params.append(today)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(f"""
+        SELECT * FROM uzi_evidence
+        {where}
+        ORDER BY event_date DESC, created_at DESC, id DESC
+        LIMIT ?
+    """, (*params, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_uzi_evidence_summary(code: str) -> dict:
+    """汇总单只股票的有效 UZI 证据，用于评分层。"""
+    rows = list_uzi_evidence(code, active_only=True, limit=100)
+    counts = {"strong": 0, "medium": 0, "weak": 0}
+    titles = []
+    latest_date = ""
+    total_impact = 0.0
+    for row in rows:
+        strength = row.get("strength", "medium")
+        if strength in counts:
+            counts[strength] += 1
+        if row.get("title"):
+            titles.append(row["title"])
+        latest_date = max(latest_date, row.get("event_date") or "")
+        total_impact += float(row.get("impact") or 0)
+
+    if counts["strong"]:
+        grade = "strong"
+    elif counts["medium"]:
+        grade = "medium"
+    elif counts["weak"]:
+        grade = "weak"
+    else:
+        grade = "none"
+
+    return {
+        "code": code,
+        "grade": grade,
+        "counts": counts,
+        "total": sum(counts.values()),
+        "latest_date": latest_date,
+        "titles": titles[:6],
+        "total_impact": round(total_impact, 2),
+        "records": rows[:10],
+    }
 
 
 # ---------- 异常事件 ----------

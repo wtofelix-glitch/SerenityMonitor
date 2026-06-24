@@ -55,6 +55,12 @@ Serenity Monitor CLI
      python3 cli.py tier1-reentry         # 🔄 T1 回补检查
      python3 cli.py tier1-reentry --push  # 🔄 检查+微信推送
      python3 cli.py tier1-reentry --status # 🔄 查看当前状态
+     python3 cli.py uzi                   # UZI AI卡位评分榜
+     python3 cli.py uzi detail <code>     # UZI 单票细节
+     python3 cli.py uzi traps             # UZI 陷阱提示榜
+     python3 cli.py uzi calibrate         # UZI 权重回测校准
+     python3 cli.py uzi evidence list [code]
+     python3 cli.py uzi evidence add <code> <strong|medium|weak> <title>
 """
 import sys
 import importlib
@@ -621,9 +627,130 @@ def cmd_rescore():
         print(f"#{r['rank']} {r['name']:6s} | 总分 {r['total_score']:5.1f} | "
               f"{signal_icon} {r['signal_action']:<12} | "
               f"技{r['technical_score']:.0f} 因{r['factor_score']:.0f} 位{r['zone_score']:.0f} "
-              f"护{r.get('moat_score', 50):.0f} 匹{r['serenity_score']:.0f} | "
+              f"护{r.get('moat_score', 50):.0f} 匹{r['serenity_score']:.0f} "
+              f"UZI{r.get('uzi_score', 0):.0f}/{r.get('uzi_rating', '-')}"
+              f"{('/陷阱' + str(r.get('uzi_trap_count'))) if r.get('uzi_trap_count') else ''} | "
               f"{r['zone_label']}")
     print("=" * 70)
+
+
+def _print_uzi_rows(results: list[dict], *, traps_only: bool = False):
+    rows = sorted(results, key=lambda r: r.get("uzi_score", 0), reverse=True)
+    if traps_only:
+        rows = [r for r in rows if r.get("uzi_penalty_total", 0) > 0]
+    title = "🧬 UZI AI卡位评分榜" if not traps_only else "⚠️ UZI 陷阱提示榜"
+    print(title)
+    print("=" * 92)
+    print(f"{'#':>3} {'名称':<8} {'总分':>5} {'UZI':>5} {'评级':<7} {'层级':<10} {'证据':<7} {'罚分':>5}  结论")
+    print("─" * 92)
+    for i, r in enumerate(rows, 1):
+        print(
+            f"{i:>3} {r['name']:<8} "
+            f"{r.get('total_score', 0):>5.1f} "
+            f"{r.get('uzi_score', 0):>5.1f} "
+            f"{r.get('uzi_rating', '-'): <7} "
+            f"{r.get('uzi_chain_tier', '-'): <10} "
+            f"{r.get('uzi_evidence', '-'): <7} "
+            f"{r.get('uzi_penalty_total', 0):>5.0%}  "
+            f"{r.get('uzi_verdict', '-')}"
+        )
+        reasons = r.get("uzi_reasons") or []
+        if reasons:
+            print(f"      {'；'.join(reasons[:2])}")
+    print("=" * 92)
+
+
+def cmd_uzi(args: list[str] | None = None):
+    """UZI AI卡位评分、证据账本、权重校准入口。"""
+    args = args or []
+    sub = args[0] if args else "rank"
+
+    if sub in {"rank", "list"}:
+        _print_uzi_rows(score_all())
+        return
+
+    if sub == "traps":
+        _print_uzi_rows(score_all(), traps_only=True)
+        return
+
+    if sub == "detail":
+        if len(args) < 2:
+            print("用法: python cli.py uzi detail <code>")
+            return
+        code = args[1]
+        from uzi_insight import evaluate_uzi_insight
+        from moat_factor import compute_moat_score
+        from config import compute_serenity_score
+        try:
+            snap = next((s for s in get_all_today_snapshots() if s["code"] == code), {})
+        except Exception:
+            snap = {}
+        try:
+            moat = compute_moat_score(code)
+        except Exception:
+            moat = {"moat_score": 50}
+        result = evaluate_uzi_insight(
+            code,
+            snapshot=snap,
+            detail=STOCK_DETAILS.get(code, {}),
+            moat_result=moat,
+            serenity_score=compute_serenity_score(code),
+            sentiment_score=50,
+        )
+        name = STOCK_MAP.get(code, {}).get("name", code)
+        print(f"🧬 UZI 细节 | {name}({code})")
+        print("=" * 60)
+        print(f"评分: {result['uzi_score']:.1f} | 评级: {result['rating']} | 结论: {result['verdict']}")
+        print(f"AI链: {'是' if result['ai_chain_hit'] else '否'} | 层级: {result['ai_chain_tier']} | 证据: {result['evidence_grade']}")
+        print(f"关键词: {', '.join(result['ai_chain_keywords']) or '-'}")
+        print(f"账本: {result['evidence_ledger']['total']}条 | 最新: {result['evidence_ledger'].get('latest_date') or '-'}")
+        if result["trap_signals"]:
+            print("陷阱:")
+            for trap in result["trap_signals"]:
+                print(f"  - {trap['label']} ({trap['severity']}, -{trap['penalty']:.0%}): {trap['reason']}")
+        print("理由:")
+        for reason in result["reasons"]:
+            print(f"  - {reason}")
+        return
+
+    if sub == "calibrate":
+        from uzi_calibration import compute_uzi_weight_calibration, format_uzi_calibration
+        print(format_uzi_calibration(compute_uzi_weight_calibration()))
+        return
+
+    if sub == "evidence":
+        if len(args) < 2 or args[1] not in {"add", "list"}:
+            print("用法: python cli.py uzi evidence list [code] | add <code> <strong|medium|weak> <title>")
+            return
+        action = args[1]
+        if action == "list":
+            from db import list_uzi_evidence
+            code = args[2] if len(args) > 2 else None
+            rows = list_uzi_evidence(code, active_only=False, limit=30)
+            print("📚 UZI 证据账本")
+            print("=" * 80)
+            if not rows:
+                print("暂无证据")
+                return
+            for row in rows:
+                name = STOCK_MAP.get(row["code"], {}).get("name", row["code"])
+                status = "" if row.get("active", 1) else " [inactive]"
+                print(f"#{row['id']} {name}({row['code']}) {row['event_date']} {row['strength']}{status}")
+                print(f"  {row['title']}")
+                if row.get("summary"):
+                    print(f"  {row['summary']}")
+            return
+        if len(args) < 5:
+            print("用法: python cli.py uzi evidence add <code> <strong|medium|weak> <title>")
+            return
+        from db import add_uzi_evidence
+        code, strength = args[2], args[3]
+        title = " ".join(args[4:])
+        evidence_id = add_uzi_evidence(code, title, strength=strength, source_type="manual")
+        print(f"✅ 已添加 UZI 证据 #{evidence_id}: {code} [{strength}] {title}")
+        return
+
+    print("用法: python cli.py uzi [rank|detail <code>|traps|calibrate|evidence ...]")
 
 
 def cmd_portfolio():
@@ -1819,6 +1946,7 @@ def main():
         "trades": lambda: cmd_trades(sys.argv[2] if len(sys.argv) > 2 else ""),
         "ack": lambda: cmd_ack(int(sys.argv[2])),
         "rescore": lambda: cmd_rescore(),
+        "uzi": lambda: cmd_uzi(sys.argv[2:]),
         "monitor": lambda: cmd_monitor(),
         "msummary": lambda: cmd_monitor_summary(),
         "sector": lambda: cmd_sector(),

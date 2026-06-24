@@ -352,6 +352,83 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .kpi-sub { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; }
 
 /* ═══════════════════════════════════════════════════════
+   QUANTDINGER CONSENSUS
+   ═══════════════════════════════════════════════════════ */
+.qd-card { border-color: rgba(255,214,10,0.12); }
+.qd-summary {
+  display: grid; grid-template-columns: minmax(96px, 0.85fr) minmax(0, 2fr);
+  gap: var(--space-2); margin-bottom: var(--space-3);
+}
+.qd-compass {
+  min-height: 96px; border-radius: var(--radius-md);
+  border: 0.5px solid var(--border-color);
+  background: rgba(255,255,255,0.025);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: var(--space-3);
+}
+.qd-compass.up { border-color: rgba(255,59,48,0.2); background: rgba(255,59,48,0.06); }
+.qd-compass.down { border-color: rgba(52,199,89,0.2); background: rgba(52,199,89,0.06); }
+.qd-compass.gold { border-color: rgba(255,214,10,0.2); background: rgba(255,214,10,0.06); }
+.qd-compass.muted { color: var(--text-tertiary); }
+.qd-compass span {
+  font-size: 10px; color: var(--text-tertiary); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.6px;
+}
+.qd-compass strong {
+  font-family: var(--font-num); font-size: var(--text-large); font-weight: 800;
+  line-height: 1.05; margin-top: 4px;
+}
+.qd-compass em {
+  margin-top: 4px; font-style: normal; font-size: var(--text-caption2);
+  color: var(--text-secondary); font-weight: 600;
+}
+.qd-metrics {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2);
+}
+.qd-metrics div {
+  min-height: 96px; border-radius: var(--radius-md);
+  border: 0.5px solid var(--border-color); background: rgba(255,255,255,0.018);
+  padding: var(--space-3); display: flex; flex-direction: column;
+  justify-content: center; align-items: center; text-align: center;
+}
+.qd-metrics span {
+  font-size: 10px; color: var(--text-tertiary); font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.qd-metrics b {
+  margin-top: 5px; font-family: var(--font-num);
+  font-size: var(--text-title3); color: var(--text-primary);
+}
+.qd-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.qd-lane {
+  min-width: 0; border-radius: var(--radius-md);
+  background: rgba(255,255,255,0.015); border: 0.5px solid var(--border-light);
+  padding: var(--space-2);
+}
+.qd-lane-title {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.5px;
+  text-transform: uppercase; margin: 2px 2px 6px;
+}
+.qd-row {
+  min-height: 46px; display: flex; justify-content: space-between; align-items: center;
+  gap: var(--space-2); padding: 7px 6px; border-top: 0.5px solid var(--border-light);
+}
+.qd-row:first-of-type { border-top: none; }
+.qd-row.empty, .qd-empty {
+  color: var(--text-tertiary); font-size: var(--text-caption2);
+  justify-content: center; text-align: center;
+}
+.qd-row-main { min-width: 0; display: flex; flex-direction: column; }
+.qd-name {
+  font-size: var(--text-caption1); font-weight: 700; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qd-code { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); margin-top: 1px; }
+.qd-row-side { flex-shrink: 0; text-align: right; display: flex; flex-direction: column; align-items: flex-end; }
+.qd-row-score { font-family: var(--font-num); font-size: var(--text-footnote); font-weight: 800; }
+.qd-row-meta { margin-top: 1px; font-size: 9px; color: var(--text-tertiary); white-space: nowrap; }
+
+/* ═══════════════════════════════════════════════════════
    MERGED ACTIONS
    ═══════════════════════════════════════════════════════ */
 .action-merged .action-item {
@@ -415,13 +492,18 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   scroll-snap-type: x mandatory; padding: 2px 0; scrollbar-width: none;
 }
 .score-chip {
-  flex-shrink: 0; min-width: 80px; scroll-snap-align: start;
+  flex-shrink: 0; width: 108px; min-height: 96px; scroll-snap-align: start;
   background: var(--bg-card); border: 0.5px solid var(--border-color);
   border-radius: var(--radius-md); padding: var(--space-3); text-align: center;
 }
 .sc-rank { font-size: 10px; color: var(--text-tertiary); }
 .sc-name { font-size: var(--text-subhead); font-weight: 600; margin: 2px 0; }
 .sc-value { font-family: var(--font-num); font-size: var(--text-title3); font-weight: 700; }
+.sc-uzi { margin-top: 4px; font-family: var(--font-num); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.sc-tier {
+  margin-top: 2px; color: var(--text-tertiary); font-size: 9px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ═══════════════════════════════════════════════════════
    RISK GAUGES
@@ -739,6 +821,9 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   .kpi-value { font-size: var(--text-body); }
 
   .card { padding: var(--space-3); border-radius: var(--radius-lg); }
+  .qd-summary { grid-template-columns: 1fr; }
+  .qd-compass, .qd-metrics div { min-height: 78px; }
+  .qd-lanes { grid-template-columns: 1fr; }
 
   .position-quick-card { width: 132px; }
   .score-chip { min-width: 72px; }
@@ -768,6 +853,9 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   .hero-pnl-today { font-size: var(--text-title2); }
   .hero-pills { gap: 4px; }
   .hero-pill { padding: 3px 8px; font-size: 10px; }
+  .qd-metrics { gap: 4px; }
+  .qd-metrics div { padding: var(--space-2); }
+  .qd-row { gap: 4px; padding-left: 4px; padding-right: 4px; }
   .position-quick-card { width: 116px; padding: var(--space-3); }
   .risk-gauges { grid-template-columns: repeat(2, 1fr); gap: 4px; }
   .risk-gauge { padding: var(--space-3); }

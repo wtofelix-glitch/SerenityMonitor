@@ -158,3 +158,24 @@ class TestPriceHistory:
             db_conn.save_price_history('600001', {'code': '600001', 'date': f'2026-06-{i:02d}', 'open': 10.0, 'close': 10.0, 'high': 10.0, 'low': 10.0, 'volume': 1000000 + i * 100000, 'change_pct': 0})
         avg = db_conn.get_avg_volume('600001', days=10)
         assert avg is not None and avg > 0
+
+
+class TestUziEvidence:
+    def test_add_list_and_summary(self, db_conn):
+        eid = db_conn.add_uzi_evidence(
+            '600001',
+            '800G光模块通过客户认证',
+            strength='strong',
+            source_type='announcement',
+            summary='进入小批量交付',
+            impact=2,
+        )
+
+        rows = db_conn.list_uzi_evidence('600001')
+        assert rows[0]['id'] == eid
+        assert rows[0]['strength'] == 'strong'
+
+        summary = db_conn.get_uzi_evidence_summary('600001')
+        assert summary['grade'] == 'strong'
+        assert summary['counts']['strong'] == 1
+        assert summary['total_impact'] == 2

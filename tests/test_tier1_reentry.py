@@ -140,16 +140,19 @@ class TestCheckTier1Reentry:
 
         realtime = self._make_realtime("002281", 200.0)
         monkeypatch.setattr('tier1_reentry.fetch_realtime', lambda c: realtime)
-        # 模拟第一次检查（prev_class 为空 → was_outside=True）
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (80, "买入区 ✓", "buy_zone"))
         results = check_tier1_reentry()
         assert len(results) == 1
         assert results[0]["code"] == "002281"
-        assert results[0]["zone_class"] == "buy_zone" or results[0]["zone_class"] == ""
+        assert results[0]["zone_class"] in ("buy_zone", "", "dynamic_low", "dynamic_discount")
 
     def test_stock_above_zone_no_alert(self, monkeypatch, tmp_path):
         """标的高于买入区 → 不触发"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (40, "高于买入区", "above"))
 
         realtime = self._make_realtime("002281", 250.0)
         monkeypatch.setattr('tier1_reentry.fetch_realtime', lambda c: realtime)
@@ -170,6 +173,8 @@ class TestCheckTier1Reentry:
         """同一天不重复推送"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (80, "买入区 ✓", "buy_zone"))
 
         # 第一次：触发推送
         realtime = self._make_realtime("002281", 200.0)
@@ -185,6 +190,8 @@ class TestCheckTier1Reentry:
         """价格低于买入区 → 触发折扣提醒"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (95, "低于买入区 10%", "below"))
 
         realtime = self._make_realtime("002281", 150.0)
         monkeypatch.setattr('tier1_reentry.fetch_realtime', lambda c: realtime)
@@ -195,6 +202,8 @@ class TestCheckTier1Reentry:
         """从 above 回落到 buy_zone → 触发"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (80, "买入区 ✓", "buy_zone"))
 
         # 先设状态为 above
         _save_state({"002281": {"zone_class": "above"}})
@@ -221,6 +230,8 @@ class TestCheckTier1Reentry:
         """--push 时触发推送"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (80, "买入区 ✓", "buy_zone"))
 
         pushed = []
         monkeypatch.setattr('tier1_reentry.push_alert',
@@ -237,6 +248,8 @@ class TestCheckTier1Reentry:
         """两只 Tier 1 标的都被检查"""
         state_file = tmp_path / "state.json"
         monkeypatch.setattr('tier1_reentry.STATE_PATH', str(state_file))
+        monkeypatch.setattr('tier1_reentry.compute_zone_score',
+                            lambda p, d, c=None: (80, "买入区 ✓", "buy_zone"))
 
         def mock_fetch(codes):
             return [

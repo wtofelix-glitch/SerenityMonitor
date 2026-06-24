@@ -644,6 +644,80 @@ def cmd_signal_performance():
     print()
 
 
+# ============================================================
+# 🆕 v3.0 信号质量自动监控
+# ============================================================
+
+def check_signal_quality(min_samples: int = 5) -> list[dict]:
+    """检查各信号类型的 5 日表现，返回需关注的异常
+
+    触发条件：
+    - WR-5d < 35% 且样本数 >= min_samples → 告警
+    - avg_return_5d < -2% 且样本数 >= min_samples → 告警
+
+    Returns:
+        [{action, total, wr_5d, avg_ret_5d, alert_level, message}]
+    """
+    from db import get_conn
+    conn = get_conn()
+
+    alerts = []
+    try:
+        rows = conn.execute('''
+            SELECT action, COUNT(*) as cnt,
+                   ROUND(AVG(CASE WHEN outcome_5d > 0 THEN 1 ELSE 0 END), 3) as wr5d,
+                   ROUND(AVG(COALESCE(outcome_5d, 0)), 2) as avg5d
+            FROM signal_log
+            WHERE outcome_5d IS NOT NULL
+            GROUP BY action
+            HAVING cnt >= ?
+        ''', (min_samples,)).fetchall()
+
+        for r in rows:
+            action = r[0]
+            cnt = r[1]
+            wr5d = r[2]
+            avg5d = r[3]
+
+            alert = None
+            if wr5d is not None and wr5d < 0.35:
+                alert = {
+                    "action": action,
+                    "total": cnt,
+                    "wr_5d": round(wr5d * 100, 1),
+                    "avg_ret_5d": avg5d,
+                    "alert_level": "⚠️ HIGH",
+                    "message": f"{action}: WR-5d={wr5d*100:.1f}% < 35% (N={cnt}) — 信号质量不足，建议检查阈值",
+                }
+            elif avg5d is not None and avg5d < -2.0:
+                alert = {
+                    "action": action,
+                    "total": cnt,
+                    "wr_5d": round(wr5d * 100, 1) if wr5d else None,
+                    "avg_ret_5d": avg5d,
+                    "alert_level": "⚡ MEDIUM",
+                    "message": f"{action}: avg-5d={avg5d:+.1f}% < -2% (N={cnt}) — 负期望值，建议暂停此类信号",
+                }
+
+            if alert:
+                alerts.append(alert)
+    finally:
+        conn.close()
+
+    return alerts
+
+
+def format_quality_alerts(alerts: list[dict]) -> str:
+    """格式化信号质量告警为可读字符串"""
+    if not alerts:
+        return "✅ 所有信号类型质量正常"
+
+    lines = ["⚠️ 信号质量告警:"]
+    for a in alerts:
+        lines.append(f"  {a['alert_level']} {a['message']}")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cmd_signal_performance()

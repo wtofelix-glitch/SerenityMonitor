@@ -5,6 +5,45 @@
 
 ---
 
+## 2026-06-24 增量调研与已落地融合
+
+> 本次刷新使用 GitHub 插件 + agent-reach GitHub 后端，确认主仓为
+> [brokermr810/QuantDinger](https://github.com/brokermr810/QuantDinger)，
+> 2026-06-24 仍活跃更新，主仓约 8.6k stars；另有
+> [QuantDinger-Vue](https://github.com/brokermr810/QuantDinger-Vue) 和
+> [QuantDinger-Mobile](https://github.com/brokermr810/QuantDinger-Mobile)。
+
+新增阅读/核对范围：
+
+| 文件/文档 | 复用判断 |
+|---|---|
+| `README.md` | QuantDinger 当前定位是 self-hosted AI quant infrastructure，闭环是 research -> strategy -> backtest -> paper/live execution -> monitoring。 |
+| `backend_api_python/app/services/fast_analysis.py` | 最大价值仍是 rule-based `objective_score`、多周期 consensus、quality multiplier、LLM 输出校正，而不是让 LLM 直接拍板。 |
+| `docs/agent/AI_INTEGRATION_DESIGN.md` | Agent Gateway 分 R/W/B/N/C/T scope、token hash、rate limit、audit、idempotency；Serenity 先只吸收只读 API 与审计边界思想。 |
+| `docs/agent/AGENT_QUICKSTART.md` | Backtest 走 async job + `Idempotency-Key`，策略脚本必须显式生成信号列；Serenity 后续接回测时应沿用幂等与 next-bar/open 对齐原则。 |
+| `docs/agent/agent-openapi.json` | Agent 面向稳定 envelope + scoped Bearer token；Serenity 已新增只读 `/api/quantdinger-consensus`，不新增写操作。 |
+
+已落地到 Serenity：
+
+1. `quant_fusion.py` 新增 `QUANTDINGER_ESSENCE` 与 `build_quantdinger_consensus()`。
+2. 共识层将 Serenity `scoring_history` 的总分/技术/Alpha/情绪/匹配/护城河/UZI 归一到 `-100~+100`，生成 objective score。
+3. 用最新、5日、20日三个视角做加权共识，输出 `consensus_score`、`consensus_decision`、`agreement_ratio`、`quality_multiplier`、`confidence`、`trend_outlook`。
+4. `cli.py fusion` 原入口无需改命令即可展示 QuantDinger 精华、全局倾向、Top 机会和风险标的。
+5. `monitoring_dashboard.py` 新增只读 API：`GET /api/quantdinger-consensus`。
+6. 新增/更新 `tests/test_quant_fusion.py`，覆盖精华清单、共识计算、只读性与报告输出。
+
+验证结果：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_quant_fusion.py tests/test_dashboard_security.py -q
+# 9 passed
+
+.venv/bin/python cli.py fusion
+# 输出 Serenity x QuantDinger 量化融合体检，真实库覆盖 14/14
+```
+
+---
+
 ## 一、调研范围
 
 完整阅读了 QuantDinger (v3.0.31) 以下核心文件：

@@ -64,12 +64,11 @@ def _fetch_conviction_thresholds() -> dict:
     weights = cv.get("debated_weights", {})
     m = weights.get("moat", 0.10)
     momentum = weights.get("momentum", 0.12)
-    sentiment = weights.get("sentiment", 0.08)
     technical = weights.get("technical", 0.10)
-    
+
     # 买入门槛调整：弱势→收紧（+5），强势→放宽（-5），震荡→微调
     # 再根据防守 vs 进攻因子比例二次修正
-    defense_ratio = (m + weights.get("base", 0.12)) / max(momentum + sentiment, 0.01)
+    defense_ratio = (m + weights.get("base", 0.12)) / max(momentum, 0.01)
     
     if regime == "弱势":
         base_buy = 5  # +5: 更严
@@ -576,6 +575,26 @@ def compute_sell_triggers(code: str, tech: dict, total_score: float) -> list[dic
             "detail": f"量价背离(缩量{vol_ratio:.1f}x)",
         })
 
+    # 🛡️ v3.0 超卖保护：RSI<30 或布林下轨时所有触发器降权50%
+    rsi = tech.get("rsi", 50)
+    bb_pos = tech.get("bb_position", 50)
+    if rsi is not None and rsi < 30:
+        for t in triggers:
+            t["weight"] = max(0, t["weight"] - 1)
+        triggers.append({
+            "trigger": "oversold_protection",
+            "weight": 0,
+            "detail": f"RSI={rsi:.0f}超卖保护(所有权重-1)",
+        })
+    elif bb_pos is not None and bb_pos < 20:
+        for t in triggers:
+            t["weight"] = max(0, t["weight"] - 1)
+        triggers.append({
+            "trigger": "bb_low_protection",
+            "weight": 0,
+            "detail": f"布林下轨{bb_pos:.0f}%保护(所有权重-1)",
+        })
+
     return triggers
 
 
@@ -803,6 +822,54 @@ def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
 
 
 # ============================================================
+# 🆕 SELL 信号缓冲确认 — 防止超卖反弹前误卖
+# 数据依据: 46条SELL信号后1日上涨概率80.4%，说明大部分SELL在局部底部
+# ============================================================
+
+def confirm_sell_signal(code: str, total_score: float, tech: dict,
+                        price: float = 0, detail: dict = None) -> dict:
+    """SELL 信号需要额外确认，防止超卖反弹前误卖
+
+    三道缓冲：
+    1. RSI 不在深度超卖区（RSI >= 35）
+    2. 价格不在买入区间内（buy zone 内不卖）
+    3. 非布林下轨极端位置（bb_position >= 15）
+
+    Returns:
+        {confirmed: bool, reasons: list, blocked_by: list}
+    """
+    blocked_by = []
+    reasons = []
+
+    # 缓冲1: RSI 深度超卖保护 — 超卖时不下卖单
+    rsi = tech.get("rsi", 50)
+    if rsi is not None and rsi < 35:
+        blocked_by.append(f"RSI={rsi:.0f} 深度超卖，反弹概率高，暂不卖出")
+    elif rsi is not None and rsi < 40:
+        reasons.append(f"RSI={rsi:.0f} 偏弱但未到超卖区")
+
+    # 缓冲2: 买入区保护 — 在买入区内的标的不卖
+    if detail and price > 0:
+        buy_low = detail.get("buy_zone_low", 0)
+        buy_high = detail.get("buy_zone_high", 0)
+        if buy_low > 0 and buy_high > 0 and buy_low <= price <= buy_high:
+            blocked_by.append(f"价格{price:.2f}在买入区[{buy_low:.0f}-{buy_high:.0f}]内，不卖出")
+
+    # 缓冲3: 布林下轨保护 — 极度超卖不卖
+    bb_pos = tech.get("bb_position", 50)
+    if bb_pos is not None and bb_pos < 15:
+        blocked_by.append(f"布林下轨({bb_pos:.0f}%)，超跌不卖")
+
+    confirmed = len(blocked_by) == 0
+
+    return {
+        "confirmed": confirmed,
+        "reasons": reasons,
+        "blocked_by": blocked_by,
+    }
+
+
+# ============================================================
 # 主信号生成
 # ============================================================
 
@@ -986,12 +1053,36 @@ def _generate_single_signal(code: str, realtime_data: dict,
                 action = "TAKE_PROFIT"
                 # total_score 不变（止盈不降分）
 
+    # 8.5 🆕 SELL 信号缓冲确认 — 防止超卖反弹前误卖
+    # 目标价强制卖出和止损不经过此缓冲
+    if action == "SELL" and not (is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0):
+        sell_confirm = confirm_sell_signal(code, total_score, tech, price, detail)
+        if not sell_confirm["confirmed"]:
+            # 降级：持有→WEAK_HOLD，非持有→WATCH
+            action = "WEAK_HOLD" if is_holding else "WATCH"
+            log.info("  🛡️ SELL缓冲拦截 %s: %s → %s",
+                     name, "SELL", action)
+
     # 9. 买入确认（仅对非持仓标的）
     buy_confirm = None
     suggested_amount = 0
     suggested_shares = 0
     if not is_holding and action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
         buy_confirm = confirm_buy_signal(code, tech, alpha_signals)
+
+        # 🆕 v3.0 STRONG_BUY 加强确认 — 需4/5条件通过 + MA20上方 + 量能不缩
+        if action == "STRONG_BUY":
+            strong_fails = []
+            if buy_confirm["confirm_count"] < 4:
+                strong_fails.append(f"确认条件不足({buy_confirm['confirm_count']}/5)")
+            if not tech.get("price_above_ma20", False):
+                strong_fails.append("价格在MA20下方")
+            if tech.get("volume_dry", False):
+                strong_fails.append("成交量萎缩")
+            if strong_fails:
+                action = "BUY"  # 降级到BUY
+                log.info("  🟡 STRONG_BUY→BUY %s: %s", name, "; ".join(strong_fails))
+
         if not buy_confirm["confirmed"]:
             # 降级
             if action == "STRONG_BUY":

@@ -99,10 +99,9 @@ def check_tier1_reentry(push: bool = False) -> list[dict]:
             dist_pct = round((price - zone_high) / price * 100, 1)
 
         # 判定是否触发提醒：
-        # 条件：当前在买入区或低于买入区（折扣区）
-        #    且之前不在买入区（即从"above"或"done"回落）
-        #    且距上次推送超过 REPEAT_HOURS
-        in_buy_opportunity = zone_class in ("", "below", "buy_zone")
+        # v3.0 动态 zone: dynamic_low/dynamic_discount/below 都是买入机会
+        buy_opportunity_zones = ("", "buy_zone", "below", "dynamic_low", "dynamic_discount")
+        in_buy_opportunity = zone_class in buy_opportunity_zones
         was_outside = prev_class in ("above", "done", "")
         not_pushed_recently = (not last_pushed or
                                (today > last_pushed) or
@@ -211,6 +210,10 @@ def _zone_label_cn(cls: str) -> str:
         "above": "高于买入区 📈",
         "done": "已达目标 🎯",
         "buy_zone": "买入区 ✅",
+        "dynamic_low": "60日低点 🔻",
+        "dynamic_discount": "动态折扣 🟢",
+        "dynamic_high": "60日高点 🔺",
+        "above_high": "价格偏高 ⚠️",
     }.get(cls, cls)
 
 

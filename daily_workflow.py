@@ -110,6 +110,16 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 信号绩效统计失败: {e}")
 
+    # ── 3c. 信号质量检查 ────────────────────────────
+    step('3c/8 信号质量检查')
+    try:
+        from signal_performance import check_signal_quality, format_quality_alerts
+        quality_alerts = check_signal_quality(min_samples=5)
+        quality_msg = format_quality_alerts(quality_alerts)
+        print(f"  {quality_msg}")
+    except Exception as e:
+        print(f"  ⚠️ 信号质量检查失败: {e}")
+
     # ── 4. 反思生成 ──────────────────────────────────
     step('4/8 评分反思')
     try:
@@ -131,6 +141,20 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 反思收益补填失败: {e}")
 
+    # ── 4b. UZI 证据自动采集 ──────────────────────────
+    step('4b/8 UZI证据采集')
+    try:
+        from uzi_evidence_collector import collect_evidence_for_all
+        ev_result = collect_evidence_for_all()
+        if ev_result.get("added", 0) > 0:
+            print(f"  ✅ 新增 {ev_result['added']} 条证据, {ev_result['updated']} 条去重")
+        else:
+            print(f"  ℹ️ 无新增证据 (已检查 {ev_result.get('checked', 0)} 只标的)")
+    except ImportError:
+        print(f"  ⚠️ uzi_evidence_collector 暂不可用")
+    except Exception as e:
+        print(f"  ⚠️ UZI证据采集失败: {e}")
+
     # ── 5b. 评分权重自动调优 ─────────────────────────
     step('5b/8 权重自动调优')
     try:
@@ -138,6 +162,15 @@ def main():
         apply_reflection_adjustments(days=20)
     except Exception as e:
         print(f"  ⚠️ 权重调优失败: {e}")
+
+    # ── 5c. 维度IC自动分析 ──────────────────────────
+    step('5c/8 维度IC自动分析')
+    try:
+        from factor_ic import recommend_dimension_changes, format_recommendation_report
+        rec = recommend_dimension_changes(days=30, window=14)
+        print(f"  {rec['summary']}")
+    except Exception as e:
+        print(f"  ⚠️ IC分析失败: {e}")
 
     # ── 6. 自动调仓 ──────────────────────────────────
     step('6/8 自动调仓建议')

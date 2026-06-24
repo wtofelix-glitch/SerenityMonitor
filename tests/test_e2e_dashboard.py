@@ -155,6 +155,7 @@ class TestAPIEndpoints:
         "/api/signal-performance",
         "/api/factor-ic",
         "/api/journal",
+        "/api/quantdinger-consensus",
     ]
 
     @pytest.mark.parametrize("endpoint", API_ENDPOINTS)

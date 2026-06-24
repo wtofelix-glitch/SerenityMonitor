@@ -14,22 +14,22 @@ conviction_engine.py — 权重辩论引擎 + 多周期共识
 from datetime import date, timedelta
 from typing import Any
 
-# 三态权重字典：强势 / 震荡 / 弱势
+# 三态权重字典：强势 / 震荡 / 弱势（v3.0: 8维精简）
 REGIME_WEIGHTS = {
     "强势": {
-        "base": 0.12, "zone": 0.10, "momentum": 0.20,
-        "volume": 0.10, "serenity": 0.10, "factor": 0.10,
-        "technical": 0.08, "sentiment": 0.12, "moat": 0.08,
+        "zone": 0.14, "momentum": 0.22, "volume": 0.06,
+        "serenity": 0.14, "factor": 0.16,
+        "technical": 0.12, "moat": 0.16,
     },
     "震荡": {
-        "base": 0.15, "zone": 0.15, "momentum": 0.12,
-        "volume": 0.08, "serenity": 0.12, "factor": 0.15,
-        "technical": 0.10, "sentiment": 0.07, "moat": 0.06,
+        "zone": 0.18, "momentum": 0.14, "volume": 0.04,
+        "serenity": 0.18, "factor": 0.16,
+        "technical": 0.10, "moat": 0.20,
     },
     "弱势": {
-        "base": 0.15, "zone": 0.15, "momentum": 0.08,
-        "volume": 0.05, "serenity": 0.12, "factor": 0.12,
-        "technical": 0.10, "sentiment": 0.07, "moat": 0.16,
+        "zone": 0.16, "momentum": 0.08, "volume": 0.02,
+        "serenity": 0.16, "factor": 0.12,
+        "technical": 0.08, "moat": 0.38,
     },
 }
 
@@ -78,7 +78,7 @@ def _per_stock_adjustment(stock_score: dict, regime: str) -> dict:
     elif "强势" in zone or zone == "买入区 ✓":
         delta = {"momentum": +0.03, "volume": +0.02, "moat": -0.03, "base": -0.02}
     elif "持有" in zone or "持有区" in zone:
-        delta = {"sentiment": +0.02, "technical": +0.02, "momentum": -0.02, "volume": -0.02}
+        delta = {"technical": +0.03, "momentum": -0.02, "volume": -0.02}
     
     return delta
 
@@ -104,7 +104,7 @@ def debate_weights(all_scores: list[dict]) -> tuple[dict, str]:
             base["moat"] = max(base.get("moat", 0.10) - 0.02, 0.05)
         if low_count >= 4:
             base["moat"] = min(base.get("moat", 0.10) + 0.03, 0.20)
-            base["sentiment"] = max(base.get("sentiment", 0.08) - 0.02, 0.04)
+            base["technical"] = max(base.get("technical", 0.08) - 0.02, 0.04)
     
     # 归一化
     total = sum(base.values())
@@ -289,10 +289,9 @@ def generate_position_advice(regime: str, debated: dict, scores: list[dict],
     """
     m = debated.get("moat", 0.10)
     momentum = debated.get("momentum", 0.10)
-    sentiment = debated.get("sentiment", 0.08)
-    
+
     # 仓位比例建议：基于防守 vs 进攻因子比值
-    defense_ratio = (m + debated.get("base", 0.12)) / max(momentum + sentiment, 0.01)
+    defense_ratio = (m + debated.get("base", 0.12)) / max(momentum, 0.01)
     
     if regime == "弱势":
         if defense_ratio > 1.5:

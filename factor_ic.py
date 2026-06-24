@@ -25,6 +25,7 @@ IC_DIMENSIONS = [
     "factor_score",
     "technical_score",
     "moat_score",       # v2.0 护城河因子
+    "uzi_score",        # UZI AI卡位/证据层
 ]
 
 DIMENSION_LABELS = {
@@ -37,6 +38,7 @@ DIMENSION_LABELS = {
     "factor_score": "因子引擎",
     "technical_score": "技术面",
     "moat_score": "护城河",        # v2.0 护城河因子
+    "uzi_score": "UZI卡位",
 }
 
 # ── 相关性计算 ────────────────────────────────────────────
@@ -335,3 +337,155 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ============================================================
+# 🆕 v3.0 维度自动建议 — 基于 IC 趋势的淘汰/降权推荐
+# ============================================================
+
+# 维度 → 权重映射（与 scorer.py score_weight 对齐）
+_WEIGHT_MAP = {
+    "base_score": "base",
+    "zone_score": "zone",
+    "momentum_score": "momentum",
+    "volume_score": "volume",
+    "serenity_score": "serenity",
+    "factor_score": "factor",
+    "technical_score": "technical",
+    "moat_score": "moat",
+    "uzi_score": "uzi",
+    "sentiment_score": "sentiment",
+    "guru_wisdom_score": "guru_wisdom",
+}
+
+
+def recommend_dimension_changes(days: int = 30, window: int = 14,
+                                nag_threshold: float = -0.03,
+                                promote_threshold: float = 0.05,
+                                nag_days: int = 10) -> dict:
+    """基于 IC 数据推荐维度调整
+
+    淘汰信号：
+    - mean_IC < nag_threshold 且有效天数 >= nag_days → 建议降权或移除
+    - IC 连续 N 天为负且 N >= nag_days → 警告
+
+    提权信号：
+    - mean_IC > promote_threshold 且 IC_IR > 0.5 → 建议提权
+
+    Returns:
+        {
+            "warnings": [{dim, mean_ic, nag_days, action, reason}, ...],
+            "promotions": [{dim, mean_ic, ic_ir, action}, ...],
+            "summary": str,
+        }
+    """
+    result = compute_rank_ic(days=days, window=window)
+    mean_ic = result.get("mean_ic", {})
+    n_days = result.get("n_days", {})
+    ic_ir = result.get("ic_ir", {})
+
+    warnings = []
+    promotions = []
+
+    for dim in mean_ic:
+        mic = mean_ic[dim]
+        nd = n_days.get(dim, 0)
+        ir = ic_ir.get(dim, 0)
+
+        weight_key = _WEIGHT_MAP.get(dim, dim)
+
+        # 淘汰检查
+        if mic < nag_threshold and nd >= nag_days:
+            warnings.append({
+                "dim": dim,
+                "weight_key": weight_key,
+                "mean_ic": round(mic, 4),
+                "n_days": nd,
+                "ic_ir": round(ir, 3),
+                "action": "DEGRADE" if mic > -0.06 else "ELIMINATE",
+                "reason": (
+                    f"mean_IC={mic:.3f} < {nag_threshold:.2f} 持续{nd}天 → "
+                    + ("建议降权" if mic > -0.06 else "建议淘汰")
+                ),
+            })
+        elif mic < 0 and nd >= nag_days:
+            warnings.append({
+                "dim": dim,
+                "weight_key": weight_key,
+                "mean_ic": round(mic, 4),
+                "n_days": nd,
+                "ic_ir": round(ir, 3),
+                "action": "MONITOR",
+                "reason": f"mean_IC={mic:.3f} 持续为负{nd}天 → 关注，暂不调整",
+            })
+
+        # 提权检查
+        if mic > promote_threshold and ir > 0.5:
+            promotions.append({
+                "dim": dim,
+                "weight_key": weight_key,
+                "mean_ic": round(mic, 4),
+                "ic_ir": round(ir, 3),
+                "action": "PROMOTE",
+                "reason": f"mean_IC={mic:+.3f} IR={ir:.2f} → 建议提权",
+            })
+
+    # 按严重性排序
+    warnings.sort(key=lambda w: w["mean_ic"])
+    promotions.sort(key=lambda p: -p["mean_ic"])
+
+    # 生成摘要
+    summary_parts = []
+    elim = [w for w in warnings if w["action"] == "ELIMINATE"]
+    deg = [w for w in warnings if w["action"] == "DEGRADE"]
+    mon = [w for w in warnings if w["action"] == "MONITOR"]
+
+    if elim:
+        summary_parts.append(f"❌ 建议淘汰: {', '.join(w['weight_key'] for w in elim)}")
+    if deg:
+        summary_parts.append(f"🔻 建议降权: {', '.join(w['weight_key'] for w in deg)}")
+    if mon:
+        summary_parts.append(f"👀 需关注: {', '.join(w['weight_key'] for w in mon)}")
+    if promotions:
+        summary_parts.append(f"🔺 建议提权: {', '.join(p['weight_key'] for p in promotions)}")
+    if not summary_parts:
+        summary_parts.append("✅ 所有维度 IC 正常，无需调整")
+
+    return {
+        "warnings": warnings,
+        "promotions": promotions,
+        "summary": " | ".join(summary_parts),
+        "analyzed_dims": len(mean_ic),
+        "analysis_window": f"{days}d",
+    }
+
+
+def format_recommendation_report(rec: dict) -> str:
+    """格式化维度建议为可读报告"""
+    lines = ["=" * 60]
+    lines.append(f"  🧬 维度 IC 自动分析 ({rec['analysis_window']})")
+    lines.append("=" * 60)
+    lines.append(f"\n📊 分析维度: {rec['analyzed_dims']} 个")
+    lines.append(f"\n{rec['summary']}\n")
+
+    if rec["warnings"]:
+        lines.append("─" * 60)
+        lines.append("  ⚠️ 负 IC 维度详情")
+        lines.append("─" * 60)
+        for w in rec["warnings"]:
+            icon = {"ELIMINATE": "❌", "DEGRADE": "🔻", "MONITOR": "👀"}.get(w["action"], "⚡")
+            lines.append(f"  {icon} {w['weight_key']:15s} IC={w['mean_ic']:+7.4f}  "
+                        f"N={w['n_days']:3d}  IR={w['ic_ir']:+6.3f}")
+            lines.append(f"     {w['reason']}")
+
+    if rec["promotions"]:
+        lines.append("\n─" * 60)
+        lines.append("  🔺 正 IC 维度详情")
+        lines.append("─" * 60)
+        for p in rec["promotions"]:
+            lines.append(f"  🔺 {p['weight_key']:15s} IC={p['mean_ic']:+7.4f}  "
+                        f"IR={p['ic_ir']:+.3f}")
+            lines.append(f"     {p['reason']}")
+
+    lines.append("\n" + "=" * 60)
+    return "\n".join(lines)
