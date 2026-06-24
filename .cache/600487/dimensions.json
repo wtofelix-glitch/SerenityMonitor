@@ -1,0 +1,19 @@
+{
+  "dimensions": {
+    "moat_score": 66.5,
+    "roic_stability": 80.0,
+    "gross_margin_trend": 50.0,
+    "debt_safety": 80,
+    "market_position": 70.0,
+    "capex_efficiency": 50.0,
+    "moat_type": "低财务风险型 (Safety Moat) — 财务稳健 + 回报稳定",
+    "moat_trend": "stable"
+  },
+  "weights": {
+    "roic_stability": 0.25,
+    "gross_margin_trend": 0.2,
+    "debt_safety": 0.2,
+    "market_position": 0.15,
+    "capex_efficiency": 0.2
+  }
+}

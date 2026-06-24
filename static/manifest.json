@@ -1,0 +1,11 @@
+{
+  "name": "Serenity Monitor",
+  "short_name": "Serenity",
+  "start_url": "/monitor",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "description": "A股量化交易助手",
+  "icons": [{"src":"/static/icon-192.png","sizes":"192x192","type":"image/png"}],
+  "orientation": "portrait"
+}

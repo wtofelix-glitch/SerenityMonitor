@@ -2,145 +2,42 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>Serenity Monitor</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+  <title>Serenity</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}">
   <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <script defer src="https://unpkg.com/lucide@latest" onload="window.lucide&&window.lucide.createIcons&&window.lucide.createIcons()"></script>
 </head>
 <body>
-
-  <!-- ═══ TOP HEADER ═══════════════════════════════════════ -->
   <header class="top-header">
     <div class="header-inner">
-      <div class="header-brand">
-        <div class="header-logo">S</div>
-        <span class="header-title">Serenity Monitor</span>
-      </div>
+      <div class="header-brand"><div class="header-logo">S</div><span class="header-title">Serenity</span></div>
       <div class="header-meta">
         <span class="header-time" id="header-time">--</span>
-        <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()" title="手动刷新">⟳</button>
-        <span class="header-status">
-          <span class="status-dot"></span>
-          <span style="font-size:10px;color:var(--text-tertiary)">LIVE</span>
-        </span>
+        <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">⟳</button>
+        <span class="status-dot"></span>
       </div>
     </div>
   </header>
-
-  <!-- ═══ TAB BAR ══════════════════════════════════════════ -->
   <nav class="tab-bar">
-    <button class="tab-btn active" data-tab="overview">
-      <i data-lucide="radio" class="tab-icon"></i> 总览
-    </button>
-    <button class="tab-btn" data-tab="holdings">
-      <i data-lucide="briefcase" class="tab-icon"></i> 持仓
-    </button>
-    <button class="tab-btn" data-tab="factors">
-      <i data-lucide="boxes" class="tab-icon"></i> 因子
-    </button>
-    <button class="tab-btn" data-tab="risk">
-      <i data-lucide="shield" class="tab-icon"></i> 风控
-    </button>
-    <button class="tab-btn" data-tab="analysis">
-      <i data-lucide="bar-chart-3" class="tab-icon"></i> 分析
-    </button>
+    <button class="tab-btn active" data-tab="overview"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>总览</span></button>
+    <button class="tab-btn" data-tab="holdings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="5" width="22" height="14" rx="3"/><line x1="4" y1="12" x2="20" y2="12"/></svg><span>持仓</span></button>
+    <button class="tab-btn" data-tab="sentinel"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="12" x2="16" y2="14"/></svg><span>哨兵</span></button>
+    <button class="tab-btn" data-tab="risk"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>风控</span></button>
   </nav>
-
-  <div class="market-tape market-tape-loading" id="market-tape">
-    <span class="tape-kicker">MARKET TAPE</span>
-    <div class="tape-track">
-      <span><b>上证</b><em>--</em></span>
-      <span><b>沪深300</b><em>--</em></span>
-      <span><b>信号</b><em>同步中</em></span>
-      <span><b>仓位</b><em>--</em></span>
-    </div>
-    <span class="tape-time">等待数据</span>
-  </div>
-
-  <!-- ═══ KPI BAR ═════════════════════════════════════════ -->
-  <div class="tab-content active" id="tab-overview">
-    <section class="command-hero command-hero-loading">
-      <div class="hero-primary">
-        <div class="hero-eyebrow">
-          <span class="deck-code">SM-ALPHA</span>
-          <span>Serenity Command Deck</span>
-        </div>
-        <h1 class="hero-title">正在同步市场与持仓数据</h1>
-        <div class="hero-subline">加载评分、信号、仓位与风险状态...</div>
-        <div class="hero-command-row">
-          <span class="command-pill command-pill-gold">同步行情</span>
-          <span class="command-pill">主板池</span>
-          <span class="command-pill">风险检查</span>
-        </div>
-        <div class="hero-confidence">
-          <div class="confidence-head">
-            <span>执行置信度</span>
-            <strong>--</strong>
-          </div>
-          <div class="confidence-rail">
-            <span class="confidence-fill" style="width:12%"></span>
-          </div>
-        </div>
-      </div>
-      <div class="hero-metric"><span class="hero-label">行情</span><strong>--</strong><small>等待</small></div>
-      <div class="hero-metric"><span class="hero-label">信号</span><strong>--</strong><small>等待</small></div>
-      <div class="hero-metric"><span class="hero-label">风控</span><strong>--</strong><small>等待</small></div>
-    </section>
-    <div class="kpi-bar">
-      <div class="kpi-card" id="kpi-pnl">
-        <div class="kpi-label">总收益</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-      <div class="kpi-card" id="kpi-value">
-        <div class="kpi-label">总权益</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-      <div class="kpi-card" id="kpi-cash">
-        <div class="kpi-label">可用资金</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-      <div class="kpi-card" id="kpi-positions">
-        <div class="kpi-label">持仓</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-      <div class="kpi-card" id="kpi-signals">
-        <div class="kpi-label">信号</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-      <div class="kpi-card" id="kpi-target">
-        <div class="kpi-label">目标进度</div>
-        <div class="kpi-value">--</div>
-        <div class="kpi-sub">--</div>
-      </div>
-    </div>
-
-    <!-- Overview content rendered by JS -->
-    <div id="overview-content"></div>
-  </div>
-
-  <!-- ═══ TAB: HOLDINGS ════════════════════════════════════ -->
+  <div class="market-tape" id="market-tape"><span class="tape-kicker">MARKET</span><div class="tape-track"><span>加载中...</span></div><span class="tape-time">--</span></div>
+  <div class="tab-content active" id="tab-overview"><div class="loading-state"><span class="loading-spinner"></span><div class="loading-text">加载数据...</div></div></div>
   <div class="tab-content" id="tab-holdings"></div>
-
-  <!-- ═══ TAB: FACTORS ═════════════════════════════════════ -->
-  <div class="tab-content" id="tab-factors"></div>
-
-  <!-- ═══ TAB: RISK ════════════════════════════════════════ -->
+  <div class="tab-content" id="tab-sentinel"></div>
   <div class="tab-content" id="tab-risk"></div>
-
-  <!-- ═══ TAB: ANALYSIS ════════════════════════════════════ -->
-  <div class="tab-content" id="tab-analysis"></div>
-
   <script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
   <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
-    });
+    if('serviceWorker' in navigator){
+      navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");
+    }
   </script>
 </body>
 </html>

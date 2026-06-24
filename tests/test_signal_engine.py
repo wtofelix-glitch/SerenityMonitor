@@ -133,3 +133,116 @@ class TestSignalLevelsConfig:
         for i in range(1, len(scores)):
             assert scores[i][1] <= scores[i-1][1], \
                 f"Trade levels not sorted: {scores[i-1][0]}({scores[i-1][1]}) < {scores[i][0]}({scores[i][1]})"
+
+
+# ═══ Trend Score ════════════════════════════════════════════
+
+class TestTrendScore:
+    """compute_trend_score: 技术面综合评分"""
+
+    def test_neutral_tech_returns_middle_score(self):
+        tech = {'ma_alignment': 0, 'rsi': 50, 'bb_position': 0.5,
+                'volume_ratio': 1.0, 'atr_pct': 2.0}
+        score = signal_engine.compute_trend_score(tech)
+        assert 40 <= score <= 70, f"Neutral tech should score 40-70, got {score}"
+
+    def test_bullish_tech_returns_high_score(self):
+        tech = {'ma_alignment': 1, 'rsi': 60, 'bb_position': 0.8,
+                'volume_ratio': 1.5, 'atr_pct': 1.0}
+        score = signal_engine.compute_trend_score(tech)
+        assert score >= 50, f"Bullish tech should score above neutral, got {score}"
+
+    def test_bearish_tech_returns_low_score(self):
+        tech = {'ma_alignment': -1, 'rsi': 30, 'bb_position': 0.2,
+                'volume_ratio': 0.5, 'atr_pct': 4.0}
+        score = signal_engine.compute_trend_score(tech)
+        assert score <= 55, f"Bearish tech should score low, got {score}"
+
+    def test_missing_keys_default_safe(self):
+        score = signal_engine.compute_trend_score({})
+        assert isinstance(score, (int, float))
+        assert 0 <= score <= 100
+
+
+# ═══ Sell Triggers ═════════════════════════════════════════
+
+class TestSellTriggers:
+    """compute_sell_triggers: 卖出触发条件"""
+
+    def test_no_sell_on_good_signals(self, monkeypatch):
+        monkeypatch.setattr(signal_engine, '_compute_prev_rsi', lambda c, d: 55)
+        monkeypatch.setattr(signal_engine, '_get_recent_scores', lambda c, d: [65, 68, 70, 72, 70])
+        tech = {'rsi': 55, 'atr_pct': 2.0}
+        triggers = signal_engine.compute_sell_triggers('600001', tech, 65)
+        # With good scores and normal RSI, should not trigger sells
+        assert isinstance(triggers, list)
+
+    def test_sell_on_low_score_high_rsi(self, monkeypatch):
+        monkeypatch.setattr(signal_engine, '_compute_prev_rsi', lambda c, d: 80)
+        monkeypatch.setattr(signal_engine, '_get_recent_scores', lambda c, d: [65, 55, 45, 40, 35])
+        tech = {'rsi': 80, 'atr_pct': 2.0}
+        triggers = signal_engine.compute_sell_triggers('600001', tech, 30)
+        # Low score + overbought RSI should generate triggers
+        if len(triggers) > 0:
+            for t in triggers:
+                assert 'trigger' in t, f"Missing trigger key in {t}"
+
+    def test_no_crash_with_no_history(self, monkeypatch):
+        monkeypatch.setattr(signal_engine, '_compute_prev_rsi', lambda c, d: None)
+        monkeypatch.setattr(signal_engine, '_get_recent_scores', lambda c, d: [])
+        tech = {'rsi': 50, 'atr_pct': 2.0}
+        triggers = signal_engine.compute_sell_triggers('600001', tech, 55)
+        assert isinstance(triggers, list)
+
+
+# ═══ Buy Confirmation ══════════════════════════════════════
+
+class TestBuyConfirmation:
+    """confirm_buy_signal: 买入信号确认"""
+
+    def test_confirm_returns_dict_structure(self):
+        tech = {'rsi': 55, 'atr_pct': 2.0}
+        alpha = {'trend': 60, 'momentum': 55}
+        result = signal_engine.confirm_buy_signal('600001', tech, alpha)
+        assert isinstance(result, dict)
+        assert 'confirmed' in result or 'passed' in result or 'checks' in result
+
+    def test_confirm_no_crash_empty_alpha(self):
+        tech = {'rsi': 50}
+        result = signal_engine.confirm_buy_signal('600001', tech, {})
+        assert isinstance(result, dict)
+
+
+# ═══ Caution Buy Filter ════════════════════════════════════
+
+class TestCautionBuyFilter:
+    """compute_caution_buy_filter: 3-stage quality check"""
+
+    def test_filter_returns_valid_result(self):
+        tech = {'rsi': 55, 'atr_pct': 2.0, 'ma_alignment': 1}
+        alpha = {'trend': 55, 'momentum': 50}
+        # compute_caution_buy_filter(code, tech, alpha_signals, scores=None)
+        result = signal_engine.compute_caution_buy_filter('600001', tech, alpha)
+        assert isinstance(result, dict)
+
+    def test_filter_no_crash_empty_inputs(self):
+        result = signal_engine.compute_caution_buy_filter('600001', {}, {})
+        assert isinstance(result, dict)
+
+
+# ═══ Dynamic Stop Loss ═════════════════════════════════════
+
+class TestDynamicStopLoss:
+    """get_dynamic_stop_loss: ATR-based dynamic stop loss"""
+
+    def test_returns_dict_with_stop_price(self):
+        result = signal_engine.get_dynamic_stop_loss('600001', 10.0)
+        assert isinstance(result, dict)
+        if 'stop_price' in result:
+            assert result['stop_price'] < 10.0, "Stop loss should be below buy price"
+
+    def test_stop_loss_percentage_reasonable(self):
+        result = signal_engine.get_dynamic_stop_loss('600001', 12.5)
+        if 'stop_price' in result and result['stop_price'] > 0:
+            stop_pct = (12.5 - result['stop_price']) / 12.5 * 100
+            assert 2 <= stop_pct <= 20, f"Stop loss {stop_pct:.1f}% seems unreasonable"

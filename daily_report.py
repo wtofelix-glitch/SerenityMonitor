@@ -14,6 +14,17 @@ from scorer import score_all
 from notifier import push_daily_report, push_signal_summary
 
 
+def _format_position_profit(current_price: float, buy_price: float) -> tuple[str, str, Optional[float]]:
+    """Format holding PnL text; negative cost means prior gains covered cost."""
+    if buy_price > 0:
+        profit = (current_price - buy_price) / buy_price * 100
+        emoji = "🔴" if profit >= 0 else "🟢"  # A股：红色涨/绿色跌
+        return emoji, f"买入 {buy_price:.2f} | 盈亏 {profit:+.2f}%", profit
+    if buy_price < 0:
+        return "🔴", f"免费仓/净成本 {buy_price:.2f} | 现价 {current_price:.2f}", None
+    return "⚪", "未记录成本 | 盈亏暂不可算", None
+
+
 def generate_daily_report() -> str:
     """
     生成今日收盘简报（仅推送持仓标的）
@@ -165,15 +176,16 @@ def generate_daily_report() -> str:
                 stock_info = next((st for st in active if st["code"] == s["code"]), None)
                 buy_price = stock_info["buy_price"] if stock_info else 0
                 trade_amount = stock_info.get("trade_amount", 0) if stock_info else 0
-                profit = ((s["close"] - buy_price) / buy_price * 100) if buy_price else 0
-                emoji = "🔴" if profit >= 0 else "🟢"  # A股：红色涨/绿色跌
+                emoji, profit_line, profit = _format_position_profit(s["close"], buy_price)
 
                 lines.append(f"{emoji} **{s['name']}** ({s['code']})")
                 lines.append(f"  收盘 {s['close']:.2f} | 今日 {s['change_pct']:+.2f}%")
-                lines.append(f"  买入 {buy_price:.2f} | 盈亏 {profit:+.2f}%")
-                if trade_amount:
+                lines.append(f"  {profit_line}")
+                if trade_amount and profit is not None:
                     curr_value = trade_amount * (1 + profit / 100)
                     lines.append(f"  持仓 {trade_amount:.0f}元 → 现 {curr_value:.0f}元")
+                elif trade_amount:
+                    lines.append(f"  净投入 {trade_amount:.0f}元（负数表示已回本）")
                 if stock_info and stock_info.get("target_high", 0):
                     target = stock_info["target_high"]
                     remain = (target - s["close"]) / s["close"] * 100
@@ -308,10 +320,10 @@ def generate_simple_status() -> str:
             if s["code"] in {a["code"] for a in active}:
                 st = next((x for x in active if x["code"] == s["code"]), None)
                 buy_price = st["buy_price"] if st else 0
-                profit = ((s["close"] - buy_price) / buy_price * 100) if buy_price else 0
+                _, profit_line, _ = _format_position_profit(s["close"], buy_price)
                 lines.append(f"  {s['name']} ({s['code']})")
                 lines.append(f"    价 {s['close']:.2f} | {s['change_pct']:+.2f}%")
-                lines.append(f"    盈亏 {profit:+.2f}% (买入 {buy_price:.2f})")
+                lines.append(f"    {profit_line}")
                 if st and st.get("target_high"):
                     remain = (st["target_high"] - s["close"]) / s["close"] * 100
                     lines.append(f"    距目标 {st['target_high']:.2f} 还有 {remain:.1f}%")

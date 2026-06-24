@@ -44,13 +44,35 @@ run_task() {
 case "$HOUR" in
     07)
         run_task "盘前简报" "auto_execute.py --premarket"
+        # 哨兵后台: 结算+进化 (静默, 看板查看)
+        $PYTHON -c "from sentinel_engine import get_sentinel; e=get_sentinel(); e.settle_outcomes(5); e.update_source_weights()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 自主研究: 采集新闻+提取信号+映射标的
+        $PYTHON research_engine.py --daily >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 大师智库同步: guru_wisdom → sentinel
+        $PYTHON -c "from sentinel_engine import get_sentinel; get_sentinel().sync_guru_quotes()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 价格告警检查
+        $PYTHON -c "from price_alert import check; t=check(); print(f'告警检查: {len(t)}条触发') if t else None" >> "$LOG_DIR/scheduler.log" 2>&1 || true
         ;;
     15)
         run_task "收盘工作流" "daily_workflow.py --push"
+        # 哨兵收盘结算
+        $PYTHON -c "from sentinel_engine import get_sentinel; e=get_sentinel(); e.settle_outcomes(5)" >> "$LOG_DIR/scheduler.log" 2>&1 || true
         ;;
     22)
         # 晚间加跑一次完整工作流（保险：15:05 若网络失败则 22:00 重补）
         run_task "晚间复核" "daily_workflow.py --push"
+        # 哨兵夜间自进化
+        $PYTHON -c "from sentinel_engine import get_sentinel; get_sentinel().update_source_weights()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 持仓复盘教练 (仅周日)
+        if [ $(date +%u) -eq 7 ]; then
+            $PYTHON -c "from trade_coach import coach_report; print(coach_report())" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        fi
+        # 自主研究: 晚间二轮采集+同步哨兵
+        $PYTHON research_engine.py --daily >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 大师智库同步: guru_wisdom → sentinel
+        $PYTHON -c "from sentinel_engine import get_sentinel; get_sentinel().sync_guru_quotes()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        # 价格告警检查
+        $PYTHON -c "from price_alert import check; t=check(); print(f'告警检查: {len(t)}条触发') if t else None" >> "$LOG_DIR/scheduler.log" 2>&1 || true
         ;;
     *)
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 非调度时段，跳过" >> "$LOG_DIR/scheduler.log"

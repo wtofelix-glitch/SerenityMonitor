@@ -1,0 +1,504 @@
+{
+  "ticker": "600487",
+  "name": "亨通光电",
+  "timestamp": "2026-06-09T10:00:00+08:00",
+  "moat_profile": {
+    "moat_score": 66.5,
+    "sub_scores": {
+      "roic_stability": 80.0,
+      "gross_margin_trend": 50.0,
+      "debt_safety": 80.0,
+      "market_position": 70.0,
+      "capex_efficiency": 50.0
+    },
+    "weights": {
+      "roic_stability": 0.25,
+      "gross_margin_trend": 0.2,
+      "debt_safety": 0.2,
+      "market_position": 0.15,
+      "capex_efficiency": 0.2
+    },
+    "moat_type": "低财务风险型 (Safety Moat) — 财务稳健 + 回报稳定",
+    "moat_trend": "stable"
+  },
+  "investors": [
+    {
+      "id": "buffett",
+      "name": "巴菲特",
+      "en": "Warren Buffett",
+      "group": "A",
+      "style": "经典价值派 — 护城河 + 安全边际",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "graham",
+      "name": "格雷厄姆",
+      "en": "Benjamin Graham",
+      "group": "A",
+      "style": "经典价值派 — 净流动资产价值",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "fisher",
+      "name": "费雪",
+      "en": "Philip Fisher",
+      "group": "A",
+      "style": "经典价值派 — 成长股15要点",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "munger",
+      "name": "芒格",
+      "en": "Charlie Munger",
+      "group": "A",
+      "style": "经典价值派 — 反过来想 + 多元思维模型",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "templeton",
+      "name": "邓普顿",
+      "en": "John Templeton",
+      "group": "A",
+      "style": "经典价值派 — 最大悲观点逆向买入",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "klarman",
+      "name": "卡拉曼",
+      "en": "Seth Klarman",
+      "group": "A",
+      "style": "经典价值派 — 安全边际至上",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "lynch",
+      "name": "彼得·林奇",
+      "en": "Peter Lynch",
+      "group": "B",
+      "style": "成长投资派 — PEG < 1 + 10倍股挖掘",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "oneill",
+      "name": "欧奈尔",
+      "en": "William O'Neil",
+      "group": "B",
+      "style": "成长投资派 — CANSLIM 七要素",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "thiel",
+      "name": "彼得·蒂尔",
+      "en": "Peter Thiel",
+      "group": "B",
+      "style": "成长投资派 — 垄断式护城河",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "wood",
+      "name": "木头姐",
+      "en": "Cathie Wood",
+      "group": "B",
+      "style": "成长投资派 — 颠覆式创新 S 曲线",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "soros",
+      "name": "索罗斯",
+      "en": "George Soros",
+      "group": "C",
+      "style": "宏观对冲派 — 反身性 + 盛衰序列",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "dalio",
+      "name": "达里奥",
+      "en": "Ray Dalio",
+      "group": "C",
+      "style": "宏观对冲派 — 全天候 + 债务周期",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "marks",
+      "name": "霍华德·马克斯",
+      "en": "Howard Marks",
+      "group": "C",
+      "style": "宏观对冲派 — 市场周期 + 第二层思维",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "druck",
+      "name": "德鲁肯米勒",
+      "en": "Stanley Druckenmiller",
+      "group": "C",
+      "style": "宏观对冲派 — 集中下注 + 趋势识别",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "robertson",
+      "name": "罗伯逊",
+      "en": "Julian Robertson",
+      "group": "C",
+      "style": "宏观对冲派 — 做多最强做空最弱",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "livermore",
+      "name": "利弗莫尔",
+      "en": "Jesse Livermore",
+      "group": "D",
+      "style": "技术趋势派 — 关键点 + 耐心等待",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "minervini",
+      "name": "米内尔维尼",
+      "en": "Mark Minervini",
+      "group": "D",
+      "style": "技术趋势派 — VCP + Stage 2",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "darvas",
+      "name": "达瓦斯",
+      "en": "Nicolas Darvas",
+      "group": "D",
+      "style": "技术趋势派 — 箱体突破战法",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "gann",
+      "name": "江恩",
+      "en": "William Gann",
+      "group": "D",
+      "style": "技术趋势派 — 时间窗口 + 角度线",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "duan",
+      "name": "段永平",
+      "en": "Duan Yongping",
+      "group": "E",
+      "style": "中国价投派 — 生意人价格三问",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "zhangkun",
+      "name": "张坤",
+      "en": "Zhang Kun",
+      "group": "E",
+      "style": "中国价投派 — 消费高ROE护城河",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "zhushaoxing",
+      "name": "朱少醒",
+      "en": "Zhu Shaoxing",
+      "group": "E",
+      "style": "中国价投派 — 长期成长低换手",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "xiezhiyu",
+      "name": "谢治宇",
+      "en": "Xie Zhiyu",
+      "group": "E",
+      "style": "中国价投派 — GARP 性价比逻辑",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "fengliu",
+      "name": "冯柳",
+      "en": "Feng Liu",
+      "group": "E",
+      "style": "中国价投派 — 弱者体系 + 赔率优先",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "dengxiaofeng",
+      "name": "邓晓峰",
+      "en": "Deng Xiaofeng",
+      "group": "E",
+      "style": "中国价投派 — 产能周期 + 行业深度",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "zhang_mz",
+      "name": "章盟主",
+      "group": "F",
+      "style": "游资派 — 大资金趋势波段",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "sun_ge",
+      "name": "孙哥",
+      "group": "F",
+      "style": "游资派 — 板块引导锁仓",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "zhao_lg",
+      "name": "赵老哥",
+      "group": "F",
+      "style": "游资派 — 二板定龙头",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "fs_wyj",
+      "name": "佛山无影脚",
+      "group": "F",
+      "style": "游资派 — 一日游砸盘王",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "yangjia",
+      "name": "炒股养家",
+      "group": "F",
+      "style": "游资派 — 情绪揣摩 + 题材轮动",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "chen_xq",
+      "name": "陈小群",
+      "group": "F",
+      "style": "游资派 — 龙头一线天",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "hu_jl",
+      "name": "呼家楼",
+      "group": "F",
+      "style": "游资派 — 多席位协同作战",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "fang_xx",
+      "name": "方新侠",
+      "group": "F",
+      "style": "游资派 — 大成交趋势",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "zuoshou",
+      "name": "作手新一",
+      "group": "F",
+      "style": "游资派 — 龙头连板战法",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "xiao_ey",
+      "name": "小鳄鱼",
+      "group": "F",
+      "style": "游资派 — 基本面辅助 + 龙头",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "jiao_yy",
+      "name": "交易猿",
+      "group": "F",
+      "style": "游资派 — 大容量锁仓",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "mao_lb",
+      "name": "毛老板",
+      "group": "F",
+      "style": "游资派 — AI 主线",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "xiao_xian",
+      "name": "消闲派",
+      "group": "F",
+      "style": "游资派 — 满仓满融",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "lasa",
+      "name": "拉萨天团",
+      "group": "F",
+      "style": "游资派 — 群狼一日游",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "chengdu",
+      "name": "成都帮",
+      "group": "F",
+      "style": "游资派 — 底部黑马",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "sunan",
+      "name": "苏南帮",
+      "group": "F",
+      "style": "游资派 — 低价小盘联动",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "ningbo_st",
+      "name": "宁波桑田路",
+      "group": "F",
+      "style": "游资派 — 连板接力",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "liuyi_zl",
+      "name": "六一中路",
+      "group": "F",
+      "style": "游资派 — 题材打板 2024 封神",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "liu_sh",
+      "name": "流沙河",
+      "group": "F",
+      "style": "游资派 — 低吸接力",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "gu_bl",
+      "name": "古北路",
+      "group": "F",
+      "style": "游资派 — 2025 顶级短线",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "bj_cj",
+      "name": "北京炒家",
+      "group": "F",
+      "style": "游资派 — 首板战法",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "wang_zr",
+      "name": "瑞鹤仙",
+      "group": "F",
+      "style": "游资派 — 题材短线",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "simons",
+      "name": "西蒙斯",
+      "en": "Jim Simons",
+      "group": "G",
+      "style": "量化派 — 统计套利 + 隐马尔可夫模型",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "thorp",
+      "name": "索普",
+      "en": "Ed Thorp",
+      "group": "G",
+      "style": "量化派 — 凯利公式 + 套利定价",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    },
+    {
+      "id": "shaw",
+      "name": "大卫·肖",
+      "en": "David Shaw",
+      "group": "G",
+      "style": "量化派 — 多因子模型",
+      "signal": null,
+      "score": null,
+      "verdict": null
+    }
+  ]
+}

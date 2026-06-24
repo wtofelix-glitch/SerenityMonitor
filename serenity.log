@@ -1,0 +1,192 @@
+=== Wed May 27 09:49:45 CST 2026 ===
+Flask already running on :8400
+ngrok already running
+=== Wed May 27 14:29:35 CST 2026 ===
+Flask started on :8400
+ngrok tunnel started
+🚀 Serenity Monitor V2 running on http://0.0.0.0:8400
+ * Serving Flask app 'app'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8400
+ * Running on http://192.168.1.198:8400
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [27/May/2026 14:29:42] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:34] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:35] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [27/May/2026 14:30:37] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:53] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:54] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:55] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:56] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:58] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:30:59] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:31:00] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:32:32] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:32:33] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:32:34] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [27/May/2026 14:32:35] "GET /api/refresh/600487 HTTP/1.1" 200 -
+🚀 Serenity Monitor V2 running on http://0.0.0.0:8400
+ * Serving Flask app 'app'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8400
+ * Running on http://192.168.1.198:8400
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [28/May/2026 10:55:02] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 11:06:17] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 11:06:19] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 11:06:20] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 11:07:51] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 11:07:52] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 11:07:54] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 11:07:56] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 11:07:57] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:40:29] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 13:40:31] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:40:32] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 13:40:38] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:40:41] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:40:44] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:40:46] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:42:24] "GET /?refresh=1 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 13:42:25] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:22:33] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 14:24:01] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:24:01] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 14:24:07] "GET /?refresh=1 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:24:07] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:24:12] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:38:29] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 14:49:13] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 14:49:20] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:22] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 14:49:27] "GET /?refresh=1 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:28] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:33] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:35] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:36] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 14:49:37] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:13:36] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 15:13:39] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:13:39] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 15:13:47] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:13:49] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:13:51] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:13:53] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:17:09] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [28/May/2026 15:17:10] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 21:59:31] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:06:30] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:08:25] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:08:37] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:08:39] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:09:44] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:09:47] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [28/May/2026 23:09:48] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 01:18:17] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:45:29] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:45:32] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:33] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:45:38] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:40] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:45] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:47] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:49] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:50] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:45:53] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:46:46] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:46:48] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:47:39] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:47:42] "GET /trades HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:47:48] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:47:49] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:47:58] "GET /?refresh=1 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:47:59] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:48:07] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:09] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:58:12] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:12] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 09:58:15] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:16] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:18] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:19] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:26] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:27] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:27] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:28] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:29] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:58:30] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:16] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:17] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:17] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:19] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:19] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:20] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:21] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:22] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:22] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:34] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:36] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 09:59:37] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:04] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:05] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:08] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:08] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:09] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:10] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:57] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:58] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:05:59] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:06:00] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:29:02] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 10:29:05] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:00] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:01] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:03] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:04] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:08] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:09] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:30:10] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:32:54] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:32:56] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:32:56] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:32:57] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:32:59] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:33:00] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:33:52] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:33:52] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:33:53] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:38:03] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:38:04] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:38:05] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 10:38:06] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:31:31] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 14:23:59] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 14:24:01] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 14:24:04] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 14:33:34] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 14:34:12] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:03:26] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:33:53] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:33:58] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:33:58] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:34:15] "GET /api/refresh/002281 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:34:18] "GET /api/refresh/000988 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:34:20] "GET /api/refresh/603083 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:34:22] "GET /api/refresh/600487 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:58:23] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:58:26] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:58:27] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 15:58:35] "GET /?refresh=1 HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:58:36] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 15:58:38] "GET /trades HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 16:08:49] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 16:21:04] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 16:21:07] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 16:21:08] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+127.0.0.1 - - [29/May/2026 16:21:49] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 16:21:53] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 16:21:53] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -

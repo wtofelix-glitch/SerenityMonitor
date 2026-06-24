@@ -63,6 +63,8 @@ def _dashboard_public_write_guard() -> SecurityCheck:
             ("/api/trades", {"code": "000988", "action": "buy", "price": 1}),
             ("/api/config", {"code": "000988", "stop_loss": 1}),
             ("/api/execute", {}),
+            ("/api/hermes/trade", {"code": "600141", "action": "buy", "price": 1, "quantity": 100}),
+            ("/api/hermes/balance", {"cash": 1000, "positions": []}),
         ]
         failures = []
         for path, payload in endpoints:
@@ -88,7 +90,7 @@ def _dashboard_public_write_guard() -> SecurityCheck:
             label="Dashboard 公网写接口闸门",
             status="pass",
             weight=25,
-            detail="/api/trades、/api/config、/api/execute 无 token 公网 Host 均返回 401",
+            detail="/api/trades、/api/config、/api/execute、/api/hermes/* 无 token 公网 Host 均返回 401",
         )
     except Exception as e:
         return SecurityCheck(

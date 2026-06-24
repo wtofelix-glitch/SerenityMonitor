@@ -601,6 +601,9 @@ def _get_portfolio_summary():
     try:
         pm = PortfolioManager()
         pf_data = pm.get_portfolio_value()
+        # Debug: force reload from fresh PortfolioManager
+        log.debug("Portfolio: total=%.0f cash=%.0f positions=%d", 
+            pf_data["total_value"], pf_data["cash"], pf_data["position_count"])
         result = {
             "positions": pf_data["position_count"],
             "total_value": round(pf_data["total_value"], 0),
@@ -653,59 +656,78 @@ def api_monitor_data():
 
 
 def _db_only_portfolio_summary():
-    """纯 DB 持仓摘要（不碰 Sina 实时行情）—— 给超时降级用"""
+    """纯 DB 持仓摘要 — 用快照收盘价, 不碰 Sina。超时降级用。"""
     conn = get_conn()
     try:
         # 可用资金
         cash = 0.0
         cash_row = conn.execute(
-            "SELECT price FROM trades WHERE code='CASH' AND action='sell' AND rowid IN (SELECT max(rowid) FROM trades WHERE code='CASH')"
+            "SELECT price FROM trades WHERE code='CASH' AND action='sell' ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
         if cash_row and cash_row["price"] and cash_row["price"] > 0:
             cash = cash_row["price"]
         else:
-            cash = CAPITAL_CONFIG.get("initial_capital", 200000.0)
+            cash = CAPITAL_CONFIG.get("initial_capital", 50000.0)
 
-        # 持仓（用 DB 存储的 buy_price 作为近似估值，不拉实时价）
+        # 活跃持仓
         stocks = conn.execute(
-            "SELECT code, buy_price, trade_amount, name FROM stocks WHERE is_active=1 AND code != 'CASH'"
+            "SELECT code, name, buy_price, trade_amount FROM stocks WHERE is_active=1 AND code != 'CASH'"
         ).fetchall()
 
         details = []
         holdings_value = 0.0
-        total_cost = 0.0
         for s in stocks:
             code = s["code"]
             name = s["name"] or STOCK_MAP.get(code, {}).get("name", code)
             buy_price = s["buy_price"] or 0
-            amount = s["trade_amount"] or 0
-            total_cost += amount
-            shares = int(amount / buy_price / 100) * 100 if buy_price > 0 and amount > 0 else 0
-            # 无实时价，用买入价做参考，盈亏设 0
-            current_value = amount
+
+            # 净持股 (从 trades 表计算)
+            bought = conn.execute(
+                "SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND LOWER(action)='buy'",
+                (code,)
+            ).fetchone()[0]
+            sold = conn.execute(
+                "SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND LOWER(action)='sell'",
+                (code,)
+            ).fetchone()[0]
+            shares = max(bought - sold, 0)
+
+            # 当前价: 优先最新快照收盘价
+            snap = conn.execute(
+                "SELECT close FROM daily_snapshots WHERE code=? ORDER BY date DESC LIMIT 1",
+                (code,)
+            ).fetchone()
+            current_price = snap["close"] if snap and snap["close"] > 0 else buy_price
+
+            current_value = shares * current_price
             holdings_value += current_value
+            cost = shares * buy_price
+            profit_pct = ((current_price - buy_price) / abs(buy_price) * 100) if abs(buy_price) > 0.001 else 0
+
             details.append({
                 "code": code, "name": name,
                 "buy_price": buy_price,
-                "current_price": buy_price,
+                "current_price": current_price,
                 "shares": shares,
-                "cost": amount,
-                "current_value": current_value,
-                "profit_pct": 0.0,
-                "profit_amount": 0.0,
+                "cost": round(cost, 2),
+                "current_value": round(current_value, 2),
+                "profit_pct": round(profit_pct, 2),
+                "profit_amount": round(current_value - cost, 2),
                 "weight": round(current_value / (cash + holdings_value) * 100, 1) if (cash + holdings_value) > 0 else 0,
+                "is_free": buy_price < 0,
             })
 
         total_value = cash + holdings_value
-        total_profit_pct = (total_value - CAPITAL_CONFIG.get("initial_capital", 200000.0)) / CAPITAL_CONFIG.get("initial_capital", 200000.0) * 100
+        initial = CAPITAL_CONFIG.get("initial_capital", 50000.0)
+        total_profit_pct = (total_value - initial) / initial * 100
 
         return {
             "positions": len(details),
-            "total_value": round(total_value, 0),
-            "cash": round(cash, 0),
-            "holdings_value": round(holdings_value, 0),
+            "total_value": round(total_value, 2),
+            "cash": round(cash, 2),
+            "holdings_value": round(holdings_value, 2),
             "total_profit_pct": round(total_profit_pct, 2),
-            "total_profit_amount": round(total_value - CAPITAL_CONFIG.get("initial_capital", 200000.0), 0),
+            "total_profit_amount": round(total_value - initial, 2),
             "position_details": details,
         }
     except Exception as e:
@@ -720,7 +742,7 @@ def _quick_db_fallback():
     """monitor-data 超时降级：直接从 DB 获取评分 + 持仓，确保前端能渲染。0 次 API 调用。"""
     now = datetime.now()
     scores = _load_db_scores()
-    pf = _db_only_portfolio_summary()  # ← 纯 DB，不碰 Sina
+    pf = _get_portfolio_summary()  # 用正常路径 (含 snapshot 回落)
     return {
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": now.strftime("%Y-%m-%d"),
@@ -838,6 +860,13 @@ try:
 except ImportError:
     _HAS_PROMETHEUS = False
     metrics_endpoint = None
+    # 防止 api_monitor_data() 引用未定义的 API_CALLS
+    class _NullMetrics:
+        @staticmethod
+        def labels(**kw): return _NullMetrics()
+        @staticmethod
+        def inc(): pass
+    API_CALLS = API_ERRORS = SCORE_ERRORS = _NullMetrics()
 
 @app.route("/metrics")
 def api_metrics():
@@ -1018,7 +1047,233 @@ def api_clear_cache():
     return jsonify({"ok": True, "msg": "缓存已清除"})
 
 
+# ===== Hermes 实时更新通道 =====
+@app.route("/api/hermes/trade", methods=["POST"])
+@require_write_auth
+def api_hermes_trade():
+    """Hermes/WeChat 推送的买卖信息实时更新
+    支持 JSON body:
+      { code, action, price, quantity, note, token }
+    或简单表单:
+      ?code=600460&action=buy&price=45.93&quantity=600&note=早盘建仓
+    """
+    from db import get_conn, set_active, clear_active, add_trade
+    from config import STOCK_MAP, STOCK_DETAILS
+
+    # Parse input
+    data = request.get_json(silent=True) or {}
+    if not data:
+        data = {k: request.args.get(k) for k in ('code','action','price','quantity','note')}
+
+    code = data.get('code', '').strip()
+    action = data.get('action', 'buy').strip().lower()
+    price = float(data.get('price', 0))
+    qty = int(data.get('quantity', 0))
+    note = data.get('note', '').strip()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    if not code or price <= 0 or qty <= 0:
+        return jsonify({"ok": False, "msg": "缺少参数: code/price/quantity 必填"}), 400
+
+    try:
+        amount = round(price * qty, 2)
+        add_trade(code, action, price, qty, today, note, trade_amount=amount)
+
+        if action == 'buy':
+            detail = STOCK_DETAILS.get(code, {})
+            set_active(code, price, today,
+                       detail.get('target_sell', 0),
+                       detail.get('buy_zone_low', 0))
+            # 更新 trade_amount
+            conn = get_conn()
+            conn.execute("UPDATE stocks SET trade_amount=? WHERE code=?", (amount, code))
+            conn.commit()
+            conn.close()
+            log.info("Hermes 买入: %s %d股 @%.2f = ¥%.0f", code, qty, price, amount)
+        elif action == 'sell':
+            clear_active(code)
+            log.info("Hermes 卖出: %s %d股 @%.2f = ¥%.0f", code, qty, price, amount)
+
+        # 自动校准现金
+        _calibrate_cash()
+
+        # 使缓存失效
+        for k in list(_cache.keys()):
+            _cache[k] = None
+            if k in _cache_time:
+                _cache_time[k] = None
+
+        return jsonify({"ok": True, "msg": f"{'买入' if action=='buy' else '卖出'} {code} {price}×{qty}股", "amount": amount})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 400
+
+
+@app.route("/api/hermes/balance", methods=["POST"])
+@require_write_auth
+def api_hermes_balance():
+    """Hermes/WeChat 推送的资产校准
+    JSON: { cash, positions: [{ code, price, quantity, cost }] }
+    """
+    from db import get_conn, set_active, clear_active, add_trade, upsert_stock
+    from config import STOCK_MAP
+
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"ok": False, "msg": "需要 JSON body"}), 400
+
+    try:
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        # Update cash
+        cash = float(data.get('cash', 0))
+        conn = get_conn()
+        conn.execute("DELETE FROM trades WHERE code='CASH'")
+        conn.execute(
+            "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
+            ('CASH', 'sell', cash, 1, today, 'Hermes资产校准', 0.0)
+        )
+        conn.commit()
+        conn.close()
+
+        # Update positions
+        updated_codes = set()
+        for pos in data.get('positions', []):
+            code = pos.get('code', '')
+            if not code:
+                continue
+            updated_codes.add(code)
+
+            cost = float(pos.get('cost', 0))
+            qty = int(pos.get('quantity', 0))
+            price = float(pos.get('price', 0))
+
+            name = STOCK_MAP.get(code, {}).get('name', code)
+            upsert_stock({
+                'code': code, 'name': name, 'market': STOCK_MAP.get(code,{}).get('market','主板'),
+                'tier': STOCK_MAP.get(code,{}).get('tier',''),
+                'buy_price': cost, 'buy_date': today,
+                'target_high': 0, 'target_low': 0, 'stop_loss': 0,
+                'is_active': 1, 'notes': 'Hermes校准'
+            })
+
+            # Replace trades for this code
+            conn = get_conn()
+            conn.execute("DELETE FROM trades WHERE code=?", (code,))
+            conn.execute(
+                "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
+                (code, 'buy', cost, qty, today, f'Hermes校准', cost * qty)
+            )
+            conn.commit()
+            conn.close()
+
+        # Clear inactive old positions
+        conn = get_conn()
+        for r in conn.execute("SELECT code FROM stocks WHERE is_active=1 AND code NOT IN ({}) AND code != 'CASH'".format(
+            ','.join('?' for _ in updated_codes)), list(updated_codes)):
+            conn.execute("UPDATE stocks SET is_active=0 WHERE code=?", (r['code'],))
+        conn.commit()
+        conn.close()
+
+        # Invalidate caches
+        for k in list(_cache.keys()):
+            _cache[k] = None
+            if k in _cache_time:
+                _cache_time[k] = None
+
+        log.info("Hermes 资产校准完成: 现金 ¥%.0f, %d 只持仓", cash, len(updated_codes))
+        return jsonify({"ok": True, "msg": f"校准完成: 现金¥{cash:.0f}, {len(updated_codes)}只持仓"})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 400
+
+
+def _calibrate_cash():
+    """根据 trades 表重新计算并记录现金余额"""
+    from db import get_conn
+    from config import CAPITAL_CONFIG
+    conn = get_conn()
+    rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code != 'CASH'").fetchall()
+    initial = CAPITAL_CONFIG.get('initial_capital', 50000)
+    bought = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'buy')
+    sold = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'sell')
+    cash = max(0, initial - bought + sold)
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn.execute("DELETE FROM trades WHERE code='CASH'")
+    conn.execute("INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
+                 ('CASH', 'sell', cash, 1, today, '自动校准', 0.0))
+    conn.commit()
+    conn.close()
+    return cash
+
+
+@app.route("/api/hermes/health")
+def api_hermes_health():
+    """数据完整性检查"""
+    from db import get_conn
+    from config import STOCK_MAP
+    from datetime import date
+    conn = get_conn()
+    issues = []
+
+    # 检查1: 活跃持仓的净股数
+    for r in conn.execute("SELECT code, buy_price FROM stocks WHERE is_active=1 AND code!='CASH'").fetchall():
+        bought = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='buy'",(r['code'],)).fetchone()[0]
+        sold = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='sell'",(r['code'],)).fetchone()[0]
+        net = bought - sold
+        if net <= 0:
+            issues.append({"type": "stale_position", "code": r['code'], "detail": f"net={net}"})
+
+    # 检查2: 现金一致性
+    cash_rec = conn.execute("SELECT price FROM trades WHERE code='CASH' AND action='sell' ORDER BY rowid DESC LIMIT 1").fetchone()
+    cash_val = cash_rec['price'] if cash_rec else 0
+    rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code!='CASH'").fetchall()
+    initial = 50000
+    bought = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='buy')
+    sold = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='sell')
+    formula = max(0, initial - bought + sold)
+    if abs(cash_val - formula) > 100:
+        issues.append({"type": "cash_mismatch", "detail": f"record={cash_val:.0f} formula={formula:.0f} gap={cash_val-formula:.0f}"})
+
+    # 检查3: 重复交易
+    for r in conn.execute("""
+        SELECT code, date, action, price, quantity, COUNT(*) as cnt
+        FROM trades WHERE date >= date('now','-7 days')
+        GROUP BY code, date, action, price, quantity
+        HAVING cnt > 1
+    """).fetchall():
+        issues.append({"type": "duplicate_trade", "code": r['code'],
+                       "detail": f"{r['date']} {r['action']} {r['price']}x{r['quantity']} ×{r['cnt']}"})
+
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "healthy": len(issues) == 0,
+        "issues": issues,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
 # ===== 设置 API =====
+@app.route("/api/config/<code>")
+def api_get_config(code):
+    """获取单只股票的当前设置（止损/止盈）"""
+    from db import get_stock
+    stock = get_stock(code)
+    if not stock:
+        return jsonify({"ok": False, "msg": f"找不到 {code}"}), 404
+    return jsonify({
+        "ok": True,
+        "data": {
+            "code": code,
+            "name": stock.get("name", ""),
+            "stop_loss": stock.get("stop_loss", 0),
+            "target_high": stock.get("target_high", 0),
+            "target_low": stock.get("target_low", 0),
+            "buy_price": stock.get("buy_price", 0),
+        }
+    })
+
+
 @app.route("/api/config", methods=["POST"])
 @require_write_auth
 def api_config():
@@ -1299,7 +1554,6 @@ def api_today_strategy():
 # ===== 快捷查询 API（手机书签一键直达） =====
 
 @app.route("/api/nl-query")
-@require_write_auth
 def api_nl_query():
     """自然语言查询 — 中文意图识别，调用现有分析函数"""
     q = request.args.get("q", "").strip()
@@ -1442,6 +1696,464 @@ def _plan_already_executed(plan: dict) -> bool:
 
 
 _app = app  # 供外部引用
+
+
+# ===== 大师智库 API =====
+@app.route("/api/guru/sentiment/<code>")
+def api_guru_sentiment(code):
+    """查询大师对指定标的的情绪 (从 guru_wisdom.db)"""
+    try:
+        from guru_wisdom import get_guru_sentiment, get_guru_stock_mentions
+        sentiment = get_guru_sentiment(code)
+        mentions = get_guru_stock_mentions(code)[:10]
+        return jsonify({"ok": True, "sentiment": sentiment, "mentions": [
+            {"guru": m["cn_name"], "content": m["content"][:80], "sentiment": m["sentiment"]}
+            for m in mentions
+        ]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/guru/status")
+def api_guru_status():
+    """大师智库状态概览"""
+    try:
+        from guru_wisdom import status, get_recent_quotes
+        s = status()
+        recent = get_recent_quotes(12)
+        return jsonify({"ok": True, "stats": {
+            "gurus": s["gurus"], "total_quotes": s["total_quotes"],
+            "recent_7d": s["recent_quotes_7d"], "last_collection": s["last_collection"],
+            "bullish_pct": round(s["sentiment_distribution"]["bullish"] / max(s["total_quotes"], 1) * 100),
+            "bearish_pct": round(s["sentiment_distribution"]["bearish"] / max(s["total_quotes"], 1) * 100),
+        }, "recent": [{
+            "guru": r["cn_name"], "content": r["content"][:120],
+            "sentiment": r["sentiment"], "topic": r.get("topic", ""),
+            "date": str(r.get("source_date", "") or r.get("collected_at", ""))[:16]
+        } for r in recent]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===== 研究引擎 API =====
+@app.route("/api/research/brief")
+def api_research_brief():
+    """今日研究简报"""
+    try:
+        from research_engine import get_research_engine
+        e = get_research_engine()
+        # 确保数据新鲜
+        mapped = e.get_mapped_topics(e.filter_finance_news(e.load_trendradar_news(days=2)))
+        e.persist_research(mapped)
+        brief = e.generate_daily_brief()
+        return jsonify({"ok": True, "brief": brief, "brief_html": brief.replace("\n", "<br>"),
+                        "topics": mapped["actionable_topics"][:12],
+                        "ticker_signals": mapped.get("ticker_signals", {})})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+@app.route("/api/research/topics")
+def api_research_topics():
+    """热门话题 + 映射标的"""
+    try:
+        from research_engine import get_research_engine
+        e = get_research_engine()
+        mapped = e.get_mapped_topics(e.filter_finance_news(e.load_trendradar_news(days=2)))
+        return jsonify({"ok": True, "actionable": mapped["actionable_topics"][:15],
+                        "all": mapped["top_topics"][:20],
+                        "signals": mapped["ticker_signals"]})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+
+
+# ===== 哨兵 API =====
+@app.route("/api/sentinel/status")
+def api_sentinel_status():
+    """哨兵信源面板数据"""
+    try:
+        from sentinel_engine import get_sentinel
+        e = get_sentinel()
+        sources = e.get_active_sources()
+        perf = {p["source_id"]: p for p in e.get_source_performance()}
+        recent = e.get_recent_observations(hours=72, limit=20)
+
+        source_list = []
+        for s in sources:
+            p = perf.get(s["id"], {})
+            src_obs = [o for o in recent if o["source_id"] == s["id"]]
+            source_list.append({
+                "id": s["id"],
+                "name": s["name"],
+                "platform": s["platform"],
+                "quality": s["quality_rating"],
+                "weight": s["weight"],
+                "accuracy": p.get("accuracy", 0),
+                "total_predictions": p.get("total", 0),
+                "recent_count": len(src_obs),
+                "last_fetch": s.get("last_fetch_at", ""),
+            })
+
+        return jsonify({"ok": True, "sources": source_list, "observations": [
+            {"id": o["id"], "source_id": o["source_id"], "content": o["content_raw"][:120],
+             "signal_type": o["signal_type"], "tickers": o["tickers"],
+             "topics": o["topics"], "confidence": o["confidence"],
+             "fetched_at": o["fetched_at"]}
+            for o in recent[:15]
+        ]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/sentinel/fusion")
+def api_sentinel_fusion():
+    """哨兵融合 — 对持仓池的影响"""
+    try:
+        from sentinel_engine import get_sentinel
+        e = get_sentinel()
+        return jsonify({"ok": True, "fusion": e.get_portfolio_fusion()[:10]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/sentinel/performance")
+def api_sentinel_performance():
+    """哨兵信源绩效"""
+    try:
+        from sentinel_engine import get_sentinel
+        e = get_sentinel()
+        return jsonify({"ok": True, "performance": e.get_source_performance()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===== 纸面交易 API =====
+@app.route("/api/paper-portfolio")
+def api_paper_portfolio():
+    """获取纸面交易账户摘要"""
+    try:
+        from paper_trader import get_paper_trader
+        pt = get_paper_trader()
+        pf = pt.get_paper_portfolio()
+        compare = pt.compare_to_real()
+        stats = pt.get_stats()
+        return jsonify({"ok": True, "portfolio": pf, "compare": compare, "stats": stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/paper-execute", methods=["POST"])
+@require_write_auth
+def api_paper_execute():
+    """模拟执行一笔交易"""
+    try:
+        from paper_trader import get_paper_trader
+        data = request.get_json(silent=True) or {}
+        code = data.get("code", "")
+        action = data.get("action", "buy")
+        score = float(data.get("score", 0))
+        pt = get_paper_trader()
+        result = pt.fast_forward_signal(code, action, score)
+        return jsonify({"ok": True, "result": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/paper-reset", methods=["POST"])
+@require_write_auth
+def api_paper_reset():
+    """重置纸面账户"""
+    try:
+        from paper_trader import get_paper_trader
+        result = get_paper_trader().reset()
+        return jsonify({"ok": True, "result": result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===== 即时推送 API =====
+@app.route("/api/push/signal", methods=["POST"])
+def api_push_signal():
+    """推送即时信号告警 — 评分突变/止盈止损触发"""
+    try:
+        from notifier import send_via_wxpusher, push_alert
+        from portfolio import PortfolioManager
+        pm = PortfolioManager()
+        pv = pm.get_portfolio_value()
+        trailing = pm.get_trailing_stop_levels()
+        stops = pm.check_stop_conditions()
+
+        alerts = []
+        # 止盈止损触发
+        for s in stops:
+            alerts.append({
+                "code": s["code"], "name": s["name"],
+                "action": s["action"], "reason": s["reason"],
+                "profit_pct": s.get("profit_pct", 0), "urgency": s.get("urgency", "critical")
+            })
+
+        if alerts:
+            for a in alerts:
+                a["_pushed"] = push_alert(a)
+
+        return jsonify({"ok": True, "alerts": alerts,
+                        "trailing_stops": trailing[:5],
+                        "portfolio": {"total": pv["total_value"], "pnl": pv["total_profit_pct"]}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ===== 回测 API =====
+@app.route("/api/backtest/<code>")
+def api_backtest(code):
+    """单标的多策略回测摘要"""
+    try:
+        from backtest_engine import run_backtest, calc_sharpe_ratio, calc_max_drawdown
+        from backtest_engine import TrendFollowingStrategy, MultiFactorStrategy, MeanReversionStrategy
+
+        strategies = {
+            "trend": TrendFollowingStrategy(),
+            "multifactor": MultiFactorStrategy(),
+            "mean_revert": MeanReversionStrategy(),
+        }
+
+        results = []
+        for name, strat in strategies.items():
+            try:
+                r = run_backtest(code, strat, initial_capital=50000)
+                results.append({
+                    "strategy": name,
+                    "total_return": r.get("total_return_pct", 0),
+                    "sharpe": r.get("sharpe_ratio", 0),
+                    "max_dd": r.get("max_drawdown_pct", 0),
+                    "win_rate": r.get("win_rate_pct", 0),
+                    "trades": r.get("total_trades", 0),
+                    "final_value": r.get("final_value", 0),
+                })
+            except Exception:
+                results.append({"strategy": name, "error": "data insufficient"})
+
+        return jsonify({"ok": True, "code": code, "strategies": results})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ===== 价格告警 API =====
+@app.route("/api/alerts")
+def api_alerts():
+    """获取活跃告警列表 + 触发历史"""
+    try:
+        from price_alert import active, history, check
+        triggered = check()
+        return jsonify({"ok": True, "active": active(), "history": history(20), "just_triggered": triggered})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/alerts/add", methods=["POST"])
+def api_alerts_add():
+    """添加价格告警: {code, name, condition, price, note}"""
+    try:
+        from price_alert import add
+        data = request.get_json(silent=True) or {}
+        a = add(data.get("code",""), data.get("name",""), data.get("condition","below"), float(data.get("price",0)), data.get("note",""))
+        return jsonify({"ok": True, "alert": a})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/alerts/<aid>", methods=["DELETE"])
+def api_alerts_delete(aid):
+    try:
+        from price_alert import remove
+        remove(aid)
+        return jsonify({"ok": True, "msg": "已删除"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+# ===== 复盘教练 API =====
+@app.route("/api/coach")
+def api_coach():
+    """本周交易复盘 + 教训提炼"""
+    try:
+        from trade_coach import analyze_week, coach_report
+        r = analyze_week()
+        report = coach_report()
+        return jsonify({"ok": True, "analysis": r, "report": report})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ===== 因子归因 API =====
+@app.route("/api/factor-ic-dashboard")
+def api_factor_ic_dashboard():
+    """因子IC可视化数据 — 供看板消费"""
+    try:
+        from factor_ic import compute_rank_ic, DIMENSION_LABELS
+        result = compute_rank_ic(days=30, window=20)
+        if "error" in result:
+            return jsonify({"ok": False, "error": result["error"]}), 500
+        dims = list(result.get("latest", {}).keys())
+        bars = []
+        for dim in dims:
+            latest = result["latest"].get(dim, 0)
+            mean = result["mean_ic"].get(dim, 0)
+            ir = result["ic_ir"].get(dim, 0)
+            wr = result["win_rate"].get(dim, 0)
+            bars.append({"dim": dim, "label": DIMENSION_LABELS.get(dim, dim),
+                         "latest_ic": round(latest, 3), "mean_ic": round(mean, 3),
+                         "ic_ir": round(ir, 2), "win_rate": round(wr, 1)})
+        bars.sort(key=lambda x: abs(x["latest_ic"]), reverse=True)
+        return jsonify({"ok": True, "bars": bars[:9],
+                        "top": bars[:3], "weak": bars[-3:] if len(bars)>=6 else []})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+# ===== 策略优化 API =====
+@app.route("/api/optimize/<code>")
+def api_optimize(code):
+    """网格搜索最优策略参数"""
+    try:
+        from strategy_optimizer import grid_search
+        r = grid_search(code, request.args.get("strategy","trend"))
+        return jsonify({"ok": True, **r})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ===== 多账户对比 API =====
+@app.route("/api/compare")
+def api_compare():
+    """纸面 vs 真实 vs 沪深300基准"""
+    try:
+        from paper_trader import get_paper_trader
+        from portfolio import PortfolioManager
+        pm = PortfolioManager()
+        real = pm.get_portfolio_value()
+        paper = get_paper_trader().get_paper_portfolio()
+
+        # 沪深300 基准 (近似: 从快照取最近收盘)
+        from db import get_conn
+        conn = get_conn()
+        hs = conn.execute("SELECT close FROM daily_snapshots WHERE code='000300' ORDER BY date DESC LIMIT 1").fetchone()
+        conn.close()
+        benchmark = {"name":"沪深300","return": round((hs["close"]/3500 - 1)*100, 2) if hs and hs["close"] else None}
+
+        return jsonify({"ok": True,
+            "real": {"total": real["total_value"], "pnl": real["total_profit_pct"], "cash": real["cash"], "positions": real["position_count"]},
+            "paper": {"total": paper["total_value"], "pnl": paper["total_profit_pct"], "cash": paper["cash"], "positions": paper["position_count"]},
+            "benchmark": benchmark,
+            "diff_paper_vs_real": round(paper["total_profit_pct"] - real["total_profit_pct"], 2)
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ===== 券商对接 API =====
+@app.route("/api/broker/order", methods=["POST"])
+@require_write_auth
+def api_broker_order():
+    """生成券商下单指令"""
+    try:
+        from broker_bridge import generate_order
+        data = request.get_json(silent=True) or {}
+        order = generate_order(data.get("code",""), data.get("action","buy"), float(data.get("price",0)), int(data.get("quantity",0)), data.get("broker","ths"))
+        return jsonify({"ok": True, "order": order})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/broker/execute-plan", methods=["POST"])
+@require_write_auth
+def api_broker_execute_plan():
+    """批量生成执行计划的下单指令"""
+    try:
+        from auto_execute import generate_execution_plan
+        from broker_bridge import execute_plan
+        plan = generate_execution_plan(dry_run=True)
+        orders = execute_plan(plan)
+        return jsonify({"ok": True, "orders": orders, "count": len(orders)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+@app.route("/api/broker/config")
+def api_broker_config():
+    """获取券商配置"""
+    try:
+        from broker_bridge import get_config, get_supported_brokers
+        return jsonify({"ok": True, "config": get_config(), "brokers": get_supported_brokers()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+
+# ===== 风险矩阵 API =====
+@app.route("/api/risk-matrix")
+def api_risk_matrix():
+    """持仓相关性 + VaR + 压力测试"""
+    try:
+        from risk_matrix import compute_risk_matrix
+        result = compute_risk_matrix()
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# ===== LLM 深度分析 API =====
+@app.route("/api/llm/analyze", methods=["POST"])
+def api_llm_analyze():
+    """DeepSeek 语义分析: 提交新闻标题, 返回结构化信号"""
+    try:
+        from research_llm import analyze_news_batch, extract_market_sentiment, map_news_to_market, AVAILABLE
+        if not AVAILABLE:
+            return jsonify({"ok": False, "error": "DeepSeek API key 未配置 (SERENITY_LLM_API_KEY)"}), 503
+        data = request.get_json(silent=True) or {}
+        titles = data.get("titles", [])
+        if not titles:
+            return jsonify({"ok": False, "error": "请提供 titles 数组"}), 400
+        signals = analyze_news_batch(titles)
+        sentiment = extract_market_sentiment(titles)
+        mapping = map_news_to_market(titles)
+        return jsonify({"ok": True, "signals": signals, "sentiment": sentiment, "mapping": mapping})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/llm/status")
+def api_llm_status():
+    """LLM 连接状态"""
+    from research_llm import AVAILABLE, LLM_MODEL
+    return jsonify({"ok": True, "available": AVAILABLE, "model": LLM_MODEL})
+
+# ===== 系统健康 API =====
+@app.route("/api/health")
+def api_health():
+    """系统健康检查 — 数据完整性 + 进程状态 + 数据源"""
+    import subprocess, platform
+    health = {"status": "ok", "checks": {}}
+
+    # DB完整性
+    try:
+        conn = get_conn()
+        tables = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+        conn.close()
+        health["checks"]["db"] = {"ok": True, "tables": tables}
+    except Exception as e:
+        health["checks"]["db"] = {"ok": False, "error": str(e)}
+        health["status"] = "degraded"
+
+    # 看板进程
+    try:
+        pid = os.getpid()
+        health["checks"]["dashboard"] = {"ok": True, "pid": pid, "uptime": "running"}
+    except Exception:
+        health["checks"]["dashboard"] = {"ok": False}
+
+    # 系统资源
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        cpu = psutil.cpu_percent(interval=0.1)
+        health["checks"]["system"] = {"ok": True, "cpu_pct": cpu, "mem_free_pct": round(mem.available/mem.total*100, 1)}
+    except ImportError:
+        health["checks"]["system"] = {"ok": True, "note": "psutil not installed"}
+
+    return jsonify(health)
 
 
 # ===== 数据源状态 API =====
@@ -1605,6 +2317,7 @@ def api_quick_alerts():
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
 
 
 

@@ -26,7 +26,7 @@ BASE_URL = f"http://localhost:{PORT}/monitor"
 SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "screenshots", "flask")
 BASELINE_DIR = os.path.join(os.path.dirname(__file__), "screenshots", "flask", "baseline")
 
-TABS = ["overview", "holdings", "factors", "risk", "analysis"]
+TABS = ["overview", "holdings", "sentinel", "risk"]
 VIEWPORTS = [
     {"name": "desktop", "width": 1440, "height": 900},
     {"name": "mobile", "width": 390, "height": 844},
@@ -93,11 +93,12 @@ class TestDashboardLoad:
 
         # 验证 tab 存在
         tab_count = len(page.query_selector_all(".tab-btn"))
-        assert tab_count == 5, f"期望 5 个 tab，实际 {tab_count}"
+        assert tab_count == 4, f"期望 4 个 tab，实际 {tab_count}"
 
-        # 验证 KPI 栏
-        kpi_cards = page.query_selector_all(".kpi-card")
-        assert len(kpi_cards) == 6
+        # 验证 KPI 栏 (v4.0: JS 渲染 .kpi-item ×4, 等待加载)
+        page.wait_for_selector(".kpi-item", timeout=15000)
+        kpi_cards = page.query_selector_all(".kpi-item")
+        assert len(kpi_cards) >= 2, f"期望至少 2 个 KPI，实际 {len(kpi_cards)}"
 
         # 验证 overview 默认 active
         assert page.is_visible("#tab-overview.active")

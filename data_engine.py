@@ -24,6 +24,18 @@ except ImportError:
 
 # ── 重试装饰器（指数退避 + 抖动） ──────────────────────
 
+def _market_prefix_for_code(code: str) -> Optional[str]:
+    """Return Sina/Tencent market prefix for an A-share code."""
+    info = STOCK_MAP.get(code)
+    if info and info.get("market"):
+        return info["market"]
+
+    if code.startswith(("600", "601", "603", "605", "688")):
+        return "sh"
+    if code.startswith(("000", "001", "002", "003", "300", "301", "159", "399")):
+        return "sz"
+    return None
+
 def retry(max_attempts: int = 3, base_delay: float = 1.0, backoff: float = 2.0):
     """
     通用重试装饰器，捕获所有 Exception。
@@ -62,8 +74,13 @@ def sina_fetch_raw(code_list: list[str]) -> str:
     """
     codes = []
     for c in code_list:
-        mkt = STOCK_MAP[c]["market"]
+        mkt = _market_prefix_for_code(c)
+        if not mkt:
+            log.warning("跳过未知市场代码: %s", c)
+            continue
         codes.append(f"{mkt}{c}")
+    if not codes:
+        return ""
 
     url = SINA_PREFIX + ",".join(codes)
     # A 股数据不走代理
@@ -129,7 +146,9 @@ def fetch_realtime(code_list: Optional[list[str]] = None,
         code_list = ALL_CODES
 
     # Filter out pseudo-codes like 'CASH' that don't exist on Sina
-    code_list = [c for c in code_list if c != "CASH"]
+    code_list = [str(c) for c in code_list if c and str(c) != "CASH"]
+    if not code_list:
+        return []
 
     if source == "akshare":
         return _tencent_fetch_realtime(code_list)
@@ -216,13 +235,15 @@ def _tencent_fetch_realtime(code_list: list[str]) -> list[dict]:
     if METRICS_AVAILABLE:
         API_CALLS.labels(source="tencent").inc()
 
-    # 6开头→sh, 0/3开头→sz
     prefixed = []
     for c in code_list:
-        if c.startswith(("6", "60")):
-            prefixed.append(f"sh{c}")
-        else:
-            prefixed.append(f"sz{c}")
+        mkt = _market_prefix_for_code(c)
+        if not mkt:
+            log.warning("跳过未知市场代码: %s", c)
+            continue
+        prefixed.append(f"{mkt}{c}")
+    if not prefixed:
+        return []
 
     url = f"http://qt.gtimg.cn/q={','.join(prefixed)}"
 

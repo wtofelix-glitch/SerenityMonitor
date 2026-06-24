@@ -1,0 +1,57 @@
+Traceback (most recent call last):
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/__init__.py", line 23, in <module>
+    from . import multiarray
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/multiarray.py", line 10, in <module>
+    from . import overrides
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/overrides.py", line 8, in <module>
+    from numpy._core._multiarray_umath import (
+ImportError: dlopen(/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so, 0x0002): tried: '/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')), '/System/Volumes/Preboot/Cryptexes/OS/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (no such file), '/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/__init__.py", line 114, in <module>
+    from numpy.__config__ import show as show_config
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/__config__.py", line 4, in <module>
+    from numpy._core._multiarray_umath import (
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/__init__.py", line 49, in <module>
+    raise ImportError(msg)
+ImportError: 
+
+IMPORTANT: PLEASE READ THIS FOR ADVICE ON HOW TO SOLVE THIS ISSUE!
+
+Importing the numpy C-extensions failed. This error can happen for
+many reasons, often due to issues with your setup or how NumPy was
+installed.
+
+We have compiled some common reasons and troubleshooting tips at:
+
+    https://numpy.org/devdocs/user/troubleshooting-importerror.html
+
+Please note and check the following:
+
+  * The Python version is: Python3.9 from "/Library/Developer/CommandLineTools/usr/bin/python3"
+  * The NumPy version is: "2.0.2"
+
+and make sure that they are the versions you expect.
+Please carefully study the documentation linked above for further help.
+
+Original error was: dlopen(/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so, 0x0002): tried: '/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64')), '/System/Volumes/Preboot/Cryptexes/OS/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (no such file), '/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/_core/_multiarray_umath.cpython-39-darwin.so' (mach-o file, but is an incompatible architecture (have 'arm64', need 'x86_64'))
+
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/mac/workspace/SerenityMonitor/cli.py", line 68, in <module>
+    from daily_report import generate_daily_report, generate_simple_status
+  File "/Users/mac/workspace/SerenityMonitor/daily_report.py", line 13, in <module>
+    from scorer import score_all
+  File "/Users/mac/workspace/SerenityMonitor/scorer.py", line 11, in <module>
+    from factor_engine import AlphaFactorEngine
+  File "/Users/mac/workspace/SerenityMonitor/factor_engine.py", line 17, in <module>
+    import numpy as np
+  File "/Users/mac/Library/Python/3.9/lib/python/site-packages/numpy/__init__.py", line 119, in <module>
+    raise ImportError(msg) from e
+ImportError: Error importing numpy: you should not try to import numpy from
+        its source directory; please exit the numpy source tree, and relaunch
+        your python interpreter from there.

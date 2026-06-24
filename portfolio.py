@@ -7,7 +7,7 @@ from typing import Optional
 import json
 
 from config import CAPITAL_CONFIG, RISK_CONFIG, STOCK_MAP, STOCK_DETAILS, get_effective_config
-from db import get_conn, add_trade, load_all_stocks, set_active, clear_active, get_price_history
+from db import get_conn, add_trade, load_all_stocks, set_active, clear_active, get_price_history, get_latest_snapshot
 from data_engine import fetch_realtime
 from serenity_logger import get_logger
 
@@ -146,19 +146,36 @@ class PortfolioManager:
         realtime = fetch_realtime(codes) if codes else []
         rt_map = {r["code"]: r for r in realtime} if realtime else {}
 
+        # 预取快照作为备选价格
+        snapshot_prices = {}
+        for code in codes:
+            try:
+                snap = get_latest_snapshot(code)
+                if snap and snap.get("close", 0) > 0:
+                    snapshot_prices[code] = snap["close"]
+            except Exception:
+                pass
+
         holdings_value = 0.0
         details = []
         for p in positions:
             code = p["code"]
             rt = rt_map.get(code, {})
             price = rt.get("price", 0)
+            # 实时价不可用时使用最新快照收盘价
+            if price <= 0 and code in snapshot_prices:
+                price = snapshot_prices[code]
             buy_price = p["buy_price"]
+            is_free_position = (buy_price < 0)  # 前期获利已覆盖成本
             # 从 trades 表计算净持股（扣减已卖出部分）
             shares = self._get_net_shares(code)
             current_value = shares * price
             holdings_value += current_value
-            cost = shares * buy_price if buy_price > 0 else 0
-            profit_pct = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
+            cost = shares * buy_price
+            profit_amount = current_value - cost
+            # 百分比计算: 负成本(免费持仓)用绝对值, 零成本用价格
+            denominator = abs(buy_price) if abs(buy_price) > 0.001 else price
+            profit_pct = ((price - buy_price) / denominator * 100) if denominator > 0.001 else 0
             details.append({
                 "code": code,
                 "name": STOCK_MAP.get(code, {}).get("name", code),
@@ -168,7 +185,8 @@ class PortfolioManager:
                 "cost": round(cost, 2),
                 "current_value": round(current_value, 2),
                 "profit_pct": round(profit_pct, 2),
-                "profit_amount": round(current_value - cost, 2),
+                "profit_amount": round(profit_amount, 2),
+                "is_free": is_free_position,
                 "weight": round(current_value / (cash + holdings_value) * 100, 1) if (cash + holdings_value) > 0 else 0,
             })
 

@@ -16,6 +16,7 @@ def test_security_report_verifies_write_guards_and_warns_without_tokens(monkeypa
     assert report["warn_count"] == 2
     assert report["score"] >= 80
     assert checks["dashboard_public_write_guard"]["status"] == "pass"
+    assert "/api/hermes/*" in checks["dashboard_public_write_guard"]["detail"]
     assert checks["bridge_auth_guard"]["status"] == "pass"
     assert checks["bridge_get_tasks_disabled"]["status"] == "pass"
     assert checks["bridge_cors"]["status"] == "pass"

@@ -131,6 +131,14 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 反思收益补填失败: {e}")
 
+    # ── 5b. 评分权重自动调优 ─────────────────────────
+    step('5b/8 权重自动调优')
+    try:
+        from reflection_engine import apply_reflection_adjustments
+        apply_reflection_adjustments(days=20)
+    except Exception as e:
+        print(f"  ⚠️ 权重调优失败: {e}")
+
     # ── 6. 自动调仓 ──────────────────────────────────
     step('6/8 自动调仓建议')
     plan = {"sells": [], "buys": [], "swaps": [], "summary": ""}

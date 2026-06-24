@@ -1,50 +1,48 @@
-.venv/
-venv/
+# Python
 __pycache__/
 *.pyc
-.DS_Store
-.env
-.env.*
-!.env.example
-.intraday_state.json
-logs/
-reports/
-.adjusted_weights.json
-launchd.log
-serenity.log
-.codex/
-.claude/
-.codegraph/
-.mcp.json
-mnemosyne/
-performance_report.png
-serenity.db
-data/serenity.db
-data/serenity_state.json
-*.db-journal
-*.db-wal
-*.db-shm
+*.pyo
+
+# Cache
 .cache/
 .moat_cache/
-.risk_state/
-.serenity_public_url
-.signal_state.json
-.tier1_reentry_state.json
-investor_reviews_*.json
-data/*_游资评审_*.json
-reviews/
+.serenity_factor_cache.json
+.signal_alert_state.json
+.adjusted_weights.json
+price_alerts.json
+broker_config.json
 
-# Runtime data
-data/
+# DB
+*.db
+!guru_wisdom.db
 
-# npm junk (accidental installs)
-node_modules/
-package*.json
-xcrun_db
-1
-tests/screenshots/
+# Embedded repos
+mnemosyne/
+.codegraph/
 
-# Test & debug artifacts
-.coverage
-.playwright-cli/
+# Logs & output
+logs/
 output/
+*.log
+
+# Node
+node_modules/
+
+# System
+.DS_Store
+.env
+*.swp
+*.swo
+*~
+dist/
+reports/
+.codex/
+.coverage
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+venv/
+xcrun_db
+.venv/
