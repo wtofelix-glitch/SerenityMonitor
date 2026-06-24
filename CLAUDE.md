@@ -23,7 +23,7 @@
 ```
 SerenityMonitor/
 ├── monitoring_dashboard.py  # Flask 看板 (4-Tab: 总览/持仓/哨兵/风控)
-├── scorer.py                # 11维动态评分引擎
+├── scorer.py                # 7维动态评分引擎 (v3.0)
 ├── factor_engine.py         # 14因子计算 (MACD/OBV/MFI/CCI/WQ Alpha)
 ├── signal_engine.py         # 信号生成 (BUY/SELL/HOLD 等)
 ├── portfolio.py             # PortfolioManager: 资金/仓位/止盈止损

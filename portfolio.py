@@ -173,9 +173,15 @@ class PortfolioManager:
             holdings_value += current_value
             cost = shares * buy_price
             profit_amount = current_value - cost
-            # 百分比计算: 负成本(免费持仓)用绝对值, 零成本用价格
-            denominator = abs(buy_price) if abs(buy_price) > 0.001 else price
-            profit_pct = ((price - buy_price) / denominator * 100) if denominator > 0.001 else 0
+            # v3.0: 免费持仓（buy_price<0 即前期获利覆盖）标注为 ∞，不参与止损
+            is_free_position = (buy_price < 0)
+            if is_free_position:
+                profit_pct = 9999.0  # 标记为免费，不触发止损
+                profit_amount = current_value  # 全额利润
+                cost = 0.0
+            else:
+                denominator = buy_price if buy_price > 0.001 else price
+                profit_pct = ((price - buy_price) / denominator * 100) if denominator > 0.001 else 0
             details.append({
                 "code": code,
                 "name": STOCK_MAP.get(code, {}).get("name", code),
@@ -487,6 +493,14 @@ class PortfolioManager:
                 continue
 
             buy_price = p["buy_price"]
+            is_free = buy_price < 0
+
+            # 🛡️ v3.0 免费仓位（前期获利已覆盖成本）不触发止损
+            if is_free:
+                name = STOCK_MAP.get(code, {}).get("name", code)
+                # 免费仓位不做百分比止损，只用移动止盈追踪
+                continue
+
             profit_pct = (price - buy_price) / buy_price
 
             name = STOCK_MAP.get(code, {}).get("name", code)

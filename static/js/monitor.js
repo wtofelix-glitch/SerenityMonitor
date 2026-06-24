@@ -259,14 +259,46 @@ function renderOverview(d) {
   // ── Signal Brief (inline) ───────────────────────────────
   if (buyCount > 0 || riskCount > 0) {
     let chips = '';
-    (sb.buy_candidates || []).slice(0, 3).forEach(b => {
-      chips += `<span class="hero-pill up" style="font-size:11px">${b.name} ${b.score}分</span>`;
+    const scores = d.scores || [];
+    const heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(p => p.code) : []);
+    const buys = scores.filter(s => !heldCodes.has(s.code) && ['STRONG_BUY', 'BUY', 'CAUTION_BUY'].includes(s.signal_action)).slice(0, 4);
+    const risks = (sb.risk_alerts || []).slice(0, 2);
+
+    // 可买卡片：代码 + 评分 + 区间
+    let buyCards = '';
+    buys.forEach(b => {
+      const icon = b.signal_action === 'STRONG_BUY' ? '🟢🟢' : b.signal_action === 'BUY' ? '🟢' : '🟡';
+      const zone = b.zone_label || '';
+      const uziInfo = b.uzi_chain_tier ? ` · ${b.uzi_chain_tier}` : '';
+      buyCards += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-color)">
+        <div><span style="font-weight:600">${b.name}</span> <span style="font-size:10px;color:var(--text-dim)">${b.code}</span>${uziInfo}</div>
+        <div style="text-align:right"><span style="font-weight:700;color:var(--up)">${fmt(b.total_score, 0)}分</span> <span style="font-size:10px;color:var(--text-dim)">${icon} ${zone}</span></div>
+      </div>`;
     });
-    (sb.risk_alerts || []).slice(0, 2).forEach(r => {
-      chips += `<span class="hero-pill down" style="font-size:11px">${r.name} ${r.action}</span>`;
+
+    let riskCards = '';
+    risks.forEach(r => {
+      riskCards += `<span class="hero-pill down" style="font-size:11px">${r.name} ${r.action || ''}</span>`;
     });
-    html += `<div class="card"><div class="card-header"><span class="card-title">信号简报</span><span class="card-subtitle">${buyCount}买 / ${riskCount}险</span></div>
-      <div class="card-body" style="display:flex;flex-wrap:wrap;gap:6px">${chips || '<span class="text-dim">暂无高优先级信号</span>'}</div></div>`;
+
+    html += `<div class="card"><div class="card-header"><span class="card-title">📡 今日信号</span><span class="card-subtitle">${buyCount}买 / ${riskCount}险</span></div>
+      <div class="card-body">${buyCards || '<span class="text-dim">暂无买入候选</span>'}</div></div>`;
+  }
+
+  // ── Position PnL Quick Card ────────────────────────────
+  const posDetails = (d.portfolio_summary || {}).position_details || [];
+  if (posDetails.length > 0) {
+    let posCards = '';
+    posDetails.forEach(p => {
+      const emoji = p.profit_pct >= 0 ? '🟢' : '🔴';
+      const color = p.profit_pct >= 0 ? 'var(--up)' : 'var(--down)';
+      posCards += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-color)">
+        <div>${emoji} <span style="font-weight:600">${p.name || p.code}</span> <span style="font-size:10px;color:var(--text-dim)">${p.code} · ${p.shares}股</span></div>
+        <div style="text-align:right"><span style="font-weight:700;color:${color}">${p.profit_pct >= 0 ? '+' : ''}${fmt(p.profit_pct, 1)}%</span> <span style="font-size:10px;color:${color}">${p.profit_amount >= 0 ? '+' : ''}${fmt(p.profit_amount, 0)}元</span></div>
+      </div>`;
+    });
+    html += `<div class="card"><div class="card-header"><span class="card-title">💰 持仓盈亏</span><span class="card-subtitle">${posDetails.length}只</span></div>
+      <div class="card-body">${posCards}</div></div>`;
   }
 
   // 🆕 v3.0 UZI AI产业链卡位面板

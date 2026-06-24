@@ -25,13 +25,18 @@ STOCK_MAP = {
     "600900": {"name": "长江电力", "market": "sh", "tier": 4},
     "601398": {"name": "工商银行", "market": "sh", "tier": 4},
     "601006": {"name": "大秦铁路", "market": "sh", "tier": 4},
+    # 实盘持仓（全盘扫描推荐）
+    "000938": {"name": "紫光股份", "market": "sz", "tier": 2},
 }
 
 # Tier 1 首选（光通信/AI算力最核心）
 TIER_1_CODES = ["002281", "000988"]
-TIER_2_CODES = ["600141", "603083", "600487"]
+TIER_2_CODES = ["600141", "603083", "600487", "000938"]
 TIER_3_CODES = ["002428", "600460", "603986", "600176"]
 TIER_4_CODES = ["600036", "600585", "600900", "601398", "601006"]  # 防御组合
+
+# 实盘扩展标的（不在原始14只池中但已持仓）
+EXTENDED_CODES = ["000938"]
 
 # 所有标的代码
 ALL_CODES = list(STOCK_MAP.keys())
@@ -152,6 +157,15 @@ STOCK_DETAILS = {
         "reason": "煤炭运输专线，稳定现金流 — 高股息+低波动，红利策略核心",
         "serenity_tag": "railway_dividend",
     },
+    # 实盘持仓（全盘扫描推荐 — v3.0 加入评分池）
+    "000938": {
+        "score": 75,
+        "buy_zone_low": 22.0,
+        "buy_zone_high": 30.0,
+        "target_sell": 38.0,
+        "reason": "AI算力交换机龙头，新华三核心资产 — 数据中心交换机+服务器双主线，AI基建核心受益",
+        "serenity_tag": "ai_switch",
+    },
 
     "600176": {
         "score": 55,
@@ -186,6 +200,8 @@ SERENITY_DIMENSIONS = {
     "603986": {"cpo_alignment": 35, "bottleneck_position": 30, "ai_capex_exposure": 70, "defensive_moat": 60, "momentum_fit": 65},
     "600460": {"cpo_alignment": 25, "bottleneck_position": 40, "ai_capex_exposure": 50, "defensive_moat": 45, "momentum_fit": 60},
     "600176": {"cpo_alignment": 30, "bottleneck_position": 35, "ai_capex_exposure": 55, "defensive_moat": 75, "momentum_fit": 60},
+    # 实盘持仓（全盘扫描推荐）
+    "000938": {"cpo_alignment": 60, "bottleneck_position": 55, "ai_capex_exposure": 80, "defensive_moat": 70, "momentum_fit": 65},
     # 防御组合 — 低CPO/瓶颈暴露，高护城河/动量
     "600036": {"cpo_alignment": 10, "bottleneck_position": 5, "ai_capex_exposure": 5, "defensive_moat": 95, "momentum_fit": 65},
     "600585": {"cpo_alignment": 15, "bottleneck_position": 10, "ai_capex_exposure": 10, "defensive_moat": 80, "momentum_fit": 60},
