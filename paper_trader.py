@@ -349,6 +349,60 @@ class PaperTrader:
             "sell_amount": round(sell_amt, 2),
         }
 
+    # ── 🆕 v3.2 自动纸面交易 ──────────────────────────────
+
+    def auto_execute_signals(self, max_buy: int = 2) -> dict:
+        """基于当前评分自动执行纸面买入（不卖，模拟建仓）
+
+        每次最多买 max_buy 只，每只不超过可用现金的 40%。
+        """
+        from scorer import score_all
+        results = score_all()
+        cash = self.get_paper_cash()
+        bought = 0
+        trades = []
+
+        held_codes = {p["code"] for p in self.get_paper_positions()}
+
+        for r in results:
+            if bought >= max_buy:
+                break
+            code = r["code"]
+            if code in held_codes:
+                continue
+            action = r["signal_action"]
+            score = r["total_score"]
+            price = r["close"]
+
+            if action not in ("STRONG_BUY", "BUY", "CAUTION_BUY") or score < 60:
+                continue
+            if price <= 0:
+                continue
+
+            max_spend = cash * 0.40
+            shares = max(100, int(max_spend / price / 100) * 100)
+            cost = shares * price
+            if cost > cash:
+                continue
+
+            result = self.execute_signal(code, "buy", price, shares,
+                                         reason=f"自动纸面 {action} {score:.0f}分")
+            if result.get("status") == "buy":
+                bought += 1
+                cash -= cost
+                trades.append({
+                    "code": code, "name": r["name"],
+                    "action": action, "shares": shares,
+                    "price": price, "amount": cost,
+                })
+
+        return {
+            "status": "auto_executed",
+            "bought": bought,
+            "remaining_cash": round(self.get_paper_cash(), 2),
+            "trades": trades,
+        }
+
     def reset(self) -> dict:
         """重置纸面账户"""
         conn = get_conn()

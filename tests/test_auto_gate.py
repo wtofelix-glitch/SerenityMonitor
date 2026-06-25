@@ -143,3 +143,96 @@ def test_constants_and_order_state_spellings_are_explicit():
     assert "full_filled" not in auto_gate.ORDER_STATES
     assert "cancelled" in auto_gate.ORDER_STATES
     assert "canceled" not in auto_gate.ORDER_STATES
+
+
+def test_record_real_data_conflict_marks_low_quality(gate_db, monkeypatch):
+    import auto_gate
+    import data_engine
+
+    def fake_fetch(codes, source="sina"):
+        prices = {"tencent": 100.0, "sina": 102.0, "akshare": 0.0}
+        price = prices[source]
+        if price <= 0:
+            return []
+        return [{
+            "code": "002281",
+            "name": "光迅科技",
+            "date": "2026-01-05",
+            "open": price,
+            "price": price,
+            "high": price,
+            "low": price,
+            "volume": 1000,
+            "amount": 100000,
+            "close_yesterday": 99.0,
+        }]
+
+    monkeypatch.setattr(data_engine, "fetch_realtime", fake_fetch)
+
+    result = auto_gate.record_real_data(dry_run=False, codes=["002281"])
+
+    assert result["saved"] == 1
+    assert result["low_quality"][0]["code"] == "002281"
+    conn = gate_db.get_conn()
+    row = conn.execute("SELECT quality_status, source FROM price_history WHERE code='002281'").fetchone()
+    warning = conn.execute("SELECT warning FROM data_quality_log WHERE code='002281'").fetchone()
+    conn.close()
+    assert row["quality_status"] == "low"
+    assert row["source"] == "tencent"
+    assert "source conflict" in warning["warning"]
+
+
+def test_settle_outcome_uses_t1_to_t6_for_stock_and_benchmark(gate_db):
+    import auto_gate
+
+    signal_date = auto_gate.add_trading_days(date.today().isoformat(), -6)
+    entry_date = auto_gate.add_trading_days(signal_date, 1)
+    exit_date = auto_gate.add_trading_days(signal_date, 6)
+    conn = gate_db.get_conn()
+    conn.execute(
+        """
+        INSERT INTO signal_log
+            (code, date, time, action, total_score, price,
+             settlement_status, executable_status, data_quality, adjustment_mode)
+        VALUES ('002281', ?, '14:55', 'BUY', 80, 10,
+                'pending', 'unknown', 'unknown', 'raw')
+        """,
+        (signal_date,),
+    )
+    for code, entry_open, exit_open in [
+        ("002281", 10.0, 11.0),
+        ("000905", 100.0, 102.0),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO price_history
+                (code, date, open, close, high, low, volume, change_pct,
+                 adjustment_mode, quality_status)
+            VALUES (?, ?, ?, ?, ?, ?, 1000, 0, 'raw', 'high')
+            """,
+            (code, entry_date, entry_open, entry_open, entry_open, entry_open),
+        )
+        conn.execute(
+            """
+            INSERT INTO price_history
+                (code, date, open, close, high, low, volume, change_pct,
+                 adjustment_mode, quality_status)
+            VALUES (?, ?, ?, ?, ?, ?, 1000, 0, 'raw', 'high')
+            """,
+            (code, exit_date, exit_open, exit_open, exit_open, exit_open),
+        )
+    conn.commit()
+    conn.close()
+
+    result = auto_gate.settle_pending_signal_outcomes(dry_run=False)
+
+    assert result["settled"] == 1
+    conn = gate_db.get_conn()
+    row = conn.execute("SELECT * FROM signal_log WHERE code='002281'").fetchone()
+    conn.close()
+    assert row["entry_date"] == entry_date
+    assert row["exit_date"] == exit_date
+    assert row["return_5d"] == pytest.approx(10.0)
+    assert row["benchmark_return_5d"] == pytest.approx(2.0)
+    assert row["excess_5d"] == pytest.approx(8.0)
+    assert row["settlement_status"] == "settled"

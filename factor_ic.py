@@ -83,23 +83,17 @@ def _get_score_columns(conn) -> list[str]:
 
 # ── 核心计算 ──────────────────────────────────────────────
 
-def compute_rank_ic(days: int = 30, window: int = 20) -> dict:
+def compute_rank_ic(days: int = 30, window: int = 20, offset_days: int = 0) -> dict:
     """
-    计算最近 *days* 天各维度的 Rank IC。
+    计算各维度 Rank IC。
+
+    参数:
+        days: 回看天数
+        window: 滚动窗口
+        offset_days: 跳过最近 N 天（用于计算历史周IC）
 
     返回:
-        {
-            "latest":   {dim: ic_value, ...},   # 最新一天 IC
-            "mean_ic":  {dim: mean_ic, ...},    # 窗口均值
-            "ic_ir":    {dim: ic_ir, ...},      # IC 稳定性（均值/标准差）
-            "win_rate": {dim: pct, ...},        # IC > 0 的天数占比（%）
-            "n_days":   {dim: int, ...},        # 实际可用天数
-            "rankings": {
-                "best":  [(dim, latest_ic), ...],
-                "worst": [(dim, latest_ic), ...],
-            },
-            "all_ics":  {dim: [ic_values], ...},   # 每日 IC 序列（调试用）
-        }
+        {latest, mean_ic, ic_ir, win_rate, n_days, rankings, all_ics}
     """
     conn = get_conn()
     dimensions = _get_score_columns(conn)
@@ -107,17 +101,14 @@ def compute_rank_ic(days: int = 30, window: int = 20) -> dict:
         conn.close()
         return {"error": "scoring_history 表中未找到评分列"}
 
-    # ── 1. 读取评分数据 ──────────────────────────────────
     score_cols = ", ".join(dimensions)
-    rows = conn.execute(
-        f"""
+    total_rows = (days + offset_days) * 200
+    rows = conn.execute(f"""
         SELECT code, date, {score_cols}
         FROM scoring_history
         ORDER BY date DESC
         LIMIT ?
-        """,
-        (days * 200,),
-    ).fetchall()
+    """, (total_rows,)).fetchall()
 
     score_map: dict[tuple[str, str], dict[str, float]] = {}
     date_set: set[str] = set()
@@ -127,6 +118,14 @@ def compute_rank_ic(days: int = 30, window: int = 20) -> dict:
         score_map[key] = {dim: (d.get(dim) or 0.0) for dim in dimensions}
         date_set.add(d["date"])
     all_dates = sorted(date_set)
+
+    # 🆕 offset_days: 跳过最近 N 个交易日（用于历史周IC）
+    if offset_days > 0 and len(all_dates) > offset_days:
+        # 从最旧到最新截断：去掉最近 offset_days 个日期
+        all_dates = all_dates[:-offset_days]
+        # 再只保留最近 days 个日期
+        if len(all_dates) > days * 3:
+            all_dates = all_dates[-days * 3:]
 
     # ── 2. 读取行情数据 → 构建次日收益率 ──────────────────
     price_rows = conn.execute(

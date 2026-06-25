@@ -229,11 +229,15 @@ def main():
     try:
         from paper_trader import get_paper_trader
         pt = get_paper_trader()
+        auto = pt.auto_execute_signals(max_buy=2)
         mtm = pt.mark_to_market()
-        if mtm.get("status") == "marked":
-            print(f"  ✅ {mtm['positions']}只 ¥{mtm['total_value']:,.0f} ({mtm['total_pnl_pct']:+.1f}%)")
-        else:
-            print(f"  ℹ️ {mtm.get('status', '?')}")
+        lines = []
+        if auto.get("bought", 0) > 0:
+            for t in auto["trades"]:
+                lines.append(f"{t['name']} {t['shares']}股@{t['price']:.2f}")
+        if lines:
+            print(f"  🟢 买入: {', '.join(lines)}")
+        print(f"  📊 净值 ¥{mtm.get('total_value',0):,.0f} ({mtm.get('total_pnl_pct',0):+.1f}%)")
     except Exception as e:
         print(f"  ⚠️ 纸面交易失败: {e}")
 
