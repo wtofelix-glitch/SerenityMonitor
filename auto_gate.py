@@ -470,13 +470,26 @@ def record_real_data(dry_run: bool = False, codes: list[str] | None = None) -> d
     codes = [c for c in (codes or ALL_CODES) if str(c).startswith(("000", "002", "600", "601", "603", "605"))]
     source_payload: dict[str, dict[str, dict[str, Any]]] = {}
     errors: dict[str, str] = {}
-    for source in ("tencent", "sina", "akshare"):
+
+    for source in ("tencent", "sina"):
         try:
             rows = fetch_realtime(codes, source=source)
             source_payload[source] = {r["code"]: r for r in rows}
         except Exception as exc:
             errors[source] = str(exc)
             source_payload[source] = {}
+
+    primary_covered = all(
+        any(code in source_payload.get(source, {}) for source in ("tencent", "sina"))
+        for code in codes
+    )
+    if not primary_covered:
+        try:
+            rows = fetch_realtime(codes, source="akshare")
+            source_payload["akshare"] = {r["code"]: r for r in rows}
+        except Exception as exc:
+            errors["akshare"] = str(exc)
+            source_payload["akshare"] = {}
 
     records = []
     conn = db.get_conn()

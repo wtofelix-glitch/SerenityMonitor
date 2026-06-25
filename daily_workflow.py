@@ -65,6 +65,52 @@ def run_real_data_gate_step(dry_run: bool = False) -> dict:
     return {"skipped": False, "record": record, "settle": settle, "gate": gate}
 
 
+def send_real_data_audit_push(result: dict, today: str | None = None) -> bool:
+    """Push a compact audit trail for real data recording and gate state."""
+    if result.get("skipped"):
+        return False
+
+    import notifier
+
+    today = today or date.today().isoformat()
+    record = result.get("record") or {}
+    settle = result.get("settle") or {}
+    gate = result.get("gate") or {}
+    required = gate.get("required_sample_count") or 50
+    state = gate.get("state") or "PAPER"
+    compliance = gate.get("compliance_status") or "not_reported"
+
+    lines = [
+        f"## Serenity 真实数据审计 {today}",
+        "",
+        f"- 记录: {record.get('saved', 0)}/{record.get('count', 0)}",
+        f"- 低置信: {len(record.get('low_quality') or [])}",
+        f"- 缺失: {len(record.get('missing') or [])}",
+        f"- 结算: {settle.get('settled', 0)}",
+        f"- 待结算: {settle.get('pending', 0)}",
+        f"- expired_unsettled: {settle.get('expired_unsettled', 0)}",
+        f"- non_executable: {settle.get('non_executable', 0)}",
+        "",
+        f"- 闸门: {state}",
+        f"- 样本: {gate.get('sample_count', 0)}/{required}",
+        f"- 胜率: {(gate.get('win_rate') or 0) * 100:.1f}%",
+        f"- Wilson 下界: {(gate.get('wilson_lower') or 0) * 100:.1f}%",
+        f"- 合规: {compliance}",
+    ]
+    errors = record.get("source_errors") or {}
+    if errors:
+        lines.extend(["", "- 数据源 warning: " + ", ".join(sorted(errors.keys()))])
+
+    summary = f"{state} {gate.get('sample_count', 0)}/{required} {compliance}"
+    notifier.send_message(
+        f"Serenity 真实数据审计 {today}",
+        "\n".join(lines),
+        content_type="markdown",
+        summary=summary,
+    )
+    return True
+
+
 def _stage_pending_confirm_orders(plan: dict) -> int:
     """Stage generated orders into order_state_log without submitting trades."""
     import auto_gate
@@ -122,6 +168,7 @@ def main():
     do_execute = '--execute' in sys.argv
     dry_run = '--dry-run' in sys.argv
     today = date.today().isoformat()
+    real_data_gate_result = {"skipped": True, "record": {}, "settle": {}, "gate": {}}
 
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
     step('0/8 参考数据拉取')
@@ -138,7 +185,7 @@ def main():
     # ── 0b. 真实数据记录 + 自动闸门 ───────────────────────
     step('0b/8 真实数据记录 + 自动闸门')
     try:
-        run_real_data_gate_step(dry_run=dry_run)
+        real_data_gate_result = run_real_data_gate_step(dry_run=dry_run)
     except Exception as e:
         print(f"  ⚠️ 真实数据/自动闸门失败: {e}")
 
@@ -358,6 +405,12 @@ def main():
 
     # ── 推送（含净值 + 行业简报 + 绩效摘要）─────────────────
     if do_push:
+        try:
+            if send_real_data_audit_push(real_data_gate_result, today=today):
+                print("\n📡 真实数据审计已推送")
+        except Exception as e:
+            print(f"\n⚠️ 真实数据审计推送失败: {e}")
+
         push_lines = []
         # 净值概览
         if nav_summary_lines:

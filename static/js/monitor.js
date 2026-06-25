@@ -91,9 +91,23 @@ function buildAutoGateCard(d) {
   const passed = !!gate.gate_passed;
   const tone = state === 'SEMI_AUTO' ? 'up' : (state === 'LOCKED' ? 'down' : 'gold');
   const reasons = gate.reasons || [];
+  const complianceFlow = gate.compliance_flow || [];
+  const qualityWarnings = gate.data_quality_warnings || [];
+  const requiredSamples = gate.required_sample_count || 50;
   const reasonHtml = reasons.length
     ? `<div class="gate-reasons">${reasons.map(r => `<span>${r}</span>`).join('')}</div>`
     : '<div class="gate-reasons"><span>等待更多可执行样本</span></div>';
+  const complianceHtml = complianceFlow.length
+    ? `<div class="compliance-flow">${complianceFlow.map(step => `
+        <div class="compliance-step ${step.done ? 'done' : ''} ${step.active ? 'active' : ''}">
+          <span class="compliance-dot"></span>
+          <span>${step.label || step.id}</span>
+        </div>`).join('')}</div>`
+    : '';
+  const qualityHtml = qualityWarnings.length
+    ? `<div class="gate-quality">${qualityWarnings.map(w => `
+        <span>${w.code || '—'} ${w.quality_status || 'unknown'} · ${w.warning || '数据质量 warning'}</span>`).join('')}</div>`
+    : '';
   return `
   <div class="card gate-card">
     <div class="card-header">
@@ -102,17 +116,19 @@ function buildAutoGateCard(d) {
     </div>
     <div class="card-body">
       <div class="gate-grid">
-        <div><span>样本</span><b>${gate.sample_count || 0}/50</b></div>
+        <div><span>样本</span><b>${gate.sample_count || 0}/${requiredSamples}</b></div>
         <div><span>胜率</span><b class="${passed ? 'up' : 'gold'}">${fmt((gate.win_rate || 0) * 100, 1)}%</b></div>
         <div><span>Wilson</span><b class="${(gate.wilson_lower || 0) >= 0.5 ? 'up' : 'gold'}">${fmt((gate.wilson_lower || 0) * 100, 1)}%</b></div>
         <div><span>超额胜率</span><b>${fmt((gate.excess_win_rate || 0) * 100, 1)}%</b></div>
       </div>
+      ${complianceHtml}
       <div class="gate-footer">
         <span>合规 ${gate.compliance_status || 'not_reported'}</span>
         <span>上限 ${gate.max_state || 'MANUAL'}</span>
         <span>${gate.consecutive_loss_ok === false ? '连续亏损触发' : '连续亏损正常'}</span>
       </div>
       ${reasonHtml}
+      ${qualityHtml}
     </div>
   </div>`;
 }
@@ -290,68 +306,94 @@ function renderOverview(d) {
   // ── Position Quick View ─────────────────────────────────
   html += buildPositionQuickView(d);
 
-  // ── Signal Brief (inline) ───────────────────────────────
-  if (buyCount > 0 || riskCount > 0) {
-    let chips = '';
-    const scores = d.scores || [];
-    const heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(p => p.code) : []);
-    const buys = scores.filter(s => !heldCodes.has(s.code) && ['STRONG_BUY', 'BUY', 'CAUTION_BUY'].includes(s.signal_action)).slice(0, 4);
-    const risks = (sb.risk_alerts || []).slice(0, 2);
+  // ── 🆕 v3.5 Premium Signal Cards — 玻璃拟态 + 渐变 ──────
+  const scores = d.scores || [];
+  const heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(p => p.code) : []);
+  const buys = scores.filter(s => !heldCodes.has(s.code) && ['STRONG_BUY', 'BUY','CAUTION_BUY'].includes(s.signal_action)).slice(0, 4);
 
-    // 可买卡片：代码 + 评分 + 区间
-    let buyCards = '';
-    buys.forEach(b => {
-      const icon = b.signal_action === 'STRONG_BUY' ? '🟢🟢' : b.signal_action === 'BUY' ? '🟢' : '🟡';
-      const zone = b.zone_label || '';
-      const uziInfo = b.uzi_chain_tier ? ` · ${b.uzi_chain_tier}` : '';
-      buyCards += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-color)">
-        <div><span style="font-weight:600">${b.name}</span> <span style="font-size:10px;color:var(--text-dim)">${b.code}</span>${uziInfo}</div>
-        <div style="text-align:right"><span style="font-weight:700;color:var(--up)">${fmt(b.total_score, 0)}分</span> <span style="font-size:10px;color:var(--text-dim)">${icon} ${zone}</span></div>
+  if (buys.length > 0) {
+    let signalCards = '';
+    buys.forEach((b, i) => {
+      const signalTier = b.signal_action === 'STRONG_BUY' ? 3 : b.signal_action === 'BUY' ? 2 : 1;
+      const gradient = ['rgba(255,214,10,0.06)', 'rgba(255,159,10,0.06)', 'rgba(255,69,58,0.06)'][signalTier-1];
+      const border = ['rgba(255,214,10,0.18)', 'rgba(255,159,10,0.16)', 'rgba(255,69,58,0.16)'][signalTier-1];
+      const accentColor = ['#FFD60A', '#FF9F0A', '#FF453A'][signalTier-1];
+      const label = {STRONG_BUY:'强力买入', BUY:'买入', CAUTION_BUY:'谨慎买入'}[b.signal_action];
+      const uziInfo = b.uzi_chain_tier ? `<span class="sig-meta-badge">${b.uzi_chain_tier}</span>` : '';
+      const targetText = b.target_sell && b.target_sell > 0 ? '¥' + fmt(b.target_sell, 0) : '—';
+      signalCards += `
+      <div class="signal-premium-card" style="background:linear-gradient(135deg, ${gradient}, rgba(0,0,0,0.3));border-color:${border}">
+        <div class="sig-premium-rank">#${i+1}</div>
+        <div class="sig-premium-body">
+          <div class="sig-premium-header">
+            <span class="sig-name">${b.name}</span>
+            <span class="sig-code">${b.code}</span>
+            ${uziInfo}
+          </div>
+          <div class="sig-premium-footer">
+            <span class="sig-score-ring" style="color:${accentColor}">${fmt(b.total_score, 0)}<span class="sig-score-unit">分</span></span>
+            <span class="sig-label-pill" style="background:${accentColor}22;color:${accentColor}">${label}</span>
+            <span class="sig-zone">${b.zone_label || ''}</span>
+          </div>
+        </div>
+        <div class="sig-premium-tail">
+          <div class="sig-price">${b.close > 0 ? '¥'+fmt(b.close, 2) : '—'}</div>
+          <div class="sig-target">目标 ${targetText}</div>
+        </div>
       </div>`;
     });
-
-    let riskCards = '';
-    risks.forEach(r => {
-      riskCards += `<span class="hero-pill down" style="font-size:11px">${r.name} ${r.action || ''}</span>`;
-    });
-
-    html += `<div class="card"><div class="card-header"><span class="card-title">📡 今日信号</span><span class="card-subtitle">${buyCount}买 / ${riskCount}险</span></div>
-      <div class="card-body">${buyCards || '<span class="text-dim">暂无买入候选</span>'}</div></div>`;
+    html += `<div class="card signal-group-card">
+      <div class="card-header"><span class="card-title">📡 今日信号</span><span class="card-subtitle">${buys.length}个候选</span></div>
+      <div class="card-body">${signalCards}</div></div>`;
   }
 
-  // ── Position PnL Quick Card ────────────────────────────
+  // ── 🆕 v3.5 Premium PnL Cards — 渐变盈亏 ──────────────────
   const posDetails = (d.portfolio_summary || {}).position_details || [];
   if (posDetails.length > 0) {
-    let posCards = '';
+    let pnlCards = '';
     posDetails.forEach(p => {
-      const emoji = p.profit_pct >= 0 ? '🟢' : '🔴';
-      const color = p.profit_pct >= 0 ? 'var(--up)' : 'var(--down)';
-      posCards += `<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-color)">
-        <div>${emoji} <span style="font-weight:600">${p.name || p.code}</span> <span style="font-size:10px;color:var(--text-dim)">${p.code} · ${p.shares}股</span></div>
-        <div style="text-align:right"><span style="font-weight:700;color:${color}">${p.profit_pct >= 0 ? '+' : ''}${fmt(p.profit_pct, 1)}%</span> <span style="font-size:10px;color:${color}">${p.profit_amount >= 0 ? '+' : ''}${fmt(p.profit_amount, 0)}元</span></div>
+      const pnlPct = p.profit_pct || 0;
+      const isUp = pnlPct >= 0;
+      // 盈利=金暖渐变, 亏损=冷灰渐变
+      const bgGrad = isUp
+        ? `linear-gradient(135deg, rgba(255,214,10,0.08), rgba(255,159,10,0.04))`
+        : `linear-gradient(135deg, rgba(255,69,58,0.06), rgba(0,0,0,0.2))`;
+      const borderClr = isUp ? 'rgba(255,214,10,0.2)' : 'rgba(255,69,58,0.15)';
+      pnlCards += `
+      <div class="pnl-premium-card" style="background:${bgGrad};border-color:${borderClr}">
+        <div class="pnl-premium-left">
+          <div class="pnl-emoji">${isUp ? '📈' : '📉'}</div>
+          <div>
+            <div class="pnl-name">${p.name || p.code}</div>
+            <div class="pnl-meta">${p.code} · ${p.shares}股 · 成本${fmt(p.buy_price, 2)}</div>
+          </div>
+        </div>
+        <div class="pnl-premium-right">
+          <div class="pnl-pct ${isUp ? 'up' : 'down'}">${isUp ? '+' : ''}${fmt(pnlPct, 1)}%</div>
+          <div class="pnl-amount ${isUp ? 'up' : 'down'}">${p.profit_amount >= 0 ? '+' : ''}¥${fmt(Math.abs(p.profit_amount || 0), 0)}</div>
+          <div class="pnl-weight">仓位 ${p.weight || 0}%</div>
+        </div>
       </div>`;
     });
-    html += `<div class="card"><div class="card-header"><span class="card-title">💰 持仓盈亏</span><span class="card-subtitle">${posDetails.length}只</span></div>
-      <div class="card-body">${posCards}</div></div>`;
+    html += `<div class="card">
+      <div class="card-header"><span class="card-title">💰 持仓盈亏</span><span class="card-subtitle">${posDetails.length}只</span></div>
+      <div class="card-body">${pnlCards}</div></div>`;
   }
 
-  // 🆕 v3.0 UZI AI产业链卡位面板
+  // 🆕 v3.5 紧凑面板：UZI + IC 一行摘要
   if (d.uzi_chain && d.uzi_chain.length) {
     const inChain = d.uzi_chain.filter(u => u.is_ai_chain);
-    html += `<div class="card" style="margin-top:10px"><div class="card-header"><span class="card-title">🔗 AI产业链卡位</span><span class="card-subtitle">${inChain.length}链上 · ${d.uzi_chain.length - inChain.length}链外</span></div>
-      <div class="card-body" style="display:flex;flex-wrap:wrap;gap:4px;font-size:11px">`;
-    d.uzi_chain.slice(0, 10).forEach(u => {
-      const cls = u.is_ai_chain ? `chip-up` : `chip-flat`;
-      const traps = u.trap_count > 0 ? ` ⚠️${u.trap_count}` : '';
-      html += `<span class="hero-pill ${cls}" style="font-size:10px" title="${u.summary_line}">${u.name} · ${u.evidence_grade}${traps}</span>`;
-    });
-    html += `</div></div>`;
+    const topChain = d.uzi_chain.filter(u => u.is_ai_chain).slice(0, 3);
+    html += `<div class="compact-info-bar">
+      <span>🔗 AI链 ${inChain.length}只</span>
+      <span class="compact-dim">${topChain.map(u => u.name).join(' · ')}</span>
+    </div>`;
   }
-
-  // 🆕 v3.0 IC 维度分析面板
   if (d.ic_analysis && d.ic_analysis.summary) {
-    html += `<div class="card" style="margin-top:10px"><div class="card-header"><span class="card-title">🧬 维度IC分析</span><span class="card-subtitle">${d.ic_analysis.window}</span></div>
-      <div class="card-body" style="font-size:12px;color:var(--text-dim)">${d.ic_analysis.summary}</div></div>`;
+    html += `<div class="compact-info-bar" style="margin-top:2px">
+      <span>🧬 IC</span>
+      <span class="compact-dim" style="font-size:11px">${d.ic_analysis.summary}</span>
+    </div>`;
   }
 
   $('tab-overview').innerHTML = html;

@@ -316,6 +316,8 @@ def _load_db_scores():
             "signal_action": details.get("signal_action", "HOLD"),
             "signal_confidence": 0.5,
             "zone_label": details.get("zone_label", ""),
+            "close": details.get("price", 0),
+            "target_sell": details.get("target_sell", 0),
             "uzi_score": uzi_score or 0,
             "uzi_rating": uzi.get("rating", "none"),
             "uzi_verdict": uzi.get("verdict", "Skip"),
@@ -605,6 +607,53 @@ def _get_target_tracker():
     except Exception:
         return {}
 
+def _build_compliance_flow(status: str) -> list[dict]:
+    """Three-state compliance flow for the dashboard."""
+    status = status or "not_reported"
+    steps = [
+        ("not_reported", "未报告"),
+        ("reported_pending_review", "待核查"),
+        ("approved", "核查通过"),
+    ]
+    if status == "rejected":
+        steps[-1] = ("rejected", "已拒绝")
+
+    current = next((idx for idx, (sid, _) in enumerate(steps) if sid == status), 0)
+    return [
+        {
+            "id": sid,
+            "label": label,
+            "done": idx < current or (status == "approved" and sid == "approved"),
+            "active": sid == status,
+        }
+        for idx, (sid, label) in enumerate(steps)
+    ]
+
+
+def _get_recent_data_quality_warnings(limit: int = 3) -> list[dict]:
+    """Recent data warnings relevant to gate trust."""
+    try:
+        import db
+        warnings = []
+        for row in db.get_latest_data_quality_logs(limit=10):
+            has_warning = bool(row.get("warning"))
+            low_quality = row.get("quality_status") not in ("high", "ok", None, "")
+            if not has_warning and not low_quality:
+                continue
+            warnings.append({
+                "code": row.get("code"),
+                "date": row.get("date"),
+                "quality_status": row.get("quality_status", "unknown"),
+                "warning": row.get("warning", ""),
+                "conflict_pct": row.get("conflict_pct", 0),
+            })
+            if len(warnings) >= limit:
+                break
+        return warnings
+    except Exception:
+        return []
+
+
 def _get_auto_gate_card():
     """Auto-trade gate summary for dashboard display."""
     try:
@@ -612,20 +661,24 @@ def _get_auto_gate_card():
         gate = get_latest_gate_result()
         reasons = gate.get("reasons", [])
         explain = gate.get("explain", {})
+        compliance_status = gate.get("compliance_status", "not_reported")
         return {
             "state": gate.get("state", "PAPER"),
             "gate_passed": bool(gate.get("gate_passed")),
             "strategy_version": gate.get("strategy_version", ""),
             "sample_count": gate.get("sample_count", 0),
+            "required_sample_count": gate.get("required_sample_count", 50),
             "win_rate": gate.get("win_rate", 0),
             "wilson_lower": gate.get("wilson_lower", 0),
             "avg_return_5d": gate.get("avg_return_5d", 0),
             "excess_win_rate": gate.get("excess_win_rate", 0),
             "avg_excess_5d": gate.get("avg_excess_5d", 0),
             "consecutive_loss_ok": bool(gate.get("consecutive_loss_ok", True)),
-            "compliance_status": gate.get("compliance_status", "not_reported"),
+            "compliance_status": compliance_status,
+            "compliance_flow": _build_compliance_flow(compliance_status),
             "max_state": gate.get("max_state", "MANUAL"),
             "reasons": reasons[:4] if isinstance(reasons, list) else [],
+            "data_quality_warnings": _get_recent_data_quality_warnings(),
             "latest_10": (explain or {}).get("latest_10", [])[:10] if isinstance(explain, dict) else [],
         }
     except Exception as e:
@@ -633,11 +686,14 @@ def _get_auto_gate_card():
             "state": "PAPER",
             "gate_passed": False,
             "sample_count": 0,
+            "required_sample_count": 50,
             "win_rate": 0,
             "wilson_lower": 0,
             "compliance_status": "not_reported",
+            "compliance_flow": _build_compliance_flow("not_reported"),
             "max_state": "MANUAL",
             "reasons": [str(e)[:120]],
+            "data_quality_warnings": [],
         }
 
 def _get_quantdinger_consensus():

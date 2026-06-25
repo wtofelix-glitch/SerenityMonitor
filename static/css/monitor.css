@@ -355,6 +355,69 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .gate-reasons span {
   white-space: normal;
 }
+.gate-quality {
+  display: grid;
+  gap: 4px;
+  margin-top: var(--space-2);
+}
+.gate-quality span {
+  display: block;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255,159,10,0.08);
+  color: var(--accent-orange);
+  font-size: var(--text-caption2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compliance-flow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.compliance-step {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.035);
+  border: 0.5px solid rgba(255,255,255,0.05);
+}
+.compliance-step span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-caption2);
+  color: var(--text-tertiary);
+}
+.compliance-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.16);
+  flex: 0 0 auto;
+}
+.compliance-step.done {
+  border-color: rgba(52,199,89,0.24);
+}
+.compliance-step.done .compliance-dot {
+  background: var(--down);
+  box-shadow: 0 0 7px rgba(52,199,89,0.35);
+}
+.compliance-step.active {
+  border-color: rgba(255,214,10,0.28);
+  background: rgba(255,214,10,0.07);
+}
+.compliance-step.active .compliance-dot {
+  background: var(--gold);
+  box-shadow: 0 0 7px rgba(255,214,10,0.35);
+}
 
 /* ═══════════════════════════════════════════════════════
    HERO — 核心数字大屏
@@ -920,4 +983,113 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 /* ── 系统级: 减少动画 (偏好设置) ──────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ═══════════════════════════════════════════════════════
+   v3.5 PREMIUM SIGNAL CARDS — 玻璃拟态 + 渐变
+   ═══════════════════════════════════════════════════════ */
+.signal-group-card {
+  border-color: rgba(255,214,10,0.1);
+  background: linear-gradient(180deg, rgba(255,214,10,0.03), rgba(0,0,0,0.15));
+}
+.signal-premium-card {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-4); margin-bottom: var(--space-2);
+  border: 0.5px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: transform 0.15s ease;
+  min-height: 60px;
+}
+.signal-premium-card:last-child { margin-bottom: 0; }
+.signal-premium-card:active { transform: scale(0.98); }
+.sig-premium-rank {
+  font-family: var(--font-num); font-size: var(--text-title3); font-weight: 800;
+  color: var(--text-quaternary); flex-shrink: 0; width: 28px; text-align: center;
+  line-height: 1;
+}
+.sig-premium-body { flex: 1; min-width: 0; }
+.sig-premium-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.sig-name { font-size: var(--text-subhead); font-weight: 700; color: var(--text-primary); }
+.sig-code { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); }
+.sig-meta-badge {
+  font-size: 9px; padding: 2px 6px; border-radius: 4px;
+  background: rgba(10,132,255,0.12); color: var(--accent-blue);
+  font-weight: 600; white-space: nowrap;
+}
+.sig-premium-footer { display: flex; align-items: center; gap: var(--space-2); }
+.sig-score-ring {
+  font-family: var(--font-num); font-size: var(--text-title1); font-weight: 800;
+  line-height: 1; color: var(--gold);
+}
+.sig-score-unit { font-size: var(--text-caption2); font-weight: 600; color: var(--text-tertiary); margin-left: 1px; }
+.sig-label-pill {
+  font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 6px;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.sig-zone {
+  font-size: var(--text-caption2); color: var(--text-tertiary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sig-premium-tail {
+  flex-shrink: 0; text-align: right; min-width: 64px;
+}
+.sig-price {
+  font-family: var(--font-num); font-size: var(--text-footnote); font-weight: 700;
+  color: var(--text-primary);
+}
+.sig-target {
+  font-size: 10px; color: var(--text-tertiary); margin-top: 2px;
+  font-family: var(--font-num);
+}
+
+/* ═══════════════════════════════════════════════════════
+   v3.5 PREMIUM PnL CARDS — 渐变盈亏
+   ═══════════════════════════════════════════════════════ */
+.pnl-premium-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--space-4); margin-bottom: var(--space-2);
+  border: 0.5px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: transform 0.12s ease;
+}
+.pnl-premium-card:last-child { margin-bottom: 0; }
+.pnl-premium-card:active { transform: scale(0.985); }
+.pnl-premium-left { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.pnl-emoji { font-size: 22px; flex-shrink: 0; opacity: 0.85; }
+.pnl-name { font-size: var(--text-subhead); font-weight: 700; color: var(--text-primary); }
+.pnl-meta { font-size: var(--text-caption2); color: var(--text-tertiary); margin-top: 2px; }
+.pnl-premium-right { text-align: right; flex-shrink: 0; }
+.pnl-pct {
+  font-family: var(--font-num); font-size: var(--text-title2); font-weight: 800;
+  line-height: 1.1; letter-spacing: -0.5px;
+}
+.pnl-amount {
+  font-family: var(--font-num); font-size: var(--text-footnote); font-weight: 700;
+  margin-top: 2px;
+}
+.pnl-weight { font-size: var(--text-caption2); color: var(--text-tertiary); margin-top: 2px; }
+
+/* ═══════════════════════════════════════════════════════
+   v3.5 COMPACT INFO BAR — UZI+IC 一行摘要
+   ═══════════════════════════════════════════════════════ */
+.compact-info-bar {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: rgba(255,255,255,0.02);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption1); color: var(--text-secondary);
+  margin-bottom: 2px; overflow: hidden;
+}
+.compact-info-bar span:first-child {
+  font-weight: 700; flex-shrink: 0; font-size: var(--text-caption2);
+  color: var(--text-tertiary);
+  min-width: 56px;
+}
+.compact-dim {
+  color: var(--text-secondary); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }

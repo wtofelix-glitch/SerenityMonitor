@@ -23,16 +23,48 @@ for f in "$LOGFILE" "$TUNNEL_LOG"; do
 done
 
 # ---- 启动看板 ----
+dashboard_pid() {
+    lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | head -1 || true
+}
+
+dashboard_route_ok() {
+    curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/auto-gate" >/dev/null 2>&1
+}
+
+restart_dashboard() {
+    local pid
+    pid=$(dashboard_pid)
+    if [ -n "$pid" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 看板路由过旧，重启 PID $pid..." >> "$LOGFILE"
+        kill "$pid" 2>/dev/null || true
+        sleep 2
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+}
+
 start_dashboard() {
-    if ! lsof -i :$PORT -sTCP:LISTEN > /dev/null 2>&1; then
+    local pid
+    pid=$(dashboard_pid)
+    if [ -z "$pid" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') 看板未运行，启动中..." >> "$LOGFILE"
         cd "$SCRIPT_DIR"
         nohup "$HERMES_PYTHON" monitoring_dashboard.py >> "$SCRIPT_DIR/logs/serenity.log" 2>&1 &
         disown  # 彻底脱离父进程，防止 cron/terminal 退出时 SIGTERM
         echo "$(date '+%Y-%m-%d %H:%M:%S') 看板已启动 (PID $!)" >> "$LOGFILE"
         sleep 3
+    elif dashboard_route_ok; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 看板运行中 ✓ (PID $pid)" >> "$LOGFILE"
     else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') 看板运行中 ✓" >> "$LOGFILE"
+        restart_dashboard
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 看板重新启动中..." >> "$LOGFILE"
+        cd "$SCRIPT_DIR"
+        nohup "$HERMES_PYTHON" monitoring_dashboard.py >> "$SCRIPT_DIR/logs/serenity.log" 2>&1 &
+        disown
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 看板已重启 (PID $!)" >> "$LOGFILE"
+        sleep 3
     fi
 }
 

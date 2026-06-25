@@ -182,6 +182,72 @@ def test_record_real_data_conflict_marks_low_quality(gate_db, monkeypatch):
     assert "source conflict" in warning["warning"]
 
 
+def test_record_real_data_skips_akshare_when_primary_sources_cover_codes(gate_db, monkeypatch):
+    import auto_gate
+    import data_engine
+
+    calls = []
+
+    def fake_fetch(codes, source="sina"):
+        calls.append(source)
+        if source == "akshare":
+            raise AssertionError("akshare should stay quiet when Tencent/Sina cover the codes")
+        price = 100.0 if source == "tencent" else 100.2
+        return [{
+            "code": "002281",
+            "name": "光迅科技",
+            "date": "2026-01-05",
+            "open": price,
+            "price": price,
+            "high": price,
+            "low": price,
+            "volume": 1000,
+            "amount": 100000,
+            "close_yesterday": 99.0,
+        }]
+
+    monkeypatch.setattr(data_engine, "fetch_realtime", fake_fetch)
+
+    result = auto_gate.record_real_data(dry_run=True, codes=["002281"])
+
+    assert calls == ["tencent", "sina"]
+    assert result["source_errors"] == {}
+    assert result["missing"] == []
+
+
+def test_record_real_data_uses_akshare_when_primary_sources_fail(gate_db, monkeypatch):
+    import auto_gate
+    import data_engine
+
+    calls = []
+
+    def fake_fetch(codes, source="sina"):
+        calls.append(source)
+        if source in ("tencent", "sina"):
+            raise RuntimeError(f"{source} down")
+        return [{
+            "code": "002281",
+            "name": "光迅科技",
+            "date": "2026-01-05",
+            "open": 99.0,
+            "price": 99.0,
+            "high": 99.0,
+            "low": 99.0,
+            "volume": 1000,
+            "amount": 100000,
+            "close_yesterday": 98.0,
+        }]
+
+    monkeypatch.setattr(data_engine, "fetch_realtime", fake_fetch)
+
+    result = auto_gate.record_real_data(dry_run=True, codes=["002281"])
+
+    assert calls == ["tencent", "sina", "akshare"]
+    assert result["source_errors"]["tencent"] == "tencent down"
+    assert result["source_errors"]["sina"] == "sina down"
+    assert result["missing"] == []
+
+
 def test_settle_outcome_uses_t1_to_t6_for_stock_and_benchmark(gate_db):
     import auto_gate
 
