@@ -489,3 +489,235 @@ def format_recommendation_report(rec: dict) -> str:
 
     lines.append("\n" + "=" * 60)
     return "\n".join(lines)
+
+
+# ============================================================
+# 🆕 v4.0 IC 衰减曲线 — 多水平 Rank IC
+# ============================================================
+
+
+def compute_ic_decay(days_back: int = 60) -> dict:
+    """
+    计算每个评分维度在多个持有期水平上的 Rank IC。
+
+    水平: 1, 3, 5, 10, 20 天（持有期）
+
+    返回:
+        {
+            "decay_curves": {
+                "total_score": {
+                    "horizons": [1, 3, 5, 10, 20],
+                    "mean_ic":   [0.05, 0.04, ...],
+                    "std_ic":    [...],
+                    "win_rate":  [...],
+                    "n_samples": [...],
+                },
+                ...
+            },
+            "staying_power": [
+                {"dim": "total_score", "ic_20d": 0.04, "verdict": "staying_power", ...},
+                ...
+            ],
+            "summary": str,
+        }
+    """
+    conn = get_conn()
+    dimensions = _get_score_columns(conn)
+    if not dimensions:
+        conn.close()
+        return {"error": "scoring_history 表中未找到评分列"}
+
+    # ── 1. 读取评分数据 ──────────────────────────────
+    score_cols = ", ".join(dimensions)
+    rows = conn.execute(
+        f"""
+        SELECT code, date, {score_cols}
+        FROM scoring_history
+        ORDER BY date DESC
+        LIMIT ?
+        """,
+        (days_back * 200,),
+    ).fetchall()
+
+    score_map: dict[tuple[str, str], dict[str, float]] = {}
+    date_set: set[str] = set()
+    for r in rows:
+        d = dict(r)
+        key = (d["code"], d["date"])
+        score_map[key] = {dim: (d.get(dim) or 0.0) for dim in dimensions}
+        date_set.add(d["date"])
+    all_dates = sorted(date_set)
+
+    # ── 2. 读取行情数据 → 构建多水平远期收益率 ─────────
+    price_rows = conn.execute(
+        "SELECT code, date, close FROM price_history ORDER BY code, date"
+    ).fetchall()
+    conn.close()
+
+    # 只取有评分数据的代码，避免 sh 指数类标的稀释截面
+    scored_codes = {k[0] for k in score_map}
+    prices_by_code: dict[str, list[tuple[str, float]]] = {}
+    for r in price_rows:
+        if r["code"] in scored_codes:
+            prices_by_code.setdefault(r["code"], []).append((r["date"], r["close"]))
+
+    # return_map: {(code, date, horizon_days): forward_return}
+    # horizon forward return = price_{t+horizon} / price_t - 1
+    return_map: dict[tuple[str, str, int], float] = {}
+    horizons = [1, 3, 5, 10, 20]
+    for code, entries in prices_by_code.items():
+        for i, (dt, close_t) in enumerate(entries):
+            for h in horizons:
+                j = min(i + h, len(entries) - 1)
+                _, close_fwd = entries[j]
+                if close_t > 1e-8 and j > i:
+                    fwd_ret = close_fwd / close_t - 1.0
+                    if abs(fwd_ret) < 0.50:  # 过滤极端值
+                        return_map[(code, dt, h)] = float(fwd_ret)
+
+    # ── 3. 每日截面 IC（每个水平）─────────────────────
+    decay: dict[str, dict] = {}
+    for dim in dimensions:
+        decay[dim] = {h: [] for h in horizons}
+
+    for date in all_dates:
+        for h in horizons:
+            valid: list[tuple[float, float]] = []
+            for code in prices_by_code:
+                score_key = (code, date)
+                ret_key = (code, date, h)
+                if score_key not in score_map or ret_key not in return_map:
+                    continue
+                s = score_map[score_key][dim]
+                r = return_map[ret_key]
+                if abs(r) > 0.50:
+                    continue
+                valid.append((s, r))
+            if len(valid) < 5:
+                continue
+
+            s_arr = np.array([v[0] for v in valid])
+            r_arr = np.array([v[1] for v in valid])
+            ic = _spearmanr(s_arr, r_arr)
+            decay[dim][h].append(ic)
+
+    # ── 4. 聚合 ─────────────────────────────────────
+    result: dict = {"decay_curves": {}, "staying_power": []}
+
+    for dim in dimensions:
+        curve: dict = {"horizons": horizons, "mean_ic": [], "std_ic": [],
+                       "win_rate": [], "n_samples": []}
+        for h in horizons:
+            ics = decay[dim][h]
+            curve["n_samples"].append(len(ics))
+            if len(ics) < 3:
+                curve["mean_ic"].append(0.0)
+                curve["std_ic"].append(0.0)
+                curve["win_rate"].append(0.0)
+                continue
+            arr = np.array(ics)
+            curve["mean_ic"].append(round(float(np.mean(arr)), 4))
+            curve["std_ic"].append(round(float(np.std(arr, ddof=1)), 4))
+            curve["win_rate"].append(round(float(np.sum(arr > 0)) / len(arr), 4))
+
+        result["decay_curves"][dim] = curve
+
+        # 判断"持久力"
+        ic_1d = curve["mean_ic"][0]
+        ic_20d = curve["mean_ic"][-1]
+        ic_3d = curve["mean_ic"][1] if len(curve["mean_ic"]) > 1 else 0.0
+
+        if ic_20d > 0.03:
+            verdict = "staying_power"
+        elif ic_3d < 0.02 and abs(ic_1d - ic_20d) > 0.02:
+            verdict = "fast_decay"
+        else:
+            verdict = "neutral"
+
+        result["staying_power"].append({
+            "dim": dim,
+            "label": DIMENSION_LABELS.get(dim, dim),
+            "ic_1d": round(ic_1d, 4),
+            "ic_3d": round(ic_3d, 4),
+            "ic_20d": round(ic_20d, 4),
+            "decay_rate": round(ic_1d - ic_20d, 4),
+            "verdict": verdict,
+        })
+
+    # 排序：持久力维度在前
+    result["staying_power"].sort(
+        key=lambda x: (x["verdict"] != "staying_power", -x["ic_20d"])
+    )
+
+    # 摘要
+    sp = [s for s in result["staying_power"] if s["verdict"] == "staying_power"]
+    fd = [s for s in result["staying_power"] if s["verdict"] == "fast_decay"]
+    parts = []
+    if sp:
+        parts.append(f"持久力: {', '.join(s['label'] for s in sp)}")
+    if fd:
+        parts.append(f"快速衰减: {', '.join(s['label'] for s in fd)}")
+    parts.append(f"分析周期: {days_back}天, 水平: {', '.join(str(h) + 'd' for h in horizons)}")
+    result["summary"] = " | ".join(parts)
+
+    return result
+
+
+def format_ic_decay_report(result: dict) -> str:
+    """格式化 IC 衰减报告"""
+    if "error" in result:
+        return f"\n{result['error']}\n"
+
+    lines: list[str] = []
+    lines.append("=" * 72)
+    lines.append("  IC 衰减曲线报告（Rank IC vs 持有期）")
+    lines.append("=" * 72)
+    lines.append(f"\n{result['summary']}\n")
+
+    # 表头
+    lines.append(f"{'维度':<16} {'1d IC':>7} {'3d IC':>7} {'5d IC':>7} "
+                 f"{'10d IC':>8} {'20d IC':>8} {'衰减':>7} {'判定':<10}")
+    lines.append("-" * 72)
+
+    for sp in result["staying_power"]:
+        dim = sp["dim"]
+        curve = result["decay_curves"].get(dim, {})
+        mean_ic = curve.get("mean_ic", [])
+        decay_rate = sp["decay_rate"]
+        verdict = sp["verdict"]
+
+        ic_strs = []
+        for val in mean_ic:
+            if abs(val) < 0.00005:
+                ic_strs.append(f"{'0.00':>7}")
+            else:
+                ic_strs.append(f"{val:>+7.2f}")
+
+        verdict_label = {"staying_power": "持久力", "fast_decay": "快速衰减",
+                         "neutral": "中性"}.get(verdict, verdict)
+
+        line = (f"{DIMENSION_LABELS.get(dim, dim):<16} "
+                + " ".join(f"{s}" for s in ic_strs)
+                + f" {decay_rate:>+7.2f} {verdict_label:<10}")
+        lines.append(line)
+
+    lines.append("-" * 72)
+
+    # 持久力维度详情
+    staying = [s for s in result["staying_power"] if s["verdict"] == "staying_power"]
+    if staying:
+        lines.append("\n  [持久力维度 — IC > 0.03 at 20d]")
+        for s in staying:
+            lines.append(f"    {s['label']:<12} 1d={s['ic_1d']:+.2f}  "
+                         f"20d={s['ic_20d']:+.2f}  衰减={s['decay_rate']:+.2f}")
+
+    # 快速衰减维度详情
+    fast = [s for s in result["staying_power"] if s["verdict"] == "fast_decay"]
+    if fast:
+        lines.append("\n  [快速衰减维度 — IC < 0.02 at 3d]")
+        for s in fast:
+            lines.append(f"    {s['label']:<12} 1d={s['ic_1d']:+.2f}  "
+                         f"3d={s['ic_3d']:+.2f}  20d={s['ic_20d']:+.2f}")
+
+    lines.append("\n" + "=" * 72)
+    return "\n".join(lines)

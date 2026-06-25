@@ -354,6 +354,25 @@ def get_dynamic_stop_loss(code: str, buy_price: float) -> dict:
         }
 
     mult = RISK_CONFIG["atr_stop_multiplier"]
+
+    # 🆕 v3.1 按标的波动率自适应 ATR 倍数
+    # 高波动标的(日波动>4%)用更宽止损防止被正常波动震出
+    # 低波动标的(日波动<2%)用更紧止损保护利润
+    import numpy as np
+    try:
+        rows = get_price_history(code, 60)
+        if len(rows) >= 20:
+            closes = [r["close"] for r in rows]
+            returns = np.diff(closes) / closes[:-1]
+            vol_60d = np.std(returns) * 100  # 日波动百分比
+            # 自适应公式: 高波动→倍率降低(更宽止损), 低波动→倍率提高(更紧止损)
+            # 基线: 日波动3% → ATR倍率1.5; 日波动6% → 倍率0.75; 日波动1% → 倍率3.0
+            adaptive_mult = mult * (3.0 / max(vol_60d, 1.0))
+            adaptive_mult = max(0.5, min(3.0, adaptive_mult))
+            mult = round(adaptive_mult, 2)
+    except Exception:
+        pass
+
     # atr_pct 已经是百分比格式（如 2.5 表示 2.5%），转为小数负值
     dynamic_pct = -(atr_pct * mult / 100)
 

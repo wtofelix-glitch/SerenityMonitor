@@ -291,6 +291,54 @@ class RiskManager:
             }
         return None
 
+    def check_portfolio_sector_concentration(self, holdings: list[dict]) -> list[dict]:
+        """🆕 v3.1 组合级行业集中度告警
+
+        规则:
+        - 同一行业 ≥ 3 只持仓 → 🔴 高风险
+        - 光通信 ≥ 2 只且总权重 > 40% → 🔴 过度集中
+        """
+        from collections import Counter
+        sector_counts = Counter()
+        sector_codes = {}
+        for h in holdings:
+            h_code = h["code"] if isinstance(h, dict) else h
+            sector = SECTOR_MAP.get(h_code, "其他")
+            sector_counts[sector] += 1
+            sector_codes.setdefault(sector, []).append(h_code)
+
+        alerts = []
+        for sector, count in sector_counts.items():
+            if count >= 3:
+                alerts.append({
+                    "sector": sector, "count": count,
+                    "codes": sector_codes[sector],
+                    "risk_level": "🔴 HIGH",
+                    "message": f"{sector} {count}只持仓，过度集中",
+                })
+            elif count >= 2 and sector == "光通信":
+                try:
+                    from portfolio import get_portfolio
+                    pf = get_portfolio()
+                    pv = pf.get_portfolio_value()
+                    total_val = pv["total_value"]
+                    sector_val = sum(
+                        p.get("current_value", 0)
+                        for p in pv.get("positions", [])
+                        if p["code"] in sector_codes[sector]
+                    )
+                    weight = sector_val / total_val * 100 if total_val > 0 else 0
+                    if weight > 40:
+                        alerts.append({
+                            "sector": sector, "count": count,
+                            "codes": sector_codes[sector],
+                            "risk_level": "🔴 HIGH",
+                            "message": f"光通信权重 {weight:.0f}% > 40%, CPO 回调风险集中",
+                        })
+                except Exception:
+                    pass
+        return alerts
+
     def check_position_limits(self, holdings: list[dict], new_amount: float,
                               total_value: float) -> list[dict]:
         """

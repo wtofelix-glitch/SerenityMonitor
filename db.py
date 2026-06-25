@@ -359,6 +359,25 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_suggestions_new_created ON serenity_suggestions(is_new, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_journal_code_action_date ON trading_journal(code, action, date)",
     ]
+
+    # 🆕 v3.1 signal_to_trade 映射表
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS signal_to_trade (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            signal_action TEXT NOT NULL,
+            signal_score REAL,
+            trade_id INTEGER REFERENCES trades(id),
+            trade_action TEXT,
+            matched INTEGER DEFAULT 0,
+            match_date TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_stt_code_date ON signal_to_trade(code, signal_date);
+    """)
+
     for sql in _index_sqls:
         conn.execute(sql)
     conn.commit()
@@ -952,6 +971,206 @@ def update_signal_outcome(signal_id: int, field: str, value: float):
     conn.execute(f"UPDATE signal_log SET {field}=? WHERE id=?", (value, signal_id))
     conn.commit()
     conn.close()
+
+
+# ── 🆕 v3.1 信号→实盘闭环 ────────────────────────────────────
+
+def link_signal_to_trade(code: str, trade_action: str, trade_id: int,
+                         trade_date: str, trade_price: float) -> int | None:
+    """将一笔实盘交易关联到最近的同方向信号
+
+    匹配逻辑:
+    - BUY 交易 → 匹配最近 3 天内的 BUY/STRONG_BUY/CAUTION_BUY 信号
+    - SELL 交易 → 匹配最近 3 天内的 SELL/STOP_LOSS 信号
+    - 优先匹配同一天的信号
+
+    Returns: signal_log.id if matched, None otherwise
+    """
+    from datetime import date as dt, timedelta
+
+    if trade_action.upper() == "BUY":
+        signal_types = ("STRONG_BUY", "BUY", "CAUTION_BUY")
+    elif trade_action.upper() == "SELL":
+        signal_types = ("SELL", "STOP_LOSS", "WATCH", "WEAK_HOLD")
+    else:
+        return None
+
+    since = (dt.fromisoformat(trade_date) - timedelta(days=3)).isoformat()
+    conn = get_conn()
+
+    try:
+        # 同天信号优先
+        placeholders = ",".join("?" * len(signal_types))
+        row = conn.execute(
+            f"SELECT id, action, total_score FROM signal_log "
+            f"WHERE code=? AND date=? AND action IN ({placeholders}) "
+            f"ORDER BY total_score DESC LIMIT 1",
+            (code, trade_date, *signal_types),
+        ).fetchone()
+
+        if not row:
+            # 放宽到 3 天内
+            row = conn.execute(
+                f"SELECT id, action, total_score FROM signal_log "
+                f"WHERE code=? AND date>=? AND date<=? AND action IN ({placeholders}) "
+                f"ORDER BY date DESC, total_score DESC LIMIT 1",
+                (code, since, trade_date, *signal_types),
+            ).fetchone()
+
+        if row:
+            # 写入映射
+            try:
+                conn.execute(
+                    "INSERT INTO signal_to_trade "
+                    "(signal_date, code, signal_action, signal_score, "
+                    "trade_id, trade_action, matched, match_date, notes) "
+                    "VALUES (?,?,?,?,?,?,1,?,?)",
+                    (trade_date, code, row["action"], row["total_score"],
+                     trade_id, trade_action, dt.today().isoformat(),
+                     "auto-matched"),
+                )
+                conn.commit()
+            except Exception:
+                pass  # 幂等忽略
+            return row["id"]
+    finally:
+        conn.close()
+    return None
+
+
+def get_signal_execution_rate(days: int = 30) -> dict:
+    """统计近 N 天信号执行率
+
+    Returns:
+        {by_action: {STRONG_BUY: {signals, executed, rate}, ...},
+         overall: {total, executed, rate}}
+    """
+    from datetime import date as dt, timedelta
+
+    since = (dt.today() - timedelta(days=days)).isoformat()
+    conn = get_conn()
+
+    by_action = {}
+    try:
+        # 总信号数
+        rows = conn.execute(
+            "SELECT action, COUNT(*) as cnt FROM signal_log "
+            "WHERE date>=? AND action IN ('STRONG_BUY','BUY','SELL','STOP_LOSS')"
+            "GROUP BY action", (since,)
+        ).fetchall()
+
+        for r in rows:
+            action = r[0]
+            total = r[1]
+            # 匹配数
+            matched = conn.execute(
+                "SELECT COUNT(*) FROM signal_to_trade stt "
+                "JOIN signal_log sl ON stt.signal_date=sl.date AND stt.code=sl.code "
+                "AND stt.signal_action=sl.action "
+                "WHERE sl.action=? AND sl.date>=?",
+                (action, since),
+            ).fetchone()[0]
+
+            rate = round(matched / total * 100, 1) if total > 0 else 0
+            by_action[action] = {
+                "signals": total, "executed": matched, "rate_pct": rate,
+            }
+
+        total = sum(v["signals"] for v in by_action.values())
+        executed = sum(v["executed"] for v in by_action.values())
+        overall = {
+            "total": total, "executed": executed,
+            "rate_pct": round(executed / total * 100, 1) if total > 0 else 0,
+        }
+    finally:
+        conn.close()
+
+    return {"by_action": by_action, "overall": overall, "window": f"{days}d"}
+
+
+def classify_trade_discipline(days: int = 60) -> dict:
+    """分析交易纪律：每笔 trade 是否按信号执行
+
+    Returns:
+        {disciplined: count, impulsive: count, no_signal: count,
+         trades: [{code, action, date, signal_action, score, is_disciplined}]}
+    """
+    from datetime import date as dt, timedelta
+
+    since = (dt.today() - timedelta(days=days)).isoformat()
+    conn = get_conn()
+
+    disciplined = 0
+    impulsive = 0
+    no_signal = 0
+    trades = []
+
+    try:
+        rows = conn.execute(
+            "SELECT id, code, action, date, price, note FROM trades "
+            "WHERE code!='CASH' AND date>=? ORDER BY date DESC",
+            (since,),
+        ).fetchall()
+
+        for t in rows:
+            matched = conn.execute(
+                "SELECT signal_action, signal_score FROM signal_to_trade "
+                "WHERE trade_id=? AND matched=1", (t["id"],)
+            ).fetchone()
+
+            if matched:
+                disciplined += 1
+                tag = "disciplined"
+                sig_act = matched[0]
+                sig_score = matched[1]
+            else:
+                # 看是否同方向信号存在但未匹配
+                if t["action"].upper() == "BUY":
+                    signal_types = ("STRONG_BUY", "BUY", "CAUTION_BUY")
+                else:
+                    signal_types = ("SELL", "STOP_LOSS", "WATCH")
+
+                ph = ",".join("?" * len(signal_types))
+                sig = conn.execute(
+                    f"SELECT action FROM signal_log WHERE code=? AND date=? "
+                    f"AND action IN ({ph}) LIMIT 1",
+                    (t["code"], t["date"], *signal_types),
+                ).fetchone()
+
+                if sig:
+                    impulsive += 1
+                    tag = "impulsive"
+                    sig_act = f"IGNORED {sig[0]}"
+                    sig_score = 0
+                else:
+                    no_signal += 1
+                    tag = "no_signal"
+                    sig_act = "NONE"
+                    sig_score = 0
+
+            trades.append({
+                "code": t["code"],
+                "action": t["action"],
+                "date": t["date"],
+                "signal_action": sig_act,
+                "score": sig_score,
+                "is_disciplined": tag == "disciplined",
+                "tag": tag,
+            })
+    finally:
+        conn.close()
+
+    return {
+        "disciplined": disciplined,
+        "impulsive": impulsive,
+        "no_signal": no_signal,
+        "total": disciplined + impulsive + no_signal,
+        "discipline_rate": round(
+            disciplined / max(1, disciplined + impulsive) * 100, 1
+        ),
+        "trades": trades[:30],
+        "window": f"{days}d",
+    }
 
 
 def refresh_signal_performance():
