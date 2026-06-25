@@ -22,6 +22,11 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    def _ensure_column(table: str, column: str, definition: str):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
     # 股票配置表
     cur.execute("""
         CREATE TABLE IF NOT EXISTS stocks (
@@ -162,9 +167,20 @@ def init_db():
             date TEXT NOT NULL,
             open REAL, close REAL, high REAL, low REAL,
             volume REAL, change_pct REAL,
+            source TEXT DEFAULT '',
+            adjustment_mode TEXT DEFAULT 'raw',
+            quality_status TEXT DEFAULT 'unknown',
+            recorded_at TEXT DEFAULT (datetime('now', 'localtime')),
             UNIQUE(code, date)
         )
     """)
+    for col, definition in [
+        ("source", "TEXT DEFAULT ''"),
+        ("adjustment_mode", "TEXT DEFAULT 'raw'"),
+        ("quality_status", "TEXT DEFAULT 'unknown'"),
+        ("recorded_at", "TEXT DEFAULT ''"),
+    ]:
+        _ensure_column("price_history", col, definition)
 
     # Serenity 推文建议表（ticker / chinese_idea）
     cur.execute("""
@@ -229,10 +245,41 @@ def init_db():
             outcome_3d REAL DEFAULT NULL,   -- 3日后涨跌幅(%)
             outcome_5d REAL DEFAULT NULL,   -- 5日后涨跌幅(%)
             outcome_10d REAL DEFAULT NULL,  -- 10日后涨跌幅(%)
+            strategy_version TEXT DEFAULT '',
+            entry_date TEXT DEFAULT '',
+            entry_open REAL DEFAULT NULL,
+            exit_date TEXT DEFAULT '',
+            exit_open REAL DEFAULT NULL,
+            return_5d REAL DEFAULT NULL,
+            benchmark_code TEXT DEFAULT '',
+            benchmark_return_5d REAL DEFAULT NULL,
+            excess_5d REAL DEFAULT NULL,
+            settlement_status TEXT DEFAULT 'pending',
+            executable_status TEXT DEFAULT 'unknown',
+            non_executable_reason TEXT DEFAULT '',
+            data_quality TEXT DEFAULT 'unknown',
+            adjustment_mode TEXT DEFAULT 'raw',
             details TEXT DEFAULT '{}',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
+    for col, definition in [
+        ("strategy_version", "TEXT DEFAULT ''"),
+        ("entry_date", "TEXT DEFAULT ''"),
+        ("entry_open", "REAL DEFAULT NULL"),
+        ("exit_date", "TEXT DEFAULT ''"),
+        ("exit_open", "REAL DEFAULT NULL"),
+        ("return_5d", "REAL DEFAULT NULL"),
+        ("benchmark_code", "TEXT DEFAULT ''"),
+        ("benchmark_return_5d", "REAL DEFAULT NULL"),
+        ("excess_5d", "REAL DEFAULT NULL"),
+        ("settlement_status", "TEXT DEFAULT 'pending'"),
+        ("executable_status", "TEXT DEFAULT 'unknown'"),
+        ("non_executable_reason", "TEXT DEFAULT ''"),
+        ("data_quality", "TEXT DEFAULT 'unknown'"),
+        ("adjustment_mode", "TEXT DEFAULT 'raw'"),
+    ]:
+        _ensure_column("signal_log", col, definition)
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_signal_log_code_date
         ON signal_log(code, date)
@@ -312,6 +359,119 @@ def init_db():
             error_msg TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS data_quality_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            date TEXT NOT NULL,
+            source_values_json TEXT DEFAULT '{}',
+            chosen_source TEXT DEFAULT '',
+            quality_status TEXT NOT NULL DEFAULT 'unknown',
+            conflict_pct REAL DEFAULT 0,
+            warning TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_data_quality_code_date
+        ON data_quality_log(code, date)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS auto_trade_gate (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            strategy_version TEXT NOT NULL DEFAULT '',
+            gate_status TEXT NOT NULL DEFAULT 'blocked',
+            state TEXT NOT NULL DEFAULT 'PAPER',
+            sample_count INTEGER DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            wilson_lower REAL DEFAULT 0,
+            avg_return_5d REAL DEFAULT 0,
+            excess_win_rate REAL DEFAULT 0,
+            avg_excess_5d REAL DEFAULT 0,
+            consecutive_loss_ok INTEGER DEFAULT 0,
+            compliance_status TEXT DEFAULT 'not_reported',
+            max_state TEXT DEFAULT 'MANUAL',
+            reasons_json TEXT DEFAULT '[]',
+            explain_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_auto_trade_gate_created
+        ON auto_trade_gate(created_at)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL UNIQUE,
+            major INTEGER NOT NULL DEFAULT 1,
+            minor INTEGER NOT NULL DEFAULT 0,
+            config_hash TEXT NOT NULL UNIQUE,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            reset_reason TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_strategy_versions_active
+        ON strategy_versions(is_active, created_at)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS order_state_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            action TEXT NOT NULL,
+            state TEXT NOT NULL,
+            previous_state TEXT DEFAULT '',
+            price REAL DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            amount REAL DEFAULT 0,
+            reason TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_state_order
+        ON order_state_log(order_id, created_at)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS compliance_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            status TEXT NOT NULL DEFAULT 'not_reported',
+            broker TEXT DEFAULT '',
+            reported_at TEXT DEFAULT '',
+            approved_at TEXT DEFAULT '',
+            rejected_at TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        INSERT OR IGNORE INTO compliance_status (id, status)
+        VALUES (1, 'not_reported')
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nav_history (
+            date TEXT PRIMARY KEY,
+            total_value REAL DEFAULT 0,
+            cash REAL DEFAULT 0,
+            holdings_value REAL DEFAULT 0,
+            profit_pct REAL DEFAULT 0,
+            positions_json TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
     # 🆕 权重辩论日志表（conviction_engine 持久化）
