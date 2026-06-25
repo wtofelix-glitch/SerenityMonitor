@@ -271,6 +271,11 @@ def _tencent_fetch_realtime(code_list: list[str]) -> list[dict]:
                 continue
             price = float(fields[3])
             close_y = float(fields[4])
+            # 腾讯字段：38=PE(TTM), 43=振幅, 44=总市值(亿), 45=流通市值(亿), 46=PB
+            pe_ttm = float(fields[38]) if len(fields) > 38 and fields[38] else 0
+            total_mv = float(fields[44]) * 1e8 if len(fields) > 44 and fields[44] else 0  # 亿→元
+            float_mv = float(fields[45]) * 1e8 if len(fields) > 45 and fields[45] else 0
+            pb = float(fields[46]) if len(fields) > 46 and fields[46] else 0
             # 成交额：腾讯单位是万元，转元
             amount_raw = float(fields[37]) if fields[37] else 0
             results.append({
@@ -283,6 +288,10 @@ def _tencent_fetch_realtime(code_list: list[str]) -> list[dict]:
                 "low": float(fields[34]) if fields[34] else 0,
                 "volume": int(float(fields[6])) if fields[6] else 0,
                 "amount": amount_raw * 10000,  # 万元→元
+                "pe_ttm": pe_ttm,
+                "pb": pb,
+                "total_mv": total_mv,
+                "float_mv": float_mv,
                 "buy1": float(fields[9]) if fields[9] else 0,
                 "sell1": float(fields[19]) if fields[19] else 0,
                 "date": datetime.now().strftime("%Y-%m-%d"),
