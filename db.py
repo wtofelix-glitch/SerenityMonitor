@@ -544,6 +544,84 @@ def init_db():
     conn.close()
 
 
+def set_compliance_status(status: str, broker: str = "", notes: str = "") -> dict:
+    """Update broker/compliance workflow state.
+
+    Valid statuses:
+    - not_reported
+    - reported_pending_review
+    - approved
+    - rejected
+    """
+    allowed = {"not_reported", "reported_pending_review", "approved", "rejected"}
+    if status not in allowed:
+        raise ValueError(f"Invalid compliance status: {status}")
+    init_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    reported_at = now if status == "reported_pending_review" else ""
+    approved_at = now if status == "approved" else ""
+    rejected_at = now if status == "rejected" else ""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM compliance_status WHERE id=1").fetchone()
+    if row:
+        reported_at = reported_at or row["reported_at"]
+        approved_at = approved_at or row["approved_at"]
+        rejected_at = rejected_at or row["rejected_at"]
+        broker = broker or row["broker"]
+        notes = notes or row["notes"]
+    conn.execute(
+        """
+        INSERT INTO compliance_status
+            (id, status, broker, reported_at, approved_at, rejected_at, notes, updated_at)
+        VALUES (1, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(id) DO UPDATE SET
+            status=excluded.status,
+            broker=excluded.broker,
+            reported_at=excluded.reported_at,
+            approved_at=excluded.approved_at,
+            rejected_at=excluded.rejected_at,
+            notes=excluded.notes,
+            updated_at=excluded.updated_at
+        """,
+        (status, broker, reported_at, approved_at, rejected_at, notes),
+    )
+    conn.commit()
+    out = conn.execute("SELECT * FROM compliance_status WHERE id=1").fetchone()
+    conn.close()
+    return dict(out)
+
+
+def get_compliance_status() -> dict:
+    init_db()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM compliance_status WHERE id=1").fetchone()
+    conn.close()
+    return dict(row) if row else {"status": "not_reported"}
+
+
+def get_latest_data_quality_logs(limit: int = 10) -> list[dict]:
+    init_db()
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT * FROM data_quality_log
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_auto_trade_gate() -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM auto_trade_gate ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 # ---------- 股票配置 CRUD ----------
 
 def load_all_stocks() -> list[dict]:
@@ -1013,17 +1091,26 @@ def save_price_history(code: str, data: dict):
     """保存每日行情"""
     conn = get_conn()
     conn.execute("""
-        INSERT INTO price_history (code, date, open, close, high, low, volume, change_pct)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO price_history
+            (code, date, open, close, high, low, volume, change_pct,
+             source, adjustment_mode, quality_status, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
         ON CONFLICT(code, date) DO UPDATE SET
             open=excluded.open, close=excluded.close,
             high=excluded.high, low=excluded.low,
-            volume=excluded.volume, change_pct=excluded.change_pct
+            volume=excluded.volume, change_pct=excluded.change_pct,
+            source=excluded.source,
+            adjustment_mode=excluded.adjustment_mode,
+            quality_status=excluded.quality_status,
+            recorded_at=excluded.recorded_at
     """, (
         data.get("code"), data.get("date"),
         data.get("open"), data.get("close"),
         data.get("high"), data.get("low"),
-        data.get("volume"), data.get("change_pct")
+        data.get("volume"), data.get("change_pct"),
+        data.get("source", ""),
+        data.get("adjustment_mode", "raw"),
+        data.get("quality_status", "unknown"),
     ))
     conn.commit()
     conn.close()
@@ -1090,6 +1177,11 @@ def save_signal_log(code: str, action: str, total_score: float, price: float,
     from datetime import date, datetime
     today = date.today().isoformat()
     now = datetime.now().strftime("%H:%M")
+    try:
+        from auto_gate import ensure_current_strategy_version
+        strategy_version = ensure_current_strategy_version()["version"]
+    except Exception:
+        strategy_version = ""
     conn = get_conn()
 
     # 确保唯一约束（先删后建，防 "IF NOT EXISTS 跳过非唯一索引" 问题）
@@ -1102,8 +1194,10 @@ def save_signal_log(code: str, action: str, total_score: float, price: float,
     conn.execute("""
         INSERT INTO signal_log (code, date, time, action, total_score, price,
             is_holding, tech_score, serenity_score, alpha_score,
-            fundamental_score, details)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            fundamental_score, strategy_version, settlement_status,
+            executable_status, data_quality, adjustment_mode, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
+                'unknown', 'unknown', 'raw', ?)
         ON CONFLICT(code, date) DO UPDATE SET
             time=excluded.time,
             action=excluded.action,
@@ -1114,10 +1208,15 @@ def save_signal_log(code: str, action: str, total_score: float, price: float,
             serenity_score=excluded.serenity_score,
             alpha_score=excluded.alpha_score,
             fundamental_score=excluded.fundamental_score,
+            strategy_version=excluded.strategy_version,
+            settlement_status='pending',
+            executable_status='unknown',
+            data_quality='unknown',
+            adjustment_mode='raw',
             details=excluded.details
     """, (code, today, now, action, total_score, price,
           int(is_holding), tech_score, serenity_score, alpha_score,
-          fundamental_score, str(details or {})))
+          fundamental_score, strategy_version, str(details or {})))
     conn.commit()
     conn.close()
 

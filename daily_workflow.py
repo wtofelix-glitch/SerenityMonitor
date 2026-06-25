@@ -224,6 +224,19 @@ def main():
     except Exception as e:
         print(f"  ⚠️ T1 回补检查失败: {e}")
 
+    # ── 7a. 纸面交易日终结算 ────────────────────────────
+    step('7a/8 纸面交易结算')
+    try:
+        from paper_trader import get_paper_trader
+        pt = get_paper_trader()
+        mtm = pt.mark_to_market()
+        if mtm.get("status") == "marked":
+            print(f"  ✅ {mtm['positions']}只 ¥{mtm['total_value']:,.0f} ({mtm['total_pnl_pct']:+.1f}%)")
+        else:
+            print(f"  ℹ️ {mtm.get('status', '?')}")
+    except Exception as e:
+        print(f"  ⚠️ 纸面交易失败: {e}")
+
     # ── 7b. 净值简报 ───────────────────────────────────
     nav_summary_lines = []
     try:

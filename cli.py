@@ -46,6 +46,10 @@ Serenity Monitor CLI
      python3 cli.py alpha-gate             # Alpha Gate 选股候选研究闸门
      python3 cli.py security-check         # 🔐 写接口安全体检
      python3 cli.py auto                  # 🆕 自动调仓计划
+     python3 cli.py record-real-data --dry-run  # 🆕 真实行情记录/信号结算
+     python3 cli.py auto-gate --explain    # 🆕 自动交易统计闸门
+     python3 cli.py strategy-version       # 🆕 当前冻结策略版本
+     python3 cli.py compliance-status      # 🆕 合规报告状态
      python3 cli.py auto-exec             # 🚀 强制信号执行（含重试）
      python3 cli.py auto-stats            # 📊 信号执行统计
      python3 cli.py auto-premarket        # ⏰ 盘前简报推送
@@ -203,6 +207,132 @@ def cmd_rebalance():
 
     # 8. 输出
     print(format_rebalance_plan(plan))
+
+
+def cmd_record_real_data():
+    """Record real market data and settle mature signal outcomes."""
+    from auto_gate import format_record_report, record_real_data, settle_pending_signal_outcomes
+
+    dry_run = "--dry-run" in sys.argv
+    data_result = record_real_data(dry_run=dry_run)
+    print(format_record_report(data_result))
+    settle_result = settle_pending_signal_outcomes(dry_run=dry_run)
+    print(
+        "settle outcomes "
+        f"dry_run={settle_result['dry_run']} "
+        f"settled={settle_result['settled']} "
+        f"pending={settle_result['pending']} "
+        f"expired_unsettled={settle_result['expired_unsettled']} "
+        f"non_executable={settle_result['non_executable']}"
+    )
+
+
+def cmd_auto_gate():
+    """Evaluate the real-data auto-trading gate."""
+    from auto_gate import evaluate_auto_gate, format_gate_report
+
+    result = evaluate_auto_gate(explain="--explain" in sys.argv)
+    print(format_gate_report(result))
+
+
+def cmd_strategy_version():
+    """Show the active frozen strategy version and hash inputs."""
+    import json
+    from auto_gate import default_strategy_config, ensure_current_strategy_version
+
+    row = ensure_current_strategy_version()
+    if "--json" in sys.argv:
+        print(json.dumps({
+            "version": row["version"],
+            "major": row["major"],
+            "minor": row["minor"],
+            "config_hash": row["config_hash"],
+            "config": default_strategy_config(),
+        }, ensure_ascii=False, indent=2))
+        return
+    print(f"strategy_version: {row['version']}")
+    print(f"major.minor: {row['major']}.{row['minor']}")
+    print(f"config_hash: {row['config_hash']}")
+    print("hash includes consecutive loss rule, benchmark/outcome rules, filters, data priority, risk rules, and universe")
+
+
+def cmd_compliance_status():
+    """Show or update compliance workflow status."""
+    from auto_gate import COMPLIANCE_STATUSES
+    from db import get_compliance_status, set_compliance_status
+
+    args = sys.argv[2:]
+    if args and args[0] == "set":
+        if len(args) < 2:
+            print("usage: python3 cli.py compliance-status set <not_reported|reported_pending_review|approved|rejected> [notes]")
+            return
+        row = set_compliance_status(args[1], notes=" ".join(args[2:]))
+    elif args and args[0] in COMPLIANCE_STATUSES:
+        row = set_compliance_status(args[0], notes=" ".join(args[1:]))
+    else:
+        row = get_compliance_status()
+    print(f"compliance_status: {row.get('status', 'not_reported')}")
+    print(f"broker: {row.get('broker', '') or '-'}")
+    print(f"reported_at: {row.get('reported_at', '') or '-'}")
+    print(f"approved_at: {row.get('approved_at', '') or '-'}")
+    print(f"rejected_at: {row.get('rejected_at', '') or '-'}")
+    print(f"notes: {row.get('notes', '') or '-'}")
+
+
+def _stage_order_states(plan: dict) -> int:
+    from auto_gate import create_order_state
+
+    count = 0
+    for group in ("sells", "buys"):
+        for order in plan.get(group, []):
+            code = order["code"]
+            action = "SELL" if group == "sells" else "BUY"
+            price = order.get("price") or (
+                order.get("estimated_proceeds", 0) / max(order.get("shares", 1), 1)
+            )
+            amount = order.get("amount") or order.get("estimated_proceeds", 0)
+            key = f"{plan['date']}:{action}:{code}:{order.get('shares', 0)}:{round(float(amount or 0), 2)}"
+            create_order_state(code, action, "generated", price=price,
+                               shares=order.get("shares", 0), amount=amount,
+                               reason=str(order.get("reason") or order.get("reasons") or ""),
+                               idempotency_key=key)
+            create_order_state(code, action, "pending_confirm", price=price,
+                               shares=order.get("shares", 0), amount=amount,
+                               reason="awaiting manual confirmation",
+                               idempotency_key=key)
+            count += 1
+    return count
+
+
+def cmd_auto_guarded(force_execute: bool = False):
+    """Guard old auto execution behind the new four-stage gate."""
+    from auto_gate import evaluate_auto_gate, format_gate_report
+    import auto_execute
+
+    dry_run = "--dry-run" in sys.argv
+    mutating = force_execute or "--execute" in sys.argv
+    gate = evaluate_auto_gate(explain=False)
+    print(format_gate_report(gate))
+    print()
+
+    if not mutating:
+        auto_execute.main()
+        return
+
+    if dry_run:
+        plan = auto_execute.generate_execution_plan(dry_run=True)
+        print(plan["summary"])
+        print("\nDRY-RUN: no orders staged or executed")
+        return
+
+    if gate["state"] != "SEMI_AUTO":
+        print("blocked: SEMI_AUTO requires passing gate + compliance_status=approved")
+        return
+
+    plan = auto_execute.generate_execution_plan(dry_run=True)
+    print(plan["summary"])
+    staged = _stage_order_states(plan)
+    print(f"\nSEMI_AUTO: staged {staged} orders as pending_confirm; no live trade submitted in v1")
 
 
 def cmd_factors():
@@ -2008,8 +2138,12 @@ def main():
         "alpha-gate": cmd_alpha_gate,
         "security-check": cmd_security_check,
         "tier1-reentry": cmd_tier1_reentry,
-        "auto": lambda: cmd_auto_execute(),
-        "auto-exec": lambda: (sys.argv.append('--force-execute'), cmd_auto_execute())[1],
+        "record-real-data": cmd_record_real_data,
+        "auto-gate": cmd_auto_gate,
+        "strategy-version": cmd_strategy_version,
+        "compliance-status": cmd_compliance_status,
+        "auto": lambda: cmd_auto_guarded(force_execute=False),
+        "auto-exec": lambda: cmd_auto_guarded(force_execute=True),
         "auto-stats": lambda: (sys.argv.append('--stats'), cmd_auto_execute())[1],
         "auto-premarket": lambda: (sys.argv.append('--premarket'), cmd_auto_execute())[1],
         "auto-push": lambda: (sys.argv.append('--push'), cmd_auto_execute())[1],

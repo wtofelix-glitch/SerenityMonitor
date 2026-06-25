@@ -302,6 +302,60 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .card-subtitle { font-size: var(--text-caption2); color: var(--text-tertiary); }
 .card-body { position: relative; }
 
+.gate-card {
+  border-color: rgba(255,214,10,0.16);
+  background: rgba(255,255,255,0.035);
+}
+.gate-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.gate-grid div {
+  min-width: 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.04);
+}
+.gate-grid span,
+.gate-footer span,
+.gate-reasons span {
+  display: block;
+  font-size: var(--text-caption2);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gate-grid b {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-num);
+  font-size: var(--text-footnote);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.gate-footer {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-3);
+}
+.gate-footer span {
+  width: auto;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.04);
+}
+.gate-reasons {
+  display: grid;
+  gap: 4px;
+  margin-top: var(--space-2);
+}
+.gate-reasons span {
+  white-space: normal;
+}
+
 /* ═══════════════════════════════════════════════════════
    HERO — 核心数字大屏
    ═══════════════════════════════════════════════════════ */
@@ -819,6 +873,7 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   .kpi-row { grid-template-columns: repeat(2, 1fr); gap: 6px; }
   .kpi-item { padding: var(--space-3); }
   .kpi-value { font-size: var(--text-body); }
+  .gate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
   .card { padding: var(--space-3); border-radius: var(--radius-lg); }
   .qd-summary { grid-template-columns: 1fr; }

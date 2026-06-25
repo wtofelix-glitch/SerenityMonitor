@@ -85,6 +85,38 @@ function qdName(item) {
   return item.name || item.code || '—';
 }
 
+function buildAutoGateCard(d) {
+  const gate = d.auto_gate || {};
+  const state = gate.state || 'PAPER';
+  const passed = !!gate.gate_passed;
+  const tone = state === 'SEMI_AUTO' ? 'up' : (state === 'LOCKED' ? 'down' : 'gold');
+  const reasons = gate.reasons || [];
+  const reasonHtml = reasons.length
+    ? `<div class="gate-reasons">${reasons.map(r => `<span>${r}</span>`).join('')}</div>`
+    : '<div class="gate-reasons"><span>等待更多可执行样本</span></div>';
+  return `
+  <div class="card gate-card">
+    <div class="card-header">
+      <span class="card-title">自动闸门</span>
+      <span class="card-subtitle ${tone}">${state}</span>
+    </div>
+    <div class="card-body">
+      <div class="gate-grid">
+        <div><span>样本</span><b>${gate.sample_count || 0}/50</b></div>
+        <div><span>胜率</span><b class="${passed ? 'up' : 'gold'}">${fmt((gate.win_rate || 0) * 100, 1)}%</b></div>
+        <div><span>Wilson</span><b class="${(gate.wilson_lower || 0) >= 0.5 ? 'up' : 'gold'}">${fmt((gate.wilson_lower || 0) * 100, 1)}%</b></div>
+        <div><span>超额胜率</span><b>${fmt((gate.excess_win_rate || 0) * 100, 1)}%</b></div>
+      </div>
+      <div class="gate-footer">
+        <span>合规 ${gate.compliance_status || 'not_reported'}</span>
+        <span>上限 ${gate.max_state || 'MANUAL'}</span>
+        <span>${gate.consecutive_loss_ok === false ? '连续亏损触发' : '连续亏损正常'}</span>
+      </div>
+      ${reasonHtml}
+    </div>
+  </div>`;
+}
+
 // ─── 防抖 ────────────────────────────────────────────────────
 function debounce(fn, delay) {
   let timer = null;
@@ -248,6 +280,8 @@ function renderOverview(d) {
       <div class="kpi-sub">${buyCount}买 / ${riskCount}险</div>
     </div>
   </div>`;
+
+  html += buildAutoGateCard(d);
 
   // ── Merged Actions ──────────────────────────────────────
   html += buildQuantDingerConsensus(d);

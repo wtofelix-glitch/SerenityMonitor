@@ -151,7 +151,7 @@ def fetch_realtime(code_list: Optional[list[str]] = None,
         return []
 
     if source == "akshare":
-        return _tencent_fetch_realtime(code_list)
+        return _akshare_fetch_realtime(code_list)
     if source == "tencent":
         return _tencent_fetch_realtime(code_list)
 

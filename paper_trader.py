@@ -32,12 +32,14 @@ def init_paper_tables():
         );
         CREATE TABLE IF NOT EXISTS paper_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL UNIQUE,
-            total_value REAL NOT NULL,
-            cash REAL NOT NULL,
-            holdings_value REAL NOT NULL,
-            profit_pct REAL NOT NULL,
-            positions_json TEXT DEFAULT '[]',
+            date TEXT NOT NULL,
+            code TEXT NOT NULL DEFAULT 'TOTAL',
+            shares INTEGER DEFAULT 0,
+            avg_cost REAL DEFAULT 0,
+            price REAL DEFAULT 0,
+            current_value REAL NOT NULL,
+            pnl REAL DEFAULT 0,
+            pnl_pct REAL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
     """)
@@ -356,6 +358,90 @@ class PaperTrader:
         conn.close()
         self._ensure_seeded()
         return {"status": "reset", "msg": "纸面账户已重置"}
+
+    # ── 🆕 v3.2 日终市值更新 ──────────────────────────────
+
+    def mark_to_market(self) -> dict:
+        """以当天收盘价更新所有纸面持仓的市值，写入 paper_snapshots"""
+        today = date.today().isoformat()
+        positions = self.get_paper_positions()
+        if not positions:
+            return {"status": "no_positions", "count": 0}
+
+        codes = [p["code"] for p in positions]
+        realtime = fetch_realtime(codes) if codes else []
+
+        updated = 0
+        total_value = self.get_paper_cash()
+        conn = get_conn()
+
+        for p in positions:
+            code = p["code"]
+            # 取实时价或快照
+            rt = next((r for r in realtime if r.get("code") == code), {})
+            price = rt.get("price", 0)
+            if price <= 0:
+                from db import get_latest_snapshot
+                snap = get_latest_snapshot(code)
+                price = snap.get("close", 0) if snap else 0
+            if price <= 0:
+                continue
+
+            current_val = p["shares"] * price
+            cost_val = p["shares"] * p["avg_cost"]
+            pnl = current_val - cost_val
+            pnl_pct = (price - p["avg_cost"]) / p["avg_cost"] * 100 if p["avg_cost"] > 0.01 else 0
+
+            conn.execute(
+                "INSERT INTO paper_snapshots (date, code, shares, avg_cost, price, current_value, pnl, pnl_pct) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (today, code, p["shares"], p["avg_cost"], price, current_val, round(pnl, 2), round(pnl_pct, 2)),
+            )
+            total_value += current_val
+            updated += 1
+
+        # 写总净值
+        conn.execute(
+            "INSERT INTO paper_snapshots (date, code, shares, avg_cost, price, current_value, pnl, pnl_pct) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (today, "TOTAL", 1, 0, total_value, total_value, total_value - self.initial_capital,
+             round((total_value - self.initial_capital) / self.initial_capital * 100, 2)),
+        )
+        conn.commit()
+        conn.close()
+
+        return {
+            "status": "marked",
+            "date": today,
+            "positions": updated,
+            "total_value": round(total_value, 2),
+            "total_pnl": round(total_value - self.initial_capital, 2),
+            "total_pnl_pct": round((total_value - self.initial_capital) / self.initial_capital * 100, 2),
+        }
+
+    def get_paper_performance(self) -> dict:
+        """返回纸面交易绩效汇总"""
+        snapshots = []
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT * FROM paper_snapshots WHERE code='TOTAL' ORDER BY date"
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return {"status": "empty", "current_value": self.initial_capital,
+                    "pnl": 0, "pnl_pct": 0}
+
+        latest = rows[-1]
+        return {
+            "status": "tracking",
+            "start_value": self.initial_capital,
+            "current_value": latest["current_value"],
+            "pnl": round(latest["current_value"] - self.initial_capital, 2),
+            "pnl_pct": round((latest["current_value"] - self.initial_capital) / self.initial_capital * 100, 2),
+            "snapshots": [{"date": r["date"], "value": r["current_value"],
+                           "pnl_pct": r["pnl_pct"]} for r in rows],
+        }
 
 
 # 全局单例

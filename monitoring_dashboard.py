@@ -435,6 +435,7 @@ def gather_monitor_data():
         "target_tracker": _get_target_tracker(),
         "position_advice": _get_position_advice(scores),
         "stop_conditions": _get_stop_conditions(),
+        "auto_gate": _get_auto_gate_card(),
         "operational_mode": operational_mode,
         "quantdinger_consensus": _get_quantdinger_consensus(),
         # v3.0 新增
@@ -604,6 +605,41 @@ def _get_target_tracker():
     except Exception:
         return {}
 
+def _get_auto_gate_card():
+    """Auto-trade gate summary for dashboard display."""
+    try:
+        from auto_gate import get_latest_gate_result
+        gate = get_latest_gate_result()
+        reasons = gate.get("reasons", [])
+        explain = gate.get("explain", {})
+        return {
+            "state": gate.get("state", "PAPER"),
+            "gate_passed": bool(gate.get("gate_passed")),
+            "strategy_version": gate.get("strategy_version", ""),
+            "sample_count": gate.get("sample_count", 0),
+            "win_rate": gate.get("win_rate", 0),
+            "wilson_lower": gate.get("wilson_lower", 0),
+            "avg_return_5d": gate.get("avg_return_5d", 0),
+            "excess_win_rate": gate.get("excess_win_rate", 0),
+            "avg_excess_5d": gate.get("avg_excess_5d", 0),
+            "consecutive_loss_ok": bool(gate.get("consecutive_loss_ok", True)),
+            "compliance_status": gate.get("compliance_status", "not_reported"),
+            "max_state": gate.get("max_state", "MANUAL"),
+            "reasons": reasons[:4] if isinstance(reasons, list) else [],
+            "latest_10": (explain or {}).get("latest_10", [])[:10] if isinstance(explain, dict) else [],
+        }
+    except Exception as e:
+        return {
+            "state": "PAPER",
+            "gate_passed": False,
+            "sample_count": 0,
+            "win_rate": 0,
+            "wilson_lower": 0,
+            "compliance_status": "not_reported",
+            "max_state": "MANUAL",
+            "reasons": [str(e)[:120]],
+        }
+
 def _get_quantdinger_consensus():
     """QuantDinger 风格客观共识（只读，短缓存）。"""
     now = datetime.now()
@@ -759,6 +795,15 @@ def api_monitor_data():
         return jsonify({"ok": False, "data": _quick_db_fallback()}), 200
 
 
+@app.route("/api/auto-gate")
+def api_auto_gate():
+    """Return latest auto-trade gate state."""
+    try:
+        return jsonify({"ok": True, "data": _get_auto_gate_card()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
 def _db_only_portfolio_summary():
     """纯 DB 持仓摘要 — 用快照收盘价, 不碰 Sina。超时降级用。"""
     conn = get_conn()
@@ -864,6 +909,7 @@ def _quick_db_fallback():
         "target_tracker": [],
         "position_advice": [],
         "stop_conditions": [],
+        "auto_gate": _get_auto_gate_card(),
         "operational_mode": {},
         "quantdinger_consensus": _get_quantdinger_consensus(),
     }

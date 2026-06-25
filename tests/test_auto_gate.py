@@ -28,11 +28,24 @@ def gate_db(monkeypatch):
 
 def _insert_gate_samples(db_module, version: str, wins: int, total: int = 50, latest_bad_run: int = 0):
     start = date(2026, 1, 1)
+    win_flags = [(i % 5) in (0, 1, 3) for i in range(total)]  # 60%, never 3 losses in a row
+    for idx in range(total):
+        if sum(win_flags) >= wins:
+            break
+        if not win_flags[idx] and idx < total - latest_bad_run:
+            win_flags[idx] = True
+    for idx in range(total - latest_bad_run - 1, -1, -1):
+        if sum(win_flags) <= wins:
+            break
+        if win_flags[idx]:
+            win_flags[idx] = False
+    for idx in range(total - latest_bad_run, total):
+        if idx >= 0:
+            win_flags[idx] = False
     conn = db_module.get_conn()
     for i in range(total):
         sample_date = (start + timedelta(days=i)).isoformat()
-        is_latest_bad = i >= total - latest_bad_run
-        is_win = i < wins and not is_latest_bad
+        is_win = win_flags[i]
         ret = 1.0 if is_win else -0.4
         excess = 0.8 if is_win else -0.3
         conn.execute(

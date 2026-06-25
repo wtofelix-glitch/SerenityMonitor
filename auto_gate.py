@@ -416,6 +416,7 @@ def get_latest_gate_result() -> dict[str, Any]:
     try:
         row = conn.execute("SELECT * FROM auto_trade_gate ORDER BY id DESC LIMIT 1").fetchone()
         if not row:
+            conn.close()
             return evaluate_auto_gate(explain=True)
         data = dict(row)
         data["gate_passed"] = data.get("gate_status") == "pass"
@@ -426,7 +427,10 @@ def get_latest_gate_result() -> dict[str, Any]:
                 data[field.replace("_json", "")] = [] if field == "reasons_json" else {}
         return data
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _choose_price_record(source_rows: dict[str, dict[str, Any]]) -> tuple[dict[str, Any] | None, str, str, float, str]:
@@ -506,7 +510,29 @@ def record_real_data(dry_run: bool = False, codes: list[str] | None = None) -> d
             records.append({**payload, "warning": warning, "conflict_pct": conflict})
             if dry_run:
                 continue
-            db.save_snapshot(code, payload)
+            conn.execute(
+                """
+                INSERT INTO daily_snapshots
+                    (code, date, open, close, high, low, volume, amount, change_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code, date) DO UPDATE SET
+                    open=excluded.open, close=excluded.close,
+                    high=excluded.high, low=excluded.low,
+                    volume=excluded.volume, amount=excluded.amount,
+                    change_pct=excluded.change_pct
+                """,
+                (
+                    code,
+                    payload["date"],
+                    payload["open"],
+                    payload["close"],
+                    payload["high"],
+                    payload["low"],
+                    payload["volume"],
+                    payload["amount"],
+                    payload["change_pct"],
+                ),
+            )
             conn.execute(
                 """
                 INSERT INTO price_history
