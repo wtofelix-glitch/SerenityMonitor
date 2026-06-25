@@ -52,18 +52,20 @@ try:
 except Exception:
     score_weight = {
         "zone": 0.20,        # 价格位置（v3.0: 动态60日通道）
-        "momentum": 0.18,     # 动量
+        "momentum": 0.17,     # 动量
         "volume": 0.04,       # 成交量
-        "serenity": 0.18,     # Serenity 框架匹配度
-        "factor": 0.20,       # 因子引擎（三周期融合）
+        "serenity": 0.17,     # Serenity 框架匹配度
+        "factor": 0.19,       # 因子引擎（三周期融合）
         "technical": 0.10,    # 技术面 + 情绪
-        "moat": 0.10,         # 护城河因子
+        "moat": 0.09,         # 护城河因子
+        "capital": 0.04,      # v3.3 资金面（融资/大宗/筹码/分红）
     }
 
 # v3.0: 7 维核心（移除 base — IC=-0.13 持续14天为负，静态手动评分无预测力）
 _SCORE_WEIGHT_DEFAULTS = {
     "zone": 0.20, "momentum": 0.18, "volume": 0.04,
-    "serenity": 0.18, "factor": 0.20, "technical": 0.10, "moat": 0.10,
+    "serenity": 0.17, "factor": 0.19, "technical": 0.10, "moat": 0.09,
+    "capital": 0.03,   # v3.3 资金面（融资/大宗/筹码/分红, 轻量补充）
 }
 for k, v in _SCORE_WEIGHT_DEFAULTS.items():
     score_weight.setdefault(k, v)
@@ -608,14 +610,21 @@ def score_all() -> list[dict]:
         # v3.0 7维简化加权总分（移除 base: IC=-0.13）
         # sentiment 合并入 technical（80% 技术面 + 20% 情绪）
         _merged_technical = technical_score * 0.80 + sentiment_score * 0.20
+        # v3.3 资金面评分（轻量, 数据不可用时中性50分）
+        try:
+            from capital_flow import compute_capital_score
+            capital_score = compute_capital_score(code).get("score", 50)
+        except Exception:
+            capital_score = 50
         total = (
             zone_score * score_weight.get("zone", 0.20) +
-            momentum_score * score_weight.get("momentum", 0.18) +
+            momentum_score * score_weight.get("momentum", 0.17) +
             volume_score * score_weight.get("volume", 0.04) +
-            serenity_score * score_weight.get("serenity", 0.18) +
-            factor_score * score_weight.get("factor", 0.20) +
+            serenity_score * score_weight.get("serenity", 0.17) +
+            factor_score * score_weight.get("factor", 0.19) +
             _merged_technical * score_weight.get("technical", 0.10) +
-            moat_score * score_weight.get("moat", 0.10)
+            moat_score * score_weight.get("moat", 0.09) +
+            capital_score * score_weight.get("capital", 0.04)
         )
         total = round(total, 1)
 

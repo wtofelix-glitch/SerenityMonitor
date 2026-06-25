@@ -132,7 +132,7 @@ def parse_sina_line(line: str) -> Optional[dict]:
 
 
 def fetch_realtime(code_list: Optional[list[str]] = None,
-                   source: str = "sina") -> list[dict]:
+                   source: str = "tencent") -> list[dict]:
     """
     获取多只股票的实时行情
     返回解析后的字典列表
@@ -140,7 +140,7 @@ def fetch_realtime(code_list: Optional[list[str]] = None,
     Parameters
     ----------
     source : str
-        "sina" (默认) 或 "akshare"。Sina 快但有时限流，AKShare 稳但首调用慢
+        "tencent" (默认, PE/PB/市值) / "sina" / "akshare"
     """
     if code_list is None:
         code_list = ALL_CODES
