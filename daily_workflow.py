@@ -10,6 +10,7 @@ Serenity 每日工作流 — 一站式运行全部子系统
 
 步骤:
   0. 参考数据拉取 (fetch_reference) → price_history
+  0b. 真实行情记录 + T+1/T+6 outcome 结算 + 自动闸门评估
   1. 评分 (score_all) → scoring_history
   2. 信号 (generate_signals) → signal_log
   3. Outcome 补填 → signal_log.outcome_*
@@ -23,7 +24,7 @@ Serenity 每日工作流 — 一站式运行全部子系统
   7d. 信号绩效简报 (signal_performance)
   8. [可选] 回测快照
   📡 推送 (含净值 + 行业 + 绩效 + 执行计划)
-  🚀 [--execute] 自动执行交易 + 更新 NAV
+  🚀 [--execute] 受控半自动排队（pending_confirm），v1 不提交实盘订单
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -37,10 +38,89 @@ def step(name: str):
     print(f"{'─'*50}")
 
 
+def run_real_data_gate_step(dry_run: bool = False) -> dict:
+    """Record real market data, settle gate outcomes, then evaluate the gate."""
+    import auto_gate
+    import check_trading_day
+
+    if not check_trading_day.is_trading_day():
+        print("  ⏭️ 非交易日，跳过真实数据记录与自动闸门")
+        return {"skipped": True, "record": {}, "settle": {}, "gate": {}}
+
+    record = auto_gate.record_real_data(dry_run=dry_run)
+    print("  " + auto_gate.format_record_report(record).replace("\n", "\n  "))
+
+    settle = auto_gate.settle_pending_signal_outcomes(dry_run=dry_run)
+    print(
+        "  settle outcomes "
+        f"dry_run={settle['dry_run']} "
+        f"settled={settle['settled']} "
+        f"pending={settle['pending']} "
+        f"expired_unsettled={settle['expired_unsettled']} "
+        f"non_executable={settle['non_executable']}"
+    )
+
+    gate = auto_gate.evaluate_auto_gate(explain=True)
+    print("  " + auto_gate.format_gate_report(gate).replace("\n", "\n  "))
+    return {"skipped": False, "record": record, "settle": settle, "gate": gate}
+
+
+def _stage_pending_confirm_orders(plan: dict) -> int:
+    """Stage generated orders into order_state_log without submitting trades."""
+    import auto_gate
+
+    count = 0
+    for group in ("sells", "buys"):
+        for order in plan.get(group, []):
+            code = order["code"]
+            action = "SELL" if group == "sells" else "BUY"
+            price = order.get("price") or (
+                order.get("estimated_proceeds", 0) / max(order.get("shares", 1), 1)
+            )
+            amount = order.get("amount") or order.get("estimated_proceeds", 0)
+            key = f"{plan['date']}:{action}:{code}:{order.get('shares', 0)}:{round(float(amount or 0), 2)}"
+            reason = str(order.get("reason") or order.get("reasons") or "")
+            auto_gate.create_order_state(
+                code, action, "generated", price=price,
+                shares=order.get("shares", 0), amount=amount,
+                reason=reason, idempotency_key=key,
+            )
+            auto_gate.create_order_state(
+                code, action, "pending_confirm", price=price,
+                shares=order.get("shares", 0), amount=amount,
+                reason="awaiting manual confirmation", idempotency_key=key,
+            )
+            count += 1
+    return count
+
+
+def run_controlled_execution_step(plan: dict, dry_run: bool = False) -> dict:
+    """Gate `--execute` behind SEMI_AUTO and stage orders only in v1."""
+    import auto_gate
+
+    gate = auto_gate.evaluate_auto_gate(explain=False)
+    print("  " + auto_gate.format_gate_report(gate).replace("\n", "\n  "))
+    total_orders = len(plan.get("sells", [])) + len(plan.get("buys", []))
+    if total_orders == 0:
+        print("  ✅ 无需排队订单")
+        return {"blocked": False, "staged": 0, "gate": gate}
+    if dry_run:
+        print(f"  DRY-RUN: {total_orders} 笔订单未排队、未提交")
+        return {"blocked": False, "staged": 0, "gate": gate, "dry_run": True}
+    if gate.get("state") != "SEMI_AUTO":
+        print("  blocked: SEMI_AUTO requires passing gate + compliance_status=approved")
+        return {"blocked": True, "staged": 0, "gate": gate}
+
+    staged = _stage_pending_confirm_orders(plan)
+    print(f"  ✅ SEMI_AUTO 已排队 {staged} 笔 pending_confirm；v1 不提交实盘订单")
+    return {"blocked": False, "staged": staged, "gate": gate}
+
+
 def main():
     do_push = '--push' in sys.argv
     do_full = '--full' in sys.argv
     do_execute = '--execute' in sys.argv
+    dry_run = '--dry-run' in sys.argv
     today = date.today().isoformat()
 
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
@@ -54,6 +134,13 @@ def main():
             print("  ⏭️ 非交易日，跳过参考数据拉取")
     except Exception as e:
         print(f"  ⚠️ 参考数据拉取失败: {e}")
+
+    # ── 0b. 真实数据记录 + 自动闸门 ───────────────────────
+    step('0b/8 真实数据记录 + 自动闸门')
+    try:
+        run_real_data_gate_step(dry_run=dry_run)
+    except Exception as e:
+        print(f"  ⚠️ 真实数据/自动闸门失败: {e}")
 
     # ── 1. 多因子评分 ──────────────────────────────────────
     step('1/8 多因子评分')
@@ -182,38 +269,13 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 自动调仓失败: {e}")
 
-    # ── 🚀 自动执行（--execute 模式）──────────────────
+    # ── 🚀 受控半自动排队（--execute 模式）──────────────
     if do_execute and (plan.get('sells') or plan.get('buys')):
-        step('🚀 自动执行交易')
+        step('🚀 受控半自动排队')
         try:
-            from auto_execute import _record_execution_orders, _retry_pending_executions
-            _record_execution_orders(plan)
-            total_orders = len(plan["sells"]) + len(plan["buys"])
-            print(f"  📝 记录 {total_orders} 笔待执行订单")
-            executed = _retry_pending_executions(dry_run=False)
-            print(f"  ✅ 执行完成: {executed}/{total_orders} 笔")
+            run_controlled_execution_step(plan, dry_run=dry_run)
         except Exception as e:
-            print(f"  ❌ 自动执行失败: {e}")
-
-        # 执行后重算 NAV
-        try:
-            from portfolio import PortfolioManager
-            from db import get_conn
-            pm = PortfolioManager()
-            val = pm.get_portfolio_value()
-            conn = get_conn()
-            conn.execute(
-                "INSERT INTO nav_history "
-                "(date, total_value, cash, holdings_value, profit_pct, positions_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (today, round(val["total_value"], 2), round(val["cash"], 2),
-                 round(val["holdings_value"], 2), round(val["total_profit_pct"], 2),
-                 str(val["position_count"])))
-            conn.commit()
-            conn.close()
-            print(f"  📊 NAV 已更新: {val['total_value']:.0f} 元 ({val['total_profit_pct']:+.1f}%)")
-        except Exception as e:
-            print(f"  ⚠️ NAV 更新失败: {e}")
+            print(f"  ❌ 受控半自动排队失败: {e}")
 
     # ── 7. T1 回补检查 ────────────────────────────────
     try:

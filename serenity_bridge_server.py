@@ -9,6 +9,8 @@ n8n HTTP Request 节点调用:
     POST http://host.docker.internal:9388/api/serenity/adjust-weights
     POST http://host.docker.internal:9388/api/serenity/factor-report
     POST http://host.docker.internal:9388/api/serenity/daily-workflow
+    POST http://host.docker.internal:9388/api/serenity/record-real-data
+    POST http://host.docker.internal:9388/api/serenity/auto-gate
     POST http://host.docker.internal:9388/api/send          # 分发消息 (weixin/telegram 等)
 
 启动 (launchd 管理，自动重启):
@@ -48,6 +50,8 @@ TASKS = {
     "factor-report":   ["python3", "cli.py", "factor-report"],
     "daily-report":    ["python3", "daily_report.py"],
     "daily-workflow":  ["python3", "daily_workflow.py"],
+    "record-real-data": ["python3", "cli.py", "record-real-data"],
+    "auto-gate":       ["python3", "cli.py", "auto-gate"],
     "status":          ["python3", "cli.py", "status"],
 }
 

@@ -164,7 +164,8 @@ def wilson_lower_bound(wins: int, n: int, z: float = 1.96) -> float:
 
 
 def is_trading_day(d: date) -> bool:
-    return d.weekday() < 5
+    from check_trading_day import is_trading_day as _is_trading_day
+    return _is_trading_day(d)
 
 
 def add_trading_days(date_str: str, days: int) -> str:
