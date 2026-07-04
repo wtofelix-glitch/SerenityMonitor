@@ -299,7 +299,7 @@ CAPITAL_CONFIG = {
     "initial_capital": 51066.41,       # 启动资金 (士兰微800x35.442 + 剑桥100x204.642 + 现金2248.61)
     "target_capital": 102133.0,        # 目标翻倍 → 102133
     "target_months": 3,                # 3 个月
-    "max_positions": 2,                # 最多同时持仓 2 只（高集中度→翻倍目标）
+    "max_positions": 3,                # v4.0 2→3: 分散风险同时保持集中度
     "max_single_weight": 0.85,         # 单只最大仓位 85%（翻倍目标→重仓集中）
     "min_single_weight": 0.30,         # 单只最小仓位 30%
     "enter_threshold": 68,             # 买入最低评分（放宽至68→抓更多机会）

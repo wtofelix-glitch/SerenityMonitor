@@ -298,6 +298,7 @@ class TestCalcPositionSize:
         stocks = [
             _make_stock("600036", "招商银行", 35.0, 10500.0),
             _make_stock("600487", "亨通光电", 94.39, 18878.0),
+            _make_stock("600176", "中国巨石", 12.0, 12000.0),
         ]
         monkeypatch.setattr(portfolio_module, 'load_all_stocks', lambda: stocks)
         pm = PortfolioManager(initial_capital=50000)

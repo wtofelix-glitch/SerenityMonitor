@@ -2,6 +2,7 @@
 数据库层 — SQLite 存储股票配置、每日快照、交易记录、预警历史
 """
 from __future__ import annotations
+import json
 import sqlite3
 import os
 from datetime import datetime, date
@@ -474,6 +475,109 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_reconciliations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_at TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL DEFAULT 'manual',
+            total_assets REAL NOT NULL,
+            holdings_value REAL NOT NULL,
+            cash REAL NOT NULL,
+            floating_profit REAL DEFAULT 0,
+            daily_profit REAL DEFAULT 0,
+            daily_profit_pct REAL DEFAULT 0,
+            position_ratio_pct REAL DEFAULT 0,
+            positions_json TEXT NOT NULL DEFAULT '[]',
+            evidence_path TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS operations_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            run_date TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'dry_run',
+            status TEXT NOT NULL DEFAULT 'running',
+            steps_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT DEFAULT (datetime('now', 'localtime')),
+            completed_at TEXT DEFAULT ''
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reconciliation_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_date TEXT NOT NULL,
+            broker_snapshot_at TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'blocked',
+            asset_drift REAL DEFAULT 0,
+            cash_drift REAL DEFAULT 0,
+            holdings_drift REAL DEFAULT 0,
+            position_mismatches_json TEXT NOT NULL DEFAULT '[]',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            UNIQUE(audit_date, broker_snapshot_at)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS operational_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            task_type TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'warning',
+            status TEXT NOT NULL DEFAULT 'open',
+            code TEXT DEFAULT '',
+            title TEXT NOT NULL,
+            summary TEXT DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            source TEXT DEFAULT 'operations_center',
+            first_seen_at TEXT DEFAULT (datetime('now', 'localtime')),
+            last_seen_at TEXT DEFAULT (datetime('now', 'localtime')),
+            resolved_at TEXT DEFAULT ''
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_drill_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_date TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'planned',
+            plan_json TEXT NOT NULL DEFAULT '{}',
+            results_json TEXT NOT NULL DEFAULT '[]',
+            orders_generated INTEGER DEFAULT 0,
+            orders_filled INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL, action TEXT NOT NULL, price REAL NOT NULL,
+            quantity INTEGER NOT NULL, date TEXT NOT NULL, reason TEXT DEFAULT '',
+            trade_amount REAL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL, code TEXT NOT NULL DEFAULT 'TOTAL',
+            shares INTEGER DEFAULT 0, avg_cost REAL DEFAULT 0, price REAL DEFAULT 0,
+            current_value REAL NOT NULL, pnl REAL DEFAULT 0, pnl_pct REAL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS paper_baseline_archives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reason TEXT NOT NULL, broker_snapshot_at TEXT DEFAULT '',
+            trades_json TEXT NOT NULL DEFAULT '[]', snapshots_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_operational_tasks_status ON operational_tasks(status, severity, last_seen_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_audits_created ON reconciliation_audits(created_at)")
     # 🆕 权重辩论日志表（conviction_engine 持久化）
     cur.execute("""
         CREATE TABLE IF NOT EXISTS conviction_log (
@@ -536,6 +640,33 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
         CREATE INDEX IF NOT EXISTS idx_stt_code_date ON signal_to_trade(code, signal_date);
+    """)
+
+    # v4.0 权重进化日志
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS evolution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            dimension TEXT NOT NULL,
+            old_weight REAL NOT NULL,
+            new_weight REAL NOT NULL,
+            ic_20d REAL,
+            reason TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    # v4.0 参数寻优结果
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS param_optimization (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            param_name TEXT NOT NULL,
+            best_value REAL,
+            sharpe REAL,
+            win_rate REAL,
+            avg_return REAL,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
     """)
 
     for sql in _index_sqls:
@@ -612,6 +743,333 @@ def get_latest_data_quality_logs(limit: int = 10) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def _decode_json_fields(row, mapping: dict[str, str]) -> Optional[dict]:
+    if not row:
+        return None
+    result = dict(row)
+    for stored, exposed in mapping.items():
+        result[exposed] = json.loads(result.pop(stored) or ("[]" if exposed.endswith("s") else "{}"))
+    return result
+
+
+def save_portfolio_reconciliation(snapshot: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO portfolio_reconciliations
+                (snapshot_at, source, total_assets, holdings_value, cash,
+                 floating_profit, daily_profit, daily_profit_pct, position_ratio_pct,
+                 positions_json, evidence_path, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_at) DO UPDATE SET
+                source=excluded.source, total_assets=excluded.total_assets,
+                holdings_value=excluded.holdings_value, cash=excluded.cash,
+                floating_profit=excluded.floating_profit, daily_profit=excluded.daily_profit,
+                daily_profit_pct=excluded.daily_profit_pct,
+                position_ratio_pct=excluded.position_ratio_pct,
+                positions_json=excluded.positions_json,
+                evidence_path=excluded.evidence_path, notes=excluded.notes
+        """, (
+            snapshot["snapshot_at"], snapshot.get("source", "manual"),
+            snapshot["total_assets"], snapshot["holdings_value"], snapshot["cash"],
+            snapshot.get("floating_profit", 0), snapshot.get("daily_profit", 0),
+            snapshot.get("daily_profit_pct", 0), snapshot.get("position_ratio_pct", 0),
+            json.dumps(snapshot.get("positions", []), ensure_ascii=False),
+            snapshot.get("evidence_path", ""), snapshot.get("notes", ""),
+        ))
+        conn.commit()
+        row = conn.execute("SELECT * FROM portfolio_reconciliations WHERE snapshot_at=?", (snapshot["snapshot_at"],)).fetchone()
+        return _decode_json_fields(row, {"positions_json": "positions"})
+    finally:
+        conn.close()
+
+
+def get_latest_portfolio_reconciliation() -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM portfolio_reconciliations ORDER BY snapshot_at DESC, id DESC LIMIT 1").fetchone()
+        return _decode_json_fields(row, {"positions_json": "positions"})
+    finally:
+        conn.close()
+
+
+def get_portfolio_reconciliation(snapshot_at: str) -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM portfolio_reconciliations WHERE snapshot_at=?",
+            (snapshot_at,),
+        ).fetchone()
+        return _decode_json_fields(row, {"positions_json": "positions"})
+    finally:
+        conn.close()
+
+
+def save_reconciliation_audit(audit: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO reconciliation_audits
+                (audit_date, broker_snapshot_at, status, asset_drift, cash_drift,
+                 holdings_drift, position_mismatches_json, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(audit_date, broker_snapshot_at) DO UPDATE SET
+                status=excluded.status, asset_drift=excluded.asset_drift,
+                cash_drift=excluded.cash_drift, holdings_drift=excluded.holdings_drift,
+                position_mismatches_json=excluded.position_mismatches_json,
+                details_json=excluded.details_json, created_at=datetime('now','localtime')
+        """, (
+            audit["audit_date"], audit.get("broker_snapshot_at", ""), audit.get("status", "blocked"),
+            audit.get("asset_drift", 0), audit.get("cash_drift", 0), audit.get("holdings_drift", 0),
+            json.dumps(audit.get("position_mismatches", []), ensure_ascii=False),
+            json.dumps(audit.get("details", {}), ensure_ascii=False),
+        ))
+        conn.commit()
+        row = conn.execute("SELECT * FROM reconciliation_audits WHERE audit_date=? AND broker_snapshot_at=?",
+                           (audit["audit_date"], audit.get("broker_snapshot_at", ""))).fetchone()
+        return _decode_json_fields(row, {"position_mismatches_json": "position_mismatches", "details_json": "details"})
+    finally:
+        conn.close()
+
+
+def get_latest_reconciliation_audit() -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM reconciliation_audits ORDER BY id DESC LIMIT 1").fetchone()
+        return _decode_json_fields(row, {"position_mismatches_json": "position_mismatches", "details_json": "details"})
+    finally:
+        conn.close()
+
+
+def upsert_operational_task(task: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO operational_tasks
+                (dedupe_key, task_type, severity, status, code, title, summary, details_json, source)
+            VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?)
+            ON CONFLICT(dedupe_key) DO UPDATE SET
+                task_type=excluded.task_type, severity=excluded.severity, status='open',
+                code=excluded.code, title=excluded.title, summary=excluded.summary,
+                details_json=excluded.details_json, source=excluded.source,
+                last_seen_at=datetime('now','localtime'), resolved_at=''
+        """, (
+            task["dedupe_key"], task["task_type"], task.get("severity", "warning"),
+            task.get("code", ""), task["title"], task.get("summary", ""),
+            json.dumps(task.get("details", {}), ensure_ascii=False), task.get("source", "operations_center"),
+        ))
+        conn.commit()
+        row = conn.execute("SELECT * FROM operational_tasks WHERE dedupe_key=?", (task["dedupe_key"],)).fetchone()
+        return _decode_json_fields(row, {"details_json": "details"})
+    finally:
+        conn.close()
+
+
+def resolve_operational_task(dedupe_key: str) -> bool:
+    init_db()
+    conn = get_conn()
+    try:
+        cursor = conn.execute("""
+            UPDATE operational_tasks SET status='resolved', resolved_at=datetime('now','localtime')
+            WHERE dedupe_key=? AND status!='resolved'
+        """, (dedupe_key,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def get_operational_tasks(status: str = "open", limit: int = 50) -> list[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        where = "WHERE status=?" if status else ""
+        params = [status] if status else []
+        params.append(limit)
+        rows = conn.execute(f"""
+            SELECT * FROM operational_tasks {where}
+            ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                     last_seen_at DESC, id DESC LIMIT ?
+        """, params).fetchall()
+        return [_decode_json_fields(row, {"details_json": "details"}) for row in rows]
+    finally:
+        conn.close()
+
+
+def save_operations_run(run: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO operations_runs (run_id, run_date, mode, status, steps_json, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,
+                steps_json=excluded.steps_json, completed_at=excluded.completed_at
+        """, (run["run_id"], run["run_date"], run.get("mode", "dry_run"),
+              run.get("status", "running"), json.dumps(run.get("steps", {}), ensure_ascii=False, default=str),
+              run.get("completed_at", "")))
+        conn.commit()
+        row = conn.execute("SELECT * FROM operations_runs WHERE run_id=?", (run["run_id"],)).fetchone()
+        return _decode_json_fields(row, {"steps_json": "steps"})
+    finally:
+        conn.close()
+
+
+def get_latest_operations_run() -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM operations_runs ORDER BY id DESC LIMIT 1").fetchone()
+        return _decode_json_fields(row, {"steps_json": "steps"})
+    finally:
+        conn.close()
+
+
+def save_paper_drill_run(run: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO paper_drill_runs
+                (run_date, status, plan_json, results_json, orders_generated, orders_filled)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_date) DO UPDATE SET status=excluded.status,
+                plan_json=excluded.plan_json, results_json=excluded.results_json,
+                orders_generated=excluded.orders_generated, orders_filled=excluded.orders_filled,
+                updated_at=datetime('now','localtime')
+        """, (run["run_date"], run.get("status", "planned"),
+              json.dumps(run.get("plan", {}), ensure_ascii=False, default=str),
+              json.dumps(run.get("results", []), ensure_ascii=False, default=str),
+              run.get("orders_generated", 0), run.get("orders_filled", 0)))
+        conn.commit()
+        row = conn.execute("SELECT * FROM paper_drill_runs WHERE run_date=?", (run["run_date"],)).fetchone()
+        return _decode_json_fields(row, {"plan_json": "plan", "results_json": "results"})
+    finally:
+        conn.close()
+
+
+def get_latest_paper_drill_run() -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM paper_drill_runs ORDER BY run_date DESC, id DESC LIMIT 1").fetchone()
+        return _decode_json_fields(row, {"plan_json": "plan", "results_json": "results"})
+    finally:
+        conn.close()
+
+
+def get_order_state_by_key(idempotency_key: str) -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM order_state_log WHERE idempotency_key=? ORDER BY id DESC LIMIT 1",
+                           (idempotency_key,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def save_paper_nav_snapshot(snapshot: dict) -> None:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("INSERT INTO paper_snapshots (date, code, current_value, pnl, pnl_pct) VALUES (?, 'TOTAL', ?, ?, ?)",
+                     (snapshot["date"], snapshot.get("total_value", 0),
+                      snapshot.get("total_profit_amount", 0), snapshot.get("total_profit_pct", 0)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def archive_and_clear_paper_account(reason: str) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        trades = [dict(row) for row in conn.execute("SELECT * FROM paper_trades ORDER BY id").fetchall()]
+        snapshots = [dict(row) for row in conn.execute("SELECT * FROM paper_snapshots ORDER BY id").fetchall()]
+        broker = conn.execute("SELECT snapshot_at FROM portfolio_reconciliations ORDER BY snapshot_at DESC, id DESC LIMIT 1").fetchone()
+        cursor = conn.execute("""
+            INSERT INTO paper_baseline_archives (reason, broker_snapshot_at, trades_json, snapshots_json)
+            VALUES (?, ?, ?, ?)
+        """, (reason, broker["snapshot_at"] if broker else "",
+              json.dumps(trades, ensure_ascii=False), json.dumps(snapshots, ensure_ascii=False)))
+        conn.execute("DELETE FROM paper_trades")
+        conn.execute("DELETE FROM paper_snapshots")
+        conn.commit()
+        return {"archive_id": cursor.lastrowid, "trades_archived": len(trades),
+                "snapshots_archived": len(snapshots), "reason": reason}
+    finally:
+        conn.close()
+
+
+def get_data_quality_overview(since_date: str, limit: int = 12) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        counts = conn.execute("""
+            SELECT COUNT(*) AS total,
+              SUM(CASE WHEN quality_status='high' THEN 1 ELSE 0 END) AS high_count,
+              SUM(CASE WHEN quality_status='low' THEN 1 ELSE 0 END) AS low_count,
+              SUM(CASE WHEN quality_status='missing' THEN 1 ELSE 0 END) AS missing_count,
+              SUM(CASE WHEN conflict_pct>0.01 THEN 1 ELSE 0 END) AS conflict_count
+            FROM data_quality_log WHERE date>=?
+        """, (since_date,)).fetchone()
+        warnings = conn.execute("""
+            SELECT code, date, chosen_source, quality_status, conflict_pct, warning, created_at
+            FROM data_quality_log WHERE date>=? AND (quality_status!='high' OR warning!='')
+            ORDER BY created_at DESC, id DESC LIMIT ?
+        """, (since_date, limit)).fetchall()
+        settlements = conn.execute("""
+            SELECT COALESCE(settlement_status,'pending') AS status, COUNT(*) AS count
+            FROM signal_log WHERE action IN ('STRONG_BUY','BUY','CAUTION_BUY')
+            GROUP BY COALESCE(settlement_status,'pending')
+        """).fetchall()
+        return {"counts": dict(counts) if counts else {}, "warnings": [dict(row) for row in warnings],
+                "settlements": {row["status"]: row["count"] for row in settlements}}
+    finally:
+        conn.close()
+
+
+def get_operations_analytics_rows(limit: int = 252) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        nav = conn.execute("SELECT date,total_value,cash,holdings_value,profit_pct FROM nav_history ORDER BY date DESC LIMIT ?", (limit,)).fetchall()
+        broker_nav = conn.execute("""
+            SELECT substr(snapshot_at,1,10) AS date,total_assets AS total_value,cash,
+                   holdings_value,daily_profit_pct,snapshot_at
+            FROM portfolio_reconciliations ORDER BY snapshot_at DESC,id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        gates = conn.execute("""
+            SELECT date,strategy_version,state,sample_count,win_rate,wilson_lower,
+                   avg_return_5d,excess_win_rate,avg_excess_5d,compliance_status,created_at
+            FROM auto_trade_gate ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+        versions = conn.execute("""
+            SELECT strategy_version,COUNT(*) AS samples,
+              AVG(CASE WHEN return_5d>0 THEN 1.0 ELSE 0.0 END) AS win_rate,
+              AVG(return_5d) AS avg_return_5d,
+              AVG(CASE WHEN excess_5d>0 THEN 1.0 ELSE 0.0 END) AS excess_win_rate,
+              AVG(excess_5d) AS avg_excess_5d
+            FROM signal_log WHERE settlement_status='settled' AND executable_status='executable'
+              AND data_quality='high' GROUP BY strategy_version ORDER BY MAX(exit_date) DESC
+        """).fetchall()
+        paper = conn.execute("SELECT date,current_value,pnl,pnl_pct,created_at FROM paper_snapshots WHERE code='TOTAL' ORDER BY date DESC,id DESC LIMIT ?", (limit,)).fetchall()
+        return {"nav": [dict(row) for row in reversed(nav)],
+                "broker_nav": [dict(row) for row in reversed(broker_nav)],
+                "gates": [dict(row) for row in reversed(gates)],
+                "versions": [dict(row) for row in versions],
+                "paper": [dict(row) for row in reversed(paper)]}
+    finally:
+        conn.close()
 
 
 def get_latest_auto_trade_gate() -> Optional[dict]:
@@ -1777,3 +2235,133 @@ def get_latest_conviction() -> Optional[dict]:
         except (json.JSONDecodeError, TypeError):
             d[field] = {}
     return d
+
+
+def settle_sentinel_outcomes(lookback_days: int = 7):
+    """结算哨兵观测 — 追溯大师观点对应的股价变动，记录预测准确率"""
+    import json
+    from datetime import date, timedelta
+
+    cutoff = date.today() - timedelta(days=lookback_days)
+    conn = get_conn()
+
+    rows = conn.execute(
+        """
+        SELECT id, source_id, fetched_at, tickers, signal_type, confidence
+        FROM sentinel_observations
+        WHERE date(fetched_at) >= ?
+          AND id NOT IN (SELECT observation_id FROM sentinel_performance)
+        ORDER BY fetched_at DESC
+        """,
+        (cutoff.isoformat(),),
+    ).fetchall()
+
+    settled = 0
+    for r in rows:
+        obs = dict(r)
+        raw_tickers = obs.get("tickers", "[]")
+        try:
+            tickers = json.loads(raw_tickers) if isinstance(raw_tickers, str) else raw_tickers
+        except (json.JSONDecodeError, TypeError):
+            tickers = []
+        if not tickers:
+            continue
+        tickers = tickers[:3]
+
+        for ticker in tickers:
+            if not isinstance(ticker, str) or len(ticker) < 6:
+                continue
+            price_rows = conn.execute(
+                "SELECT close, date FROM price_history WHERE code=? ORDER BY date DESC LIMIT 20",
+                (ticker,),
+            ).fetchall()
+            if len(price_rows) < 6:
+                continue
+
+            obs_date = obs["fetched_at"][:10]
+            before = None
+            after = None
+            for i, pr in enumerate(price_rows):
+                drow = dict(pr)
+                if drow["date"] >= obs_date and before is None:
+                    before = float(drow["close"])
+                if drow["date"] > obs_date and after is None and i >= 3:
+                    after = float(drow["close"])
+            if before is None:
+                before = float(price_rows[0]["close"])
+            if after is None and len(price_rows) >= 5:
+                after = float(price_rows[min(5, len(price_rows) - 1)]["close"])
+            if before is None or after is None or before == 0:
+                continue
+
+            actual_return = (after - before) / before
+            signal_type = (obs.get("signal_type") or "info").lower()
+            if signal_type in ("bullish", "positive"):
+                prediction_correct = 1 if actual_return > 0 else 0
+            elif signal_type in ("bearish", "negative"):
+                prediction_correct = 1 if actual_return < 0 else 0
+            else:
+                prediction_correct = 1 if abs(actual_return) < 0.02 else 0
+
+            outcome_pct = round(actual_return * 100, 2)
+            outcome_key = f"outcome_{min(lookback_days, 5)}d"
+
+            conn.execute(
+                f"""
+                INSERT INTO sentinel_performance
+                    (source_id, observation_id, ticker, direction, {outcome_key}, correct, settled_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+                """,
+                (obs["source_id"], obs["id"], ticker, signal_type, outcome_pct, prediction_correct),
+            )
+            settled += 1
+
+    conn.commit()
+    conn.close()
+
+    rank_rows = conn.execute(
+        """
+        SELECT ss.id, ss.name as source_name,
+               COUNT(sp.id) as total_predictions,
+               SUM(sp.correct) as correct_count
+        FROM sentinel_sources ss
+        LEFT JOIN sentinel_performance sp ON sp.source_id = ss.id
+        GROUP BY ss.id
+        HAVING total_predictions > 0
+        ORDER BY CAST(SUM(sp.correct) AS REAL) / COUNT(sp.id) DESC
+        """
+    ).fetchall()
+    conn.close()
+    return {"settled": settled, "accuracy_ranking": [dict(r) for r in rank_rows]}
+
+
+def get_buy_candidates(scores: list[dict] = None, top_n: int = 3) -> list[dict]:
+    """从观察池中筛选买入候选（非持仓股，按总分排序，排除卖出信号）"""
+    conn = get_conn()
+    holding_codes = {
+        r["code"] for r in
+        conn.execute("SELECT code FROM stocks WHERE is_active=1 AND code!='CASH'").fetchall()
+    }
+    conn.close()
+    if not scores:
+        return []
+    candidates = []
+    for s in scores:
+        if s.get("code") in holding_codes:
+            continue
+        action = s.get("signal_action", "")
+        if action in ("SELL", "STOP_LOSS", "WEAK_HOLD"):
+            continue
+        total = s.get("total_score", 0)
+        if total < 50:
+            continue
+        candidates.append({
+            "code": s.get("code"),
+            "name": s.get("name"),
+            "total_score": total,
+            "action": action,
+            "uzi_score": s.get("uzi_score", 0),
+            "momentum_score": s.get("momentum_score", 0),
+        })
+    candidates.sort(key=lambda c: c["total_score"], reverse=True)
+    return candidates[:top_n]

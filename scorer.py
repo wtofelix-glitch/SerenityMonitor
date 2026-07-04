@@ -119,6 +119,99 @@ def _apply_regime_shifts(weights: dict, regime_label: str) -> dict:
     return shifted
 
 
+def load_evolved_weights() -> dict:
+    """v4.0 IC驱动的权重自进化 — 从反思数据中学习最优维度权重
+
+    读取最近20天所有股票的维度IC，按维度聚合平均IC。
+    IC>0的维度+3%权重，IC<-0.1的维度-3%权重。
+    量能维度(volume)如果IC<-0.2则降至0。
+    """
+    import json
+    try:
+        from db import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT dimension_ic FROM score_reflections WHERE dimension_ic IS NOT NULL ORDER BY date DESC LIMIT 300"
+        ).fetchall()
+        conn.close()
+
+        if not rows:
+            return dict(_SCORE_WEIGHT_DEFAULTS)
+
+        # 聚合各维度IC
+        dim_ics: dict[str, list[float]] = {}
+        for r in rows:
+            try:
+                ic_data = json.loads(r[0]) if isinstance(r[0], str) else (r[0] or {})
+                for dim, val in ic_data.items():
+                    dim_clean = dim.replace("_score", "").replace("_ic", "")
+                    if isinstance(val, (int, float)):
+                        dim_ics.setdefault(dim_clean, []).append(float(val))
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # 计算平均IC
+        avg_ics = {}
+        for dim, vals in dim_ics.items():
+            if len(vals) >= 5:  # 至少5个数据点
+                avg_ics[dim] = sum(vals) / len(vals)
+
+        # 应用到默认权重
+        weights = dict(_SCORE_WEIGHT_DEFAULTS)
+        for dim, ic in avg_ics.items():
+            if dim in weights:
+                if ic > 0.05:
+                    weights[dim] = min(weights[dim] + 0.03, 0.30)  # IC正→加权重
+                elif ic < -0.10:
+                    weights[dim] = max(weights[dim] - 0.03, 0.01)  # IC负→减权重
+                # volume 特殊处理：IC<-0.2 完全移除
+                if dim == "volume" and ic < -0.20:
+                    weights[dim] = 0.0
+
+        # 归一化
+        total = sum(weights.values())
+        if total > 0:
+            for k in weights:
+                weights[k] = round(weights[k] / total, 4)
+
+        return weights
+    except Exception:
+        return dict(_SCORE_WEIGHT_DEFAULTS)
+
+
+def get_stock_predictability(code: str, days: int = 30) -> dict:
+    """v4.0 单股可预测性评估 — 该股票的历史信号方向准确率"""
+    try:
+        from db import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT action, outcome_5d FROM signal_log WHERE code=? AND outcome_5d IS NOT NULL ORDER BY date DESC LIMIT ?",
+            (code, days),
+        ).fetchall()
+        conn.close()
+
+        total = len(rows)
+        if total < 5:
+            return {"predictability": 50, "sample_count": total, "grade": "insufficient"}
+
+        # 方向准确率：BUY类信号 outcome>0 为正确；HOLD类 |outcome|<3% 为正确
+        correct = 0
+        for r in rows:
+            action, outcome = r[0], float(r[1])
+            if action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+                correct += 1 if outcome > 0 else 0
+            elif action in ("SELL", "STOP_LOSS"):
+                correct += 1 if outcome < 0 else 0
+            else:
+                correct += 1 if abs(outcome) < 3 else 0
+
+        pct = round(correct / total * 100, 1)
+        grade = "A" if pct >= 70 else "B" if pct >= 55 else "C" if pct >= 40 else "D"
+        return {"predictability": pct, "sample_count": total, "grade": grade}
+    except Exception:
+        return {"predictability": 50, "sample_count": 0, "grade": "unknown"}
+
+
 # 自动感知市场状态并应用偏移
 _active_regime = "震荡市"
 try:

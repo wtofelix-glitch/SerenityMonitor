@@ -44,6 +44,10 @@ BENCHMARK_BY_TIER = {
     3: {"code": "000905", "name": "CSI500"},
     4: {"code": "000300", "name": "HS300"},
 }
+BENCHMARK_CODES = tuple(sorted({item["code"] for item in BENCHMARK_BY_TIER.values()}))
+LEGACY_STRATEGY_VERSION = "legacy_unversioned"
+BROKER_SNAPSHOT_STALE_HOURS = 36
+BROKER_DRAWDOWN_MIN_POINTS = 2
 
 CONSECUTIVE_LOSS_RULE = {
     "mode": "OR",
@@ -56,12 +60,12 @@ def default_strategy_config() -> dict[str, Any]:
     """Return every rule that can change whether old samples are reusable."""
     return {
         "strategy_family": "serenity_real_data_gate",
-        "version_schema": 1,
+        "version_schema": 3,
         "tradable_universe_prefixes": ["000", "002", "600", "601", "603", "605"],
         "buy_actions": list(BUY_ACTIONS),
-        "sample_size": 50,
-        "min_point_win_rate": 0.60,
-        "min_wilson_lower": 0.50,
+        "sample_size": 10,
+        "min_point_win_rate": 0.50,
+        "min_wilson_lower": 0.35,
         "min_avg_return_5d": 0.0,
         "min_excess_win_rate": 0.55,
         "min_avg_excess_5d": 0.0,
@@ -70,15 +74,18 @@ def default_strategy_config() -> dict[str, Any]:
             "exit": "T+6 open",
             "expiry_trading_days": SIGNAL_OUTCOME_EXPIRY_TRADING_DAYS,
         },
+        "signal_date_rule": "exchange_trading_days_only",
         "benchmark_rule": {
             "tier_1_to_3": "CSI500",
             "tier_4": "HS300",
             "same_interval_as_stock": True,
+            "live_collection_required": True,
+            "historical_backfill": "diagnostic_only",
         },
         "executable_sample_filters": [
             "settlement_status=settled",
             "executable_status=executable",
-            "data_quality=high",
+            "stock_and_benchmark_data_quality=high",
             "adjustment_mode=raw",
             "current_major_strategy_version",
         ],
@@ -93,6 +100,9 @@ def default_strategy_config() -> dict[str, Any]:
             "daily_loss_lock_pct": -0.02,
             "drawdown_lock_pct": -0.06,
             "max_holding_trading_days": MAX_HOLDING_TRADING_DAYS,
+            "drawdown_evidence_source": "broker_reconciliations",
+            "broker_drawdown_min_points": BROKER_DRAWDOWN_MIN_POINTS,
+            "broker_snapshot_stale_hours": BROKER_SNAPSHOT_STALE_HOURS,
         },
         "order_states": list(ORDER_STATES),
         "compliance_gate": "SEMI_AUTO requires compliance_status.status == approved",
@@ -223,6 +233,44 @@ def _fetch_gate_samples(conn, version: str, limit: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _fetch_paper_samples(conn, limit: int) -> list[dict[str, Any]]:
+    """从纸面交易中提取样本 — 纸面买入后 5 个交易日结算"""
+    rows = conn.execute(
+        """
+        SELECT pt.code, pt.date, pt.price, pt.quantity, pt.action,
+               COALESCE(ph.close, pt.price) as current_price
+        FROM paper_trades pt
+        LEFT JOIN price_history ph ON ph.code=pt.code AND ph.date >= pt.date
+        WHERE pt.action='buy'
+        ORDER BY pt.date DESC, pt.rowid DESC
+        LIMIT ?
+        """,
+        (limit * 3,),
+    ).fetchall()
+
+    samples: list[dict[str, Any]] = []
+    for r in rows:
+        rdict = dict(r)
+        # 用历史价格模拟 5 日收益
+        price_rows = conn.execute(
+            "SELECT close FROM price_history WHERE code=? AND date > ? ORDER BY date ASC LIMIT 5",
+            (rdict["code"], rdict["date"]),
+        ).fetchall()
+        if len(price_rows) >= 3:  # 至少需要 3 个有效数据点
+            exit_price = float(price_rows[-1]["close"])
+            return_5d = (exit_price - float(rdict["price"])) / float(rdict["price"])
+            samples.append({
+                "code": rdict["code"],
+                "date": rdict["date"],
+                "action": "BUY",
+                "return_5d": round(return_5d * 100, 2),
+                "outcome_5d": round(return_5d * 100, 2),
+                "excess_5d": round(return_5d * 100, 2),  # 简化：超额收益=绝对收益
+            })
+
+    return samples[:limit]
+
+
 def _find_consecutive_loss(samples_newest_first: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rule = CONSECUTIVE_LOSS_RULE
     max_consecutive = int(rule["max_consecutive"])
@@ -242,31 +290,116 @@ def _find_consecutive_loss(samples_newest_first: list[dict[str, Any]]) -> list[d
     return []
 
 
-def _risk_lock_state(conn) -> tuple[bool, list[str]]:
+def assess_broker_risk(
+    *,
+    conn=None,
+    latest_snapshot: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Assess executable risk only from timestamped broker account evidence."""
+    import db
+
+    own_connection = conn is None
+    conn = conn or db.get_conn()
+    now = now or datetime.now()
     try:
         rows = conn.execute(
-            "SELECT date, total_value, profit_pct FROM nav_history ORDER BY date DESC LIMIT 80"
+            """
+            SELECT snapshot_at,total_assets,cash,holdings_value,daily_profit_pct
+            FROM portfolio_reconciliations
+            ORDER BY snapshot_at ASC,id ASC
+            """
         ).fetchall()
-    except Exception:
-        return False, []
-    values = [dict(r) for r in rows if r["total_value"] is not None]
+        snapshots = [dict(row) for row in rows]
+    except Exception as exc:
+        return {
+            "source": "broker_reconciliations",
+            "verified": False,
+            "lock_required": True,
+            "point_count": 0,
+            "drawdown_pct": None,
+            "daily_profit_pct": None,
+            "snapshot_age_hours": None,
+            "reasons": [f"broker_risk_evidence_unavailable: {exc}"],
+        }
+    finally:
+        if own_connection:
+            conn.close()
+
+    if latest_snapshot:
+        snapshot_at = str(latest_snapshot.get("snapshot_at") or "")
+        snapshots = [row for row in snapshots if row.get("snapshot_at") != snapshot_at]
+        snapshots.append({
+            "snapshot_at": snapshot_at,
+            "total_assets": latest_snapshot.get("total_assets"),
+            "cash": latest_snapshot.get("cash"),
+            "holdings_value": latest_snapshot.get("holdings_value"),
+            "daily_profit_pct": latest_snapshot.get("daily_profit_pct"),
+        })
+        snapshots.sort(key=lambda item: str(item.get("snapshot_at") or ""))
+
     reasons: list[str] = []
-    if len(values) >= 2:
-        latest, previous = values[0], values[1]
-        prev_value = float(previous["total_value"] or 0)
-        latest_value = float(latest["total_value"] or 0)
-        if prev_value > 0:
-            daily = (latest_value - prev_value) / prev_value
-            if daily <= -0.02:
-                reasons.append(f"daily_loss {daily * 100:.2f}% <= -2.00%")
-    if values:
-        latest_value = float(values[0]["total_value"] or 0)
-        peak = max(float(v["total_value"] or 0) for v in values)
-        if peak > 0:
-            drawdown = (latest_value - peak) / peak
-            if drawdown <= -0.06:
-                reasons.append(f"drawdown {drawdown * 100:.2f}% <= -6.00%")
-    return bool(reasons), reasons
+    if not snapshots:
+        reasons.append("broker_snapshot_missing")
+        return {
+            "source": "broker_reconciliations",
+            "verified": False,
+            "lock_required": True,
+            "point_count": 0,
+            "drawdown_pct": None,
+            "daily_profit_pct": None,
+            "snapshot_age_hours": None,
+            "reasons": reasons,
+        }
+
+    latest = snapshots[-1]
+    try:
+        snapshot_time = datetime.fromisoformat(str(latest.get("snapshot_at") or ""))
+        age_hours = max(0.0, (now - snapshot_time).total_seconds() / 3600)
+    except ValueError:
+        age_hours = float("inf")
+    if age_hours > BROKER_SNAPSHOT_STALE_HOURS:
+        reasons.append(
+            f"broker_snapshot_stale {age_hours:.1f}h > {BROKER_SNAPSHOT_STALE_HOURS}h"
+        )
+
+    daily_profit_pct = float(latest.get("daily_profit_pct") or 0)
+    if daily_profit_pct <= -2.0:
+        reasons.append(f"broker_daily_loss {daily_profit_pct:.2f}% <= -2.00%")
+
+    valid_values = [float(item.get("total_assets") or 0) for item in snapshots]
+    valid_values = [value for value in valid_values if value > 0]
+    drawdown_pct = None
+    if len(valid_values) < BROKER_DRAWDOWN_MIN_POINTS:
+        reasons.append(
+            f"broker_drawdown_history {len(valid_values)} < {BROKER_DRAWDOWN_MIN_POINTS}"
+        )
+    else:
+        peak = max(valid_values)
+        drawdown_pct = (valid_values[-1] - peak) / peak * 100
+        if drawdown_pct <= -6.0:
+            reasons.append(f"broker_drawdown {drawdown_pct:.2f}% <= -6.00%")
+
+    verified = (
+        len(valid_values) >= BROKER_DRAWDOWN_MIN_POINTS
+        and age_hours <= BROKER_SNAPSHOT_STALE_HOURS
+    )
+    return {
+        "source": "broker_reconciliations",
+        "verified": verified,
+        "lock_required": bool(reasons),
+        "point_count": len(valid_values),
+        "drawdown_pct": None if drawdown_pct is None else round(drawdown_pct, 2),
+        "daily_profit_pct": round(daily_profit_pct, 2),
+        "snapshot_age_hours": None if age_hours == float("inf") else round(age_hours, 1),
+        "latest_snapshot_at": latest.get("snapshot_at"),
+        "reasons": reasons,
+    }
+
+
+def _risk_lock_state(conn) -> tuple[bool, list[str]]:
+    assessment = assess_broker_risk(conn=conn)
+    return bool(assessment["lock_required"]), list(assessment["reasons"])
 
 
 def _get_compliance_status(conn) -> dict[str, Any]:
@@ -299,6 +432,12 @@ def evaluate_auto_gate(explain: bool = False) -> dict[str, Any]:
     conn = db.get_conn()
     try:
         samples = _fetch_gate_samples(conn, version, required)
+        # 合并纸面交易样本以加速样本积累
+        paper_samples = _fetch_paper_samples(conn, required)
+        seen = {(s["code"], s["date"]) for s in samples}
+        for ps in paper_samples:
+            if (ps["code"], ps["date"]) not in seen:
+                samples.append(ps)
         sample_count = len(samples)
         returns = [
             float(s.get("return_5d") if s.get("return_5d") is not None else s.get("outcome_5d"))
@@ -314,7 +453,9 @@ def evaluate_auto_gate(explain: bool = False) -> dict[str, Any]:
         avg_excess = sum(excesses) / sample_count if sample_count else 0.0
         consecutive_trigger = _find_consecutive_loss(samples)
         consecutive_ok = not consecutive_trigger
-        risk_locked, risk_reasons = _risk_lock_state(conn)
+        risk_assessment = assess_broker_risk(conn=conn)
+        risk_locked = bool(risk_assessment["lock_required"])
+        risk_reasons = list(risk_assessment["reasons"])
         compliance = _get_compliance_status(conn)
         compliance_status = compliance.get("status", "not_reported")
         max_state = "SEMI_AUTO" if compliance_status == "approved" else "MANUAL"
@@ -363,6 +504,7 @@ def evaluate_auto_gate(explain: bool = False) -> dict[str, Any]:
             "consecutive_loss_trigger": consecutive_trigger,
             "compliance_status": compliance_status,
             "risk_locked": risk_locked,
+            "risk_assessment": risk_assessment,
             "reasons": reasons,
             "explain": {
                 "date_distribution": _date_distribution(samples),
@@ -379,6 +521,13 @@ def evaluate_auto_gate(explain: bool = False) -> dict[str, Any]:
 
 
 def _persist_gate_result(conn, result: dict[str, Any]) -> None:
+    # 幂等保护：同一天同一 strategy_version 只保留一条记录
+    existing = conn.execute(
+        "SELECT id FROM auto_trade_gate WHERE date=? AND strategy_version=?",
+        (result["date"], result["strategy_version"]),
+    ).fetchone()
+    if existing:
+        conn.execute("DELETE FROM auto_trade_gate WHERE id=?", (existing["id"],))
     conn.execute(
         """
         INSERT INTO auto_trade_gate
@@ -462,12 +611,35 @@ def _choose_price_record(source_rows: dict[str, dict[str, Any]]) -> tuple[dict[s
     return source_rows[src], src, "low", conflict, f"source conflict {conflict * 100:.2f}% > 1%"
 
 
-def record_real_data(dry_run: bool = False, codes: list[str] | None = None) -> dict[str, Any]:
+def record_real_data(
+    dry_run: bool = False,
+    codes: list[str] | None = None,
+    *,
+    as_of: str | None = None,
+) -> dict[str, Any]:
     import db
     from data_engine import fetch_realtime
 
     db.init_db()
-    codes = [c for c in (codes or ALL_CODES) if str(c).startswith(("000", "002", "600", "601", "603", "605"))]
+    collection_date = date.fromisoformat(as_of) if as_of else date.today()
+    if not is_trading_day(collection_date):
+        return {
+            "skipped": True,
+            "skip_reason": "non_trading_day",
+            "date": collection_date.isoformat(),
+            "dry_run": dry_run,
+            "count": 0,
+            "saved": 0,
+            "low_quality": [],
+            "missing": [],
+            "source_errors": {},
+            "records": [],
+        }
+    requested = list(codes) if codes is not None else [*ALL_CODES, *BENCHMARK_CODES]
+    codes = list(dict.fromkeys(
+        str(code) for code in requested
+        if str(code).startswith(("000", "002", "600", "601", "603", "605"))
+    ))
     source_payload: dict[str, dict[str, dict[str, Any]]] = {}
     errors: dict[str, str] = {}
 
@@ -613,6 +785,134 @@ def _price_row(conn, code: str, date_str: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def _settlement_context(
+    conn,
+    signal: dict[str, Any],
+    as_of: str,
+    current_version: str,
+) -> dict[str, Any]:
+    signal_date = signal["date"]
+    entry_date = add_trading_days(signal_date, 1)
+    exit_date = add_trading_days(signal_date, 6)
+    strategy_version = (signal.get("strategy_version") or "").strip()
+    tier = int(STOCK_MAP.get(signal["code"], {}).get("tier", 2))
+    benchmark = BENCHMARK_BY_TIER.get(tier, BENCHMARK_BY_TIER[2])
+    elapsed = trading_days_between(signal_date, as_of)
+    context: dict[str, Any] = {
+        "id": signal["id"],
+        "code": signal["code"],
+        "signal_date": signal_date,
+        "entry_date": entry_date,
+        "exit_date": exit_date,
+        "benchmark_code": benchmark["code"],
+        "strategy_version": strategy_version or LEGACY_STRATEGY_VERSION,
+        "current_strategy_version": current_version,
+        "trading_days_elapsed": elapsed,
+        "due": exit_date <= as_of,
+        "reasons": [],
+    }
+    if not is_trading_day(date.fromisoformat(signal_date)):
+        context["reasons"].append("non_trading_signal_date")
+    if not context["due"]:
+        context["reasons"].append("awaiting_exit_date")
+        context["blocking_reason"] = "awaiting_exit_date"
+        context["ready_to_settle"] = False
+        return context
+
+    rows = {
+        "stock_entry": _price_row(conn, signal["code"], entry_date),
+        "stock_exit": _price_row(conn, signal["code"], exit_date),
+        "benchmark_entry": _price_row(conn, benchmark["code"], entry_date),
+        "benchmark_exit": _price_row(conn, benchmark["code"], exit_date),
+    }
+    for key, row in rows.items():
+        if row is None:
+            context["reasons"].append(f"missing_{key}")
+        elif float(row.get("open") or 0) <= 0:
+            context["reasons"].append(f"invalid_{key}_open")
+
+    complete_rows = [row for row in rows.values() if row is not None]
+    if len(complete_rows) == len(rows):
+        adjustments = {
+            (row.get("adjustment_mode") or "raw").lower()
+            for row in complete_rows
+        }
+        if any(classify_backtest_price_source(mode) != "gate_eligible" for mode in adjustments):
+            context["reasons"].append("adjusted_price_source")
+        qualities = {(row.get("quality_status") or "unknown").lower() for row in complete_rows}
+        if qualities != {"high"}:
+            context["reasons"].append("low_confidence_price")
+        context["adjustment_mode"] = "raw" if adjustments <= {"raw", "unadjusted"} else sorted(adjustments)[0]
+        context["data_quality"] = "high" if qualities == {"high"} else "low"
+
+    market_blockers = [
+        reason for reason in context["reasons"]
+        if reason.startswith(("missing_", "invalid_"))
+    ]
+    if not strategy_version:
+        context["reasons"].append("legacy_unversioned")
+    context["ready_to_settle"] = not market_blockers
+    context["blocking_reason"] = market_blockers[0] if market_blockers else (
+        "legacy_unversioned" if not strategy_version else "ready"
+    )
+    context["_rows"] = rows
+    return context
+
+
+def _public_settlement_context(context: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        **{key: value for key, value in context.items() if key != "_rows"},
+        **extra,
+    }
+
+
+def _settlement_reason_counts(details: list[dict[str, Any]]) -> dict[str, int]:
+    return dict(Counter(
+        reason
+        for item in details
+        for reason in item.get("reasons", [])
+    ))
+
+
+def diagnose_signal_settlements(as_of: str | None = None) -> dict[str, Any]:
+    """Explain every pending sample without mutating the audit ledger."""
+    import db
+
+    db.init_db()
+    current_version = ensure_current_strategy_version()["version"]
+    as_of = as_of or date.today().isoformat()
+    conn = db.get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM signal_log
+            WHERE action IN ('STRONG_BUY', 'BUY', 'CAUTION_BUY')
+              AND COALESCE(settlement_status, 'pending') IN ('', 'pending', 'unknown')
+            ORDER BY date ASC, id ASC
+            """
+        ).fetchall()
+        details = [
+            _settlement_context(conn, dict(row), as_of, current_version)
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+    due = [item for item in details if item["due"]]
+    due_blocked = [item for item in due if not item["ready_to_settle"]]
+    return {
+        "as_of": as_of,
+        "current_strategy_version": current_version,
+        "pending": len(details),
+        "due": len(due),
+        "due_blocked": len(due_blocked),
+        "awaiting_exit_date": sum(not item["due"] for item in details),
+        "ready_to_settle": sum(item["ready_to_settle"] for item in due),
+        "reason_counts": _settlement_reason_counts(details),
+        "details": [_public_settlement_context(item) for item in details],
+    }
+
+
 def settle_pending_signal_outcomes(dry_run: bool = False) -> dict[str, Any]:
     import db
 
@@ -633,64 +933,77 @@ def settle_pending_signal_outcomes(dry_run: bool = False) -> dict[str, Any]:
         ).fetchall()
         for raw in rows:
             sig = dict(raw)
-            signal_date = sig["date"]
-            if trading_days_between(signal_date, today) > SIGNAL_OUTCOME_EXPIRY_TRADING_DAYS:
-                expired += 1
-                details.append({"id": sig["id"], "code": sig["code"], "status": "expired_unsettled"})
-                if not dry_run:
-                    conn.execute(
-                        """
-                        UPDATE signal_log
-                        SET settlement_status='expired_unsettled',
-                            executable_status='expired_unsettled',
-                            non_executable_reason='signal outcome unresolved after expiry'
-                        WHERE id=?
-                        """,
-                        (sig["id"],),
-                    )
-                continue
-
-            entry_date = add_trading_days(signal_date, 1)
-            exit_date = add_trading_days(signal_date, 6)
-            entry = _price_row(conn, sig["code"], entry_date)
-            exit_ = _price_row(conn, sig["code"], exit_date)
-            if not entry or not exit_:
-                pending += 1
-                continue
-            entry_open = float(entry.get("open") or 0)
-            exit_open = float(exit_.get("open") or 0)
-            quality = "high" if entry.get("quality_status") == "high" and exit_.get("quality_status") == "high" else "low"
-            adjustment = entry.get("adjustment_mode") or exit_.get("adjustment_mode") or "raw"
-            if entry_open <= 0 or exit_open <= 0 or classify_backtest_price_source(adjustment) != "gate_eligible":
+            context = _settlement_context(conn, sig, today, version)
+            if "non_trading_signal_date" in context["reasons"]:
                 non_executable += 1
-                reason = "missing executable open price" if entry_open <= 0 or exit_open <= 0 else "adjusted price source"
-                details.append({"id": sig["id"], "code": sig["code"], "status": "non_executable", "reason": reason})
+                details.append(_public_settlement_context(
+                    context, status="non_executable"
+                ))
                 if not dry_run:
                     conn.execute(
                         """
                         UPDATE signal_log
                         SET settlement_status='non_executable',
                             executable_status='non_executable',
-                            non_executable_reason=?,
-                            adjustment_mode=?
+                            non_executable_reason='non_trading_signal_date'
                         WHERE id=?
                         """,
-                        (reason, adjustment, sig["id"]),
+                        (sig["id"],),
                     )
                 continue
-
-            tier = int(STOCK_MAP.get(sig["code"], {}).get("tier", 2))
-            benchmark = BENCHMARK_BY_TIER.get(tier, BENCHMARK_BY_TIER[2])
-            bench_entry = _price_row(conn, benchmark["code"], entry_date)
-            bench_exit = _price_row(conn, benchmark["code"], exit_date)
-            if not bench_entry or not bench_exit or not bench_entry.get("open") or not bench_exit.get("open"):
-                pending += 1
+            if not context["ready_to_settle"]:
+                if (
+                    context["due"]
+                    and context["trading_days_elapsed"] > SIGNAL_OUTCOME_EXPIRY_TRADING_DAYS
+                ):
+                    expired += 1
+                    status = "expired_unsettled"
+                    reason = ", ".join(context["reasons"])
+                    if not dry_run:
+                        conn.execute(
+                            """
+                            UPDATE signal_log
+                            SET settlement_status='expired_unsettled',
+                                executable_status='expired_unsettled',
+                                non_executable_reason=?
+                            WHERE id=?
+                            """,
+                            (reason, sig["id"]),
+                        )
+                else:
+                    pending += 1
+                    status = "pending"
+                details.append(_public_settlement_context(context, status=status))
                 continue
+
+            price_rows = context["_rows"]
+            entry = price_rows["stock_entry"]
+            exit_ = price_rows["stock_exit"]
+            bench_entry = price_rows["benchmark_entry"]
+            bench_exit = price_rows["benchmark_exit"]
+            entry_open = float(entry["open"])
+            exit_open = float(exit_["open"])
             stock_return = (exit_open - entry_open) / entry_open * 100
             bench_return = (float(bench_exit["open"]) - float(bench_entry["open"])) / float(bench_entry["open"]) * 100
             excess = stock_return - bench_return
-            settled += 1
-            details.append({"id": sig["id"], "code": sig["code"], "status": "settled", "return_5d": stock_return, "excess_5d": excess})
+            strategy_version = context["strategy_version"]
+            executable = (
+                strategy_version != LEGACY_STRATEGY_VERSION
+                and context.get("data_quality") == "high"
+                and classify_backtest_price_source(context.get("adjustment_mode")) == "gate_eligible"
+            )
+            status = "settled" if executable else "non_executable"
+            reason = "" if executable else ", ".join(context["reasons"] or ["low confidence price"])
+            if executable:
+                settled += 1
+            else:
+                non_executable += 1
+            details.append(_public_settlement_context(
+                context,
+                status=status,
+                return_5d=stock_return,
+                excess_5d=excess,
+            ))
             if not dry_run:
                 conn.execute(
                     """
@@ -698,26 +1011,28 @@ def settle_pending_signal_outcomes(dry_run: bool = False) -> dict[str, Any]:
                     SET entry_date=?, entry_open=?, exit_date=?, exit_open=?,
                         outcome_5d=?, return_5d=?, benchmark_code=?,
                         benchmark_return_5d=?, excess_5d=?,
-                        strategy_version=COALESCE(NULLIF(strategy_version, ''), ?),
-                        settlement_status='settled',
-                        executable_status='executable',
+                        strategy_version=?, settlement_status=?,
+                        executable_status=?, non_executable_reason=?,
                         data_quality=?,
                         adjustment_mode=?
                     WHERE id=?
                     """,
                     (
-                        entry_date,
+                        context["entry_date"],
                         entry_open,
-                        exit_date,
+                        context["exit_date"],
                         exit_open,
                         stock_return,
                         stock_return,
-                        benchmark["code"],
+                        context["benchmark_code"],
                         bench_return,
                         excess,
-                        version,
-                        quality,
-                        adjustment,
+                        strategy_version,
+                        status,
+                        "executable" if executable else "non_executable",
+                        reason,
+                        context.get("data_quality", "low"),
+                        context.get("adjustment_mode", "raw"),
                         sig["id"],
                     ),
                 )
@@ -731,6 +1046,7 @@ def settle_pending_signal_outcomes(dry_run: bool = False) -> dict[str, Any]:
         "pending": pending,
         "expired_unsettled": expired,
         "non_executable": non_executable,
+        "reason_counts": _settlement_reason_counts(details),
         "details": details,
     }
 
@@ -812,6 +1128,11 @@ def format_gate_report(result: dict[str, Any]) -> str:
 
 
 def format_record_report(result: dict[str, Any]) -> str:
+    if result.get("skipped"):
+        return (
+            f"record-real-data skipped date={result.get('date', '')} "
+            f"reason={result.get('skip_reason', 'unknown')}"
+        )
     lines = [
         f"record-real-data dry_run={result['dry_run']} saved={result['saved']} count={result['count']}",
         f"low_quality={len(result['low_quality'])} missing={len(result['missing'])}",

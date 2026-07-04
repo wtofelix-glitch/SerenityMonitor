@@ -697,3 +697,48 @@ def recommend_atr_params(code: str) -> dict:
 
 def format_recommend_result(result: dict) -> str:
     return format_optimize_result(result)
+
+
+def grid_search(codes: list[str] = None, days: int = 250, silent: bool = True) -> dict:
+    """v4.0 网格搜索最优参数组合 — 对买入阈值、止损线、仓位比例做网格搜索
+
+    搜索空间:
+    - buy_threshold: [0.25, 0.30, 0.35, 0.40, 0.45] (多因子策略入场阈值)
+    - stop_loss_pct: [0.03, 0.05, 0.06, 0.08, 0.10]
+    - position_pct: [0.20, 0.25, 0.30, 0.35, 0.40]
+
+    返回最优参数组合及其夏普比率、胜率、平均收益。
+    """
+    if codes is None:
+        codes = ["002281", "000988", "600487"]
+
+    best = {"sharpe": -999, "params": {}, "win_rate": 0, "avg_return": 0}
+
+    for buy_th in [0.25, 0.30, 0.35, 0.40, 0.45]:
+        for sl_pct in [0.03, 0.05, 0.06, 0.08, 0.10]:
+            for pos_pct in [0.20, 0.25, 0.30, 0.35, 0.40]:
+                try:
+                    results = []
+                    for code in codes:
+                        bt = MultiFactorStrategy(name=f"grid_{buy_th}_{sl_pct}_{pos_pct}")
+                        r = bt.run(
+                            code, days=days,
+                            buy_threshold=buy_th,
+                            stop_loss_pct=sl_pct,
+                            position_pct=pos_pct,
+                            silent=silent,
+                        )
+                        if r and r.get("sharpe") is not None:
+                            results.append(r)
+
+                    if results:
+                        avg_sharpe = sum(r["sharpe"] for r in results) / len(results)
+                        avg_wr = sum(r.get("win_rate", 0) for r in results) / len(results)
+                        avg_ret = sum(r.get("total_return", 0) for r in results) / len(results)
+                        if avg_sharpe > best["sharpe"]:
+                            best = {"sharpe": avg_sharpe, "win_rate": avg_wr, "avg_return": avg_ret,
+                                    "params": {"buy_threshold": buy_th, "stop_loss_pct": sl_pct, "position_pct": pos_pct}}
+                except Exception:
+                    continue
+
+    return best

@@ -25,6 +25,13 @@ from serenity_logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _should_persist_signal(signal_date: date | None = None) -> bool:
+    """Only trading-session signals belong in the real validation ledger."""
+    from check_trading_day import is_trading_day
+
+    return is_trading_day(signal_date or date.today())
+
 # ============================================================
 # Conviction 动态调参引擎
 # ============================================================
@@ -148,16 +155,16 @@ def _apply_conviction_to_signal_config() -> dict:
 # 信号级别定义
 # ============================================================
 SIGNAL_LEVELS = {
-    "STRONG_BUY":   {"score": 85, "icon": "🟢🟢🟢", "desc": "强力买入",      "max_weight": 0.50},
-    "BUY":          {"score": 75, "icon": "🟢🟢",   "desc": "买入",          "max_weight": 0.40},
-    "CAUTION_BUY":  {"score": 65, "icon": "🟢",     "desc": "谨慎买入",      "max_weight": 0.25},
-    "STRONG_HOLD":  {"score": 62, "icon": "🟢⚪",   "desc": "强劲持仓",      "max_weight": 0.0},
-    "HOLD":         {"score": 50, "icon": "⚪",     "desc": "持有观望",      "max_weight": 0.0},
-    "WEAK_HOLD":    {"score": 45, "icon": "🟡",     "desc": "弱持仓/关注",    "max_weight": 0.0},
-    "CONSIDER_ADD": {"score": 60, "icon": "🟢+",    "desc": "可考虑加仓",     "max_weight": 0.15},
-    "WATCH":        {"score": 40, "icon": "🟡",     "desc": "关注",          "max_weight": 0.0},
-    "TAKE_PROFIT":  {"score": 65, "icon": "🟢💰",   "desc": "止盈提示",      "max_weight": 0.0},
-    "SELL":         {"score": 30, "icon": "🔴🔴",   "desc": "卖出",          "max_weight": 0.0},
+    "STRONG_BUY":   {"score": 70, "icon": "🟢🟢🟢", "desc": "强力买入",      "max_weight": 0.45},
+    "BUY":          {"score": 68, "icon": "🟢🟢",   "desc": "买入",          "max_weight": 0.35},
+    "CAUTION_BUY":  {"score": 60, "icon": "🟢",     "desc": "谨慎买入",      "max_weight": 0.22},
+    "STRONG_HOLD":  {"score": 58, "icon": "🟢⚪",   "desc": "强劲持仓",      "max_weight": 0.0},
+    "HOLD":         {"score": 48, "icon": "⚪",     "desc": "持有观望",      "max_weight": 0.0},
+    "WEAK_HOLD":    {"score": 42, "icon": "🟡",     "desc": "弱持仓/关注",    "max_weight": 0.0},
+    "CONSIDER_ADD": {"score": 55, "icon": "🟢+",    "desc": "可考虑加仓",     "max_weight": 0.12},
+    "WATCH":        {"score": 38, "icon": "🟡",     "desc": "关注",          "max_weight": 0.0},
+    "TAKE_PROFIT":  {"score": 60, "icon": "🟢💰",   "desc": "止盈提示",      "max_weight": 0.0},
+    "SELL":         {"score": 25, "icon": "🔴🔴",   "desc": "卖出",          "max_weight": 0.0},
     "STOP_LOSS":    {"score": 0,  "icon": "🔴🔴🔴", "desc": "止损",          "max_weight": 0.0},
 }
 
@@ -938,6 +945,34 @@ def generate_signals(codes: list[str] = None, portfolio: "PortfolioManager" = No
 
     # 按评分排序
     signals.sort(key=lambda s: s.get("total_score", 0), reverse=True)
+
+    # ── v3.6 信号多样性保障 ──
+    # 如果没有任何 BUY 类信号，将 WATCH 区间的高分股升级
+    buy_count = sum(1 for s in signals if s.get("action") in ("STRONG_BUY", "BUY", "CAUTION_BUY"))
+    if buy_count == 0:
+        for s in signals:
+            if s.get("action") == "WATCH" and s.get("total_score", 0) >= 60:
+                mo = s.get("alpha_signals", {})
+                momentum_ok = (
+                    float(mo.get("MACD_signal", 0)) > 0 or
+                    float(mo.get("RSI_signal", 50)) > 45
+                )
+                if momentum_ok:
+                    s["action"] = "CAUTION_BUY"
+                    s["signal_desc"] = "精选买入(信号荒漠升级)"
+                    s["auto_top_pick"] = True
+                    buy_count += 1
+            if buy_count >= 2:
+                break
+
+    # 如果仍然没有，取总分最高的一只非持仓 BUY 候选
+    if buy_count == 0:
+        top = signals[0] if signals else None
+        if top and top.get("is_holding") == False and top.get("total_score", 0) >= 55:
+            top["action"] = "CAUTION_BUY"
+            top["signal_desc"] = "最高分精选(信号荒漠升级)"
+            top["auto_top_pick"] = True
+
     return signals
 
 
@@ -1074,13 +1109,28 @@ def _generate_single_signal(code: str, realtime_data: dict,
 
     # 8.5 🆕 SELL 信号缓冲确认 — 防止超卖反弹前误卖
     # 目标价强制卖出和止损不经过此缓冲
-    if action == "SELL" and not (is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0):
+    # v4.0: 非持仓股 SELL → 直接降为 WATCH（历史数据: SELL 胜率仅 20%）
+    if not is_holding and action == "SELL":
+        action = "WATCH"
+        log.info("  🛡️ 非持仓SELL降级 %s: SELL → WATCH (历史胜率仅20%%)", name)
+    elif action == "SELL" and not (is_holding and price >= zone_info.get("target_sell", 0) and zone_info.get("target_sell", 0) > 0):
         sell_confirm = confirm_sell_signal(code, total_score, tech, price, detail)
         if not sell_confirm["confirmed"]:
-            # 降级：持有→WEAK_HOLD，非持有→WATCH
-            action = "WEAK_HOLD" if is_holding else "WATCH"
-            log.info("  🛡️ SELL缓冲拦截 %s: %s → %s",
-                     name, "SELL", action)
+            action = "WEAK_HOLD"
+            log.info("  🛡️ SELL缓冲拦截 %s: SELL → WEAK_HOLD", name)
+
+    # 8.6 🆕 v4.0 动量衰竭过滤器 — 禁止追高
+    # 5日涨幅>15% → 降级 BUY→WATCH, CAUTION_BUY→WATCH
+    momentum_exhausted = False
+    try:
+        change_5d = float(realtime_data.get("change_5d") or 0)
+        if change_5d > 15 and action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+            momentum_exhausted = True
+            action = "WATCH"
+            log.info("  🛑 动量衰竭拦截 %s: 5日涨幅%.1f%%>15%%, %s→WATCH", name, change_5d,
+                     "STRONG_BUY" if action in ("STRONG_BUY","BUY") else "CAUTION_BUY")
+    except Exception:
+        pass
 
     # 9. 买入确认（仅对非持仓标的）
     buy_confirm = None
@@ -1177,19 +1227,21 @@ def _generate_single_signal(code: str, realtime_data: dict,
         result["suggested_amount"] = suggested_amount
         result["suggested_shares"] = suggested_shares
 
-    # 记录信号日志（用于绩效追踪）
-    try:
-        from db import save_signal_log
-        save_signal_log(
-            code=code, action=action, total_score=total_score, price=price,
-            is_holding=is_holding, tech_score=round(tech_score, 1),
-            serenity_score=serenity_score,
-            alpha_score=_compute_alpha_composite(alpha_signals),
-            fundamental_score=round(fund_signal, 4) if fund_signal is not None else None,
-            details={"rsi": tech.get("rsi", 50), "volume_ratio": tech.get("volume_ratio", 1),
-                     "bb_position": tech.get("bb_position", 50)}
-        )
-    except Exception:
-        pass  # 日志失败不影响信号输出
+    # 记录信号日志（用于绩效追踪）。周末运行仍可展示分析结果，但不能
+    # 把同一份收盘数据重复写成新的实盘验证样本。
+    if _should_persist_signal():
+        try:
+            from db import save_signal_log
+            save_signal_log(
+                code=code, action=action, total_score=total_score, price=price,
+                is_holding=is_holding, tech_score=round(tech_score, 1),
+                serenity_score=serenity_score,
+                alpha_score=_compute_alpha_composite(alpha_signals),
+                fundamental_score=round(fund_signal, 4) if fund_signal is not None else None,
+                details={"rsi": tech.get("rsi", 50), "volume_ratio": tech.get("volume_ratio", 1),
+                         "bb_position": tech.get("bb_position", 50)}
+            )
+        except Exception as exc:
+            log.warning("Signal audit write failed for %s: %s", code, exc, exc_info=True)
 
     return result

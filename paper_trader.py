@@ -270,6 +270,66 @@ class PaperTrader:
             "reason": reason,
         }
 
+    # ── 自动交易 ──────────────────────────────────────────
+
+    def auto_trade_from_signals(self, signal_date: str, max_positions: int = 5, pct_per_trade: float = 0.10) -> list[dict]:
+        """基于当天信号自动执行纸面交易 — 为闸门积累样本"""
+        from datetime import date as dt_date
+
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT code, action, total_score, price FROM signal_log WHERE date=? AND is_holding=0",
+            (signal_date,),
+        ).fetchall()
+        conn.close()
+
+        # 只对 BUY 类信号开仓
+        buy_signals = [dict(r) for r in rows if dict(r).get("action") in ("STRONG_BUY", "BUY", "CAUTION_BUY")]
+        if not buy_signals:
+            return []
+
+        # 按评分排序
+        buy_signals.sort(key=lambda s: s.get("total_score", 0), reverse=True)
+
+        # 检查当前持仓数
+        current_positions = self.get_paper_positions()
+        current_count = len(current_positions)
+        available_slots = max_positions - current_count
+        if available_slots <= 0:
+            return []
+
+        # 计算每笔交易金额
+        portfolio = self.get_paper_portfolio()
+        cash = portfolio["cash"]
+        trade_amount = min(cash * pct_per_trade, cash / max(available_slots, 1))
+
+        results = []
+        for sig in buy_signals[:available_slots]:
+            code = sig["code"]
+            price = float(sig["price"]) if sig["price"] else 0
+            if price <= 0:
+                # 尝试从 price_history 获取
+                ph_rows = conn.execute(
+                    "SELECT close FROM price_history WHERE code=? ORDER BY date DESC LIMIT 1", (code,)
+                ).fetchall()
+                if ph_rows:
+                    price = float(ph_rows[0]["close"])
+                conn.close()
+            if price <= 0:
+                continue
+
+            shares = int(trade_amount / price / 100) * 100
+            if shares < 100:
+                shares = 100  # 最小买入单位
+
+            result = self.execute_signal(
+                code, "buy", price, shares=shares,
+                reason=f"Auto from signal {sig.get('action')} score={sig.get('total_score', 0):.0f}",
+            )
+            results.append(result)
+
+        return results
+
     # ── 速度模拟 ──────────────────────────────────────────
 
     def fast_forward_signal(self, code: str, action: str, score: float = 0) -> dict:

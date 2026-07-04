@@ -30,6 +30,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, datetime
+from config import CAPITAL_CONFIG
 
 
 def step(name: str):
@@ -43,12 +44,20 @@ def run_real_data_gate_step(dry_run: bool = False) -> dict:
     import auto_gate
     import check_trading_day
 
-    if not check_trading_day.is_trading_day():
-        print("  ⏭️ 非交易日，跳过真实数据记录与自动闸门")
-        return {"skipped": True, "record": {}, "settle": {}, "gate": {}}
-
-    record = auto_gate.record_real_data(dry_run=dry_run)
-    print("  " + auto_gate.format_record_report(record).replace("\n", "\n  "))
+    if check_trading_day.is_trading_day():
+        record = auto_gate.record_real_data(dry_run=dry_run)
+        print("  " + auto_gate.format_record_report(record).replace("\n", "\n  "))
+    else:
+        record = {
+            "skipped": True,
+            "dry_run": dry_run,
+            "saved": 0,
+            "count": 0,
+            "low_quality": [],
+            "missing": [],
+            "source_errors": {},
+        }
+        print("  ⏭️ 非交易日，不记录新行情；继续处理已有样本结算")
 
     settle = auto_gate.settle_pending_signal_outcomes(dry_run=dry_run)
     print(
@@ -59,6 +68,8 @@ def run_real_data_gate_step(dry_run: bool = False) -> dict:
         f"expired_unsettled={settle['expired_unsettled']} "
         f"non_executable={settle['non_executable']}"
     )
+    if settle.get("reason_counts"):
+        print(f"  settlement blockers {settle['reason_counts']}")
 
     gate = auto_gate.evaluate_auto_gate(explain=True)
     print("  " + auto_gate.format_gate_report(gate).replace("\n", "\n  "))
@@ -168,13 +179,14 @@ def main():
     do_execute = '--execute' in sys.argv
     dry_run = '--dry-run' in sys.argv
     today = date.today().isoformat()
+    from check_trading_day import is_trading_day
+    trading_day = is_trading_day()
     real_data_gate_result = {"skipped": True, "record": {}, "settle": {}, "gate": {}}
 
     # ── 0. 参考数据拉取 (指数/ETF) ──────────────────
     step('0/8 参考数据拉取')
     try:
-        from check_trading_day import is_trading_day
-        if is_trading_day():
+        if trading_day:
             from fetch_reference import main as fetch_ref
             fetch_ref()
         else:
@@ -188,6 +200,17 @@ def main():
         real_data_gate_result = run_real_data_gate_step(dry_run=dry_run)
     except Exception as e:
         print(f"  ⚠️ 真实数据/自动闸门失败: {e}")
+
+    if not trading_day:
+        if do_push:
+            try:
+                send_real_data_audit_push(real_data_gate_result, today=today)
+            except Exception as e:
+                print(f"  ⚠️ 非交易日审计推送失败: {e}")
+        print(f"\n{'='*50}")
+        print(f"  非交易日维护完成：未评分、未生成信号、未执行 PAPER 交易")
+        print(f"{'='*50}")
+        return
 
     # ── 1. 多因子评分 ──────────────────────────────────────
     step('1/8 多因子评分')
@@ -218,6 +241,39 @@ def main():
             print(f"     🔴 {s['name']}({s['code']}) {s['action']} {s['total_score']:.0f}分")
     except Exception as e:
         print(f"  ⚠️ 信号生成失败: {e}")
+
+    # ── 2b. 纸面自动交易（为闸门积累样本） ──────────────
+    step('2b/8 纸面自动交易')
+    try:
+        from paper_trader import PaperTrader
+        pt = PaperTrader()
+        paper_results = pt.auto_trade_from_signals(today.isoformat())
+        if paper_results:
+            bought = [r for r in paper_results if r.get("status") == "buy"]
+            print(f"  ✅ 纸面开仓 {len(bought)} 笔")
+            for r in bought:
+                print(f"     📝 {r.get('name','?')}({r.get('code','?')}) {r.get('shares',0)}股 @¥{r.get('price',0):.2f}")
+        else:
+            print(f"  ℹ️ 无符合条件的纸面交易")
+    except Exception as e:
+        print(f"  ⚠️ 纸面交易失败: {e}")
+
+    # ── 2c. 哨兵结算 — 大师预测追踪闭环 ──────────────
+    step('2c/8 哨兵观测结算')
+    try:
+        from db import settle_sentinel_outcomes
+        sentinel_result = settle_sentinel_outcomes(lookback_days=7)
+        print(f"  ✅ 结算 {sentinel_result['settled']} 条观测")
+        rank = sentinel_result.get("accuracy_ranking", [])
+        if rank:
+            print(f"  📊 大师准确率 TOP3:")
+            for r in rank[:3]:
+                total = r['total_predictions']
+                correct = r['correct_count']
+                acc = correct / total * 100 if total > 0 else 0
+                print(f"     {r['source_name']}: {acc:.0f}% ({correct}/{total})")
+    except Exception as e:
+        print(f"  ⚠️ 哨兵结算失败: {e}")
 
     # ── 3. Outcome 补填 ──────────────────────────────
     step('3/8 信号绩效补填')
@@ -370,6 +426,40 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 净值获取失败: {e}")
 
+    # ── 7f. v4.0 复利进度 + 权重进化 (周一执行) ───────────
+    try:
+        nav_growth = val["total_value"] / CAPITAL_CONFIG["initial_capital"]
+        target_mult = CAPITAL_CONFIG["target_capital"] / CAPITAL_CONFIG["initial_capital"]
+        progress_pct = (nav_growth - 1) / (target_mult - 1) * 100
+        print(f"\n  🎯 翻倍进度: {nav_growth:.2f}x (目标 {target_mult:.1f}x, 进度 {progress_pct:.0f}%)")
+
+        # 周一度量进化
+        if today.weekday() == 0:
+            from scorer import load_evolved_weights, get_stock_predictability
+            evolved = load_evolved_weights()
+            print(f"\n  🧬 权重进化 (周一):")
+            defaults = {"zone": 0.20, "momentum": 0.18, "volume": 0.04, "serenity": 0.17, "factor": 0.19, "technical": 0.10, "moat": 0.09, "capital": 0.03}
+            for dim in evolved:
+                old = defaults.get(dim, 0)
+                new = evolved.get(dim, 0)
+                delta = new - old
+                if abs(delta) >= 0.005:
+                    print(f"    {dim}: {old:.2f} → {new:.2f} ({delta:+.2f})")
+
+            # 选股可靠性排行
+            print(f"\n  📊 选股可预测性评级:")
+            from config import ALL_CODES
+            grades = []
+            for code in ALL_CODES:
+                pred = get_stock_predictability(code)
+                grades.append((code, pred["grade"], pred["predictability"], pred["sample_count"]))
+            grades.sort(key=lambda x: -x[2])
+            for code, grade, pct, n in grades:
+                icon = "🟢" if grade == "A" else "🟡" if grade == "B" else "🟠" if grade == "C" else "🔴"
+                print(f"    {icon} {code} {grade}级 ({pct}% 准确率, {n}样本)")
+    except Exception as e:
+        print(f"  ⚠️ 进度/进化失败: {e}")
+
     # ── 7c. 行业轮动简报 ──────────────────────────────
     sector_brief = ""
     sector_detail = ""
@@ -491,6 +581,36 @@ def main():
             print(f"  卖出: {', '.join(sells[:3]) if sells else '无'}{'...' if len(sells) > 3 else ''}")
     except Exception:
         pass
+
+    # ── 买入候选（观察池筛选） ──────────────────────────
+    if _scorer_results:
+        try:
+            from db import get_buy_candidates
+            candidates = get_buy_candidates(_scorer_results, top_n=3)
+            if candidates:
+                print(f"\n{'─'*50}")
+                print(f"🔍 观察池候选推荐")
+                for i, c in enumerate(candidates):
+                    print(f"  {i+1}. {c['name']}({c['code']}) {c['total_score']:.0f}分 {c.get('action','')} 动量{c['momentum_score']:.0f} UZI{c['uzi_score']:.0f}")
+        except Exception:
+            pass
+
+    # 信号多样性检查
+    if not buys:
+        print(f"\n  ⚠️ 信号多样性警告: 今日无买入类信号，建议关注候选推荐")
+
+    # 同步持仓到 Mission Control
+    try:
+        import subprocess
+        bridge = os.path.expanduser("~/.hermes/scripts/serenity_bridge.sh")
+        if os.path.exists(bridge):
+            result = subprocess.run(["bash", bridge], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                print(f"\n  📡 Mission Control 同步成功")
+            else:
+                print(f"\n  ⚠️ Mission Control 同步失败: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"\n  ⚠️ Mission Control 同步异常: {e}")
 
     print(f"\n{'='*50}")
     mode = "执行" if do_execute else "分析"

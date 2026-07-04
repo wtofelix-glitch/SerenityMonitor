@@ -189,7 +189,7 @@ class TestPositionLimits:
     def test_max_positions_reached(self):
         rm = _fresh_rm()
         result = rm.check_position_limits(
-            [{"code": "a"}, {"code": "b"}], new_amount=10000, total_value=60000
+            [{"code": "a"}, {"code": "b"}, {"code": "c"}], new_amount=10000, total_value=60000
         )
         assert len(result) > 0
         assert result[0]["triggered"] is True

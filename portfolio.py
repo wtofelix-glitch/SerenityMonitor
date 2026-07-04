@@ -243,13 +243,23 @@ class PortfolioManager:
         min_per_position = total * self.min_single_weight
 
         # Kelly 调整: high confidence → 更大仓位
-        # 翻倍模式：更高 Kelly 基线
+        # v4.0 复利引擎: NAV每增长20%, Kelly基线+0.05 (0.2→0.4封顶)
         try:
             _kelly_base = CAPITAL_CONFIG.get("_kelly_base", 0.2)
             _kelly_mult = CAPITAL_CONFIG.get("_kelly_multiplier", 0.5)
         except Exception:
             _kelly_base, _kelly_mult = 0.2, 0.5
-        kelly_fraction = _kelly_base + signal_confidence * _kelly_mult  # 激进: 0.3~0.85, 保守: 0.2~0.7
+
+        # 复利里程碑: 根据NAV增长自动提升Kelly基线
+        nav_growth = total / self.initial_capital if self.initial_capital > 0 else 1.0
+        compound_boost = 0
+        for milestone, boost in [(1.2, 0.03), (1.5, 0.05), (2.0, 0.08), (3.0, 0.10)]:
+            if nav_growth >= milestone:
+                compound_boost = boost
+        _kelly_base = min(_kelly_base + compound_boost, 0.40)
+
+        kelly_fraction = _kelly_base + signal_confidence * _kelly_mult
+        kelly_fraction = min(kelly_fraction, 0.50)  # v4.0 硬封顶: 单笔最多50%仓位
         target_amount = min(max_usable * kelly_fraction, max_per_position)
 
         # 不能小于最小仓位
