@@ -87,6 +87,8 @@ import time
 import hmac
 import ipaddress
 from datetime import datetime, timedelta
+import threading
+app_started = datetime.now()
 from functools import wraps
 from flask import Flask, jsonify, render_template, request
 
@@ -175,8 +177,10 @@ def require_write_auth(func):
     return wrapper
 
 # 模块级缓存（避免每30秒重复跑引擎）
-_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None}
-_cache_time = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None}
+_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None, "factor_ic": None}
+_cache_time = {key: None for key in _cache}
+_cache_lock = threading.RLock()
+_cache_key_locks = {key: threading.Lock() for key in _cache}
 # 分级 TTL：ETF数据每日收盘后更新 → 30分钟，评分 → 2分钟，行业轮动 → 5分钟
 # pf(组合) → 30秒：配合前端30秒刷新，确保交易后数据快速更新
 CACHE_TTL = {
@@ -186,7 +190,55 @@ CACHE_TTL = {
     "scores": timedelta(minutes=2),
     "sectors": timedelta(minutes=5),
     "qd": timedelta(minutes=2),
+    "factor_ic": timedelta(minutes=10),
 }
+
+_CACHE_MISS = object()
+
+
+def _cache_get(key: str):
+    """Return one coherent value/timestamp pair or the cache-miss sentinel."""
+    now = datetime.now()
+    with _cache_lock:
+        value = _cache.get(key)
+        cached_at = _cache_time.get(key)
+        ttl = CACHE_TTL.get(key, timedelta(0))
+        if value is not None and cached_at is not None and now - cached_at < ttl:
+            return value
+    return _CACHE_MISS
+
+
+def _cache_load(key: str, loader, fallback):
+    """Load a cache key once across concurrent Flask request threads."""
+    cached = _cache_get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    lock = _cache_key_locks.setdefault(key, threading.Lock())
+    with lock:
+        cached = _cache_get(key)
+        if cached is not _CACHE_MISS:
+            return cached
+        try:
+            value = loader()
+        except Exception as exc:
+            log.warning("Dashboard cache loader failed for %s: %s", key, exc, exc_info=True)
+            with _cache_lock:
+                stale = _cache.get(key)
+            return stale if stale is not None else fallback
+        with _cache_lock:
+            _cache[key] = value
+            _cache_time[key] = datetime.now()
+        return value
+
+
+def _cache_invalidate(key: str | None = None) -> None:
+    """Atomically invalidate one cache key or the complete dashboard cache."""
+    with _cache_lock:
+        keys = [key] if key else list(_cache)
+        for item in keys:
+            if item in _cache:
+                _cache[item] = None
+                _cache_time[item] = None
 
 # =============================================================
 # API 数据组装
@@ -265,28 +317,35 @@ def _lightweight_scores():
 def _load_db_scores():
     """从数据库加载最新评分（含 UZI details；不可用时降级到 signal_log）"""
     conn = get_conn()
+    from_signal_log = False
     try:
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(scoring_history)").fetchall()}
-        uzi_expr = "uzi_score" if "uzi_score" in cols else "NULL AS uzi_score"
-        rows = conn.execute(f"""
-            SELECT code, date, total_score, details, {uzi_expr}
-            FROM scoring_history
-            WHERE date = (SELECT MAX(date) FROM scoring_history)
-            ORDER BY total_score DESC
-        """).fetchall()
-    except Exception:
-        rows = []
-    if not rows:
-        rows = conn.execute("""
-            SELECT code, total_score, action
-            FROM signal_log
-            WHERE date = (SELECT MAX(date) FROM signal_log)
-            ORDER BY total_score DESC
-        """).fetchall()
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(scoring_history)").fetchall()}
+            uzi_expr = "uzi_score" if "uzi_score" in cols else "NULL AS uzi_score"
+            rows = conn.execute(f"""
+                SELECT code, date, total_score, details, {uzi_expr}
+                FROM scoring_history
+                WHERE date = (SELECT MAX(date) FROM scoring_history)
+                ORDER BY total_score DESC
+            """).fetchall()
+        except Exception as exc:
+            log.warning("Dashboard scoring_history fallback: %s", exc, exc_info=True)
+            rows = []
+        if not rows:
+            from_signal_log = True
+            rows = conn.execute("""
+                SELECT code, total_score, action
+                FROM signal_log
+                WHERE date = (SELECT MAX(date) FROM signal_log)
+                ORDER BY total_score DESC
+            """).fetchall()
+    finally:
         conn.close()
+
+    if from_signal_log:
         scores = []
         for i, row in enumerate(rows, 1):
-            code, score, action = row
+            code, score, action = row["code"], row["total_score"], row["action"]
             name = STOCK_MAP.get(code, {}).get("name", code)
             scores.append({
                 "code": code,
@@ -297,7 +356,6 @@ def _load_db_scores():
                 "rank": i,
             })
         return scores
-    conn.close()
     scores = []
     for i, row in enumerate(rows, 1):
         code = row["code"]
@@ -305,7 +363,8 @@ def _load_db_scores():
         name = STOCK_MAP.get(code, {}).get("name", code)
         try:
             details = json.loads(row["details"] or "{}")
-        except Exception:
+        except (TypeError, json.JSONDecodeError) as exc:
+            log.debug("Invalid score details for %s: %s", code, exc)
             details = {}
         uzi = details.get("uzi_insight", {})
         uzi_score = row["uzi_score"] if row["uzi_score"] is not None else uzi.get("uzi_score", 0)
@@ -329,15 +388,65 @@ def _load_db_scores():
         })
     return scores
 
+
+def _persist_nav_snapshot(snapshot_date: str, portfolio: dict) -> None:
+    """Persist one exact-cent NAV snapshot and always release the connection."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO nav_history
+                (date, total_value, cash, holdings_value, profit_pct, positions_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_date,
+                portfolio["total_value"],
+                portfolio["cash"],
+                portfolio["holdings_value"],
+                portfolio["total_profit_pct"],
+                json.dumps(portfolio.get("position_details", []), ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+# v5.6 性能: 预热缓存
+_preheat_cache = {}
+_preheat_ts = 0
+
+@app.route("/api/preheat")
+def api_preheat():
+    """预热缓存 — cron 每天 09:00 调用, 确保看板秒开"""
+    global _preheat_cache, _preheat_ts
+    try:
+        _preheat_cache = gather_monitor_data()
+        _preheat_ts = time.time()
+        return jsonify({"ok": True, "keys": len(_preheat_cache), "msg": "预热完成"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
 def gather_monitor_data():
-    """收集看板所需全部数据（直接从 DB 加载，不触发实时评分）"""
+    """v5.6 收集看板所需全部数据 — 含预热缓存命中"""
+    global _preheat_cache, _preheat_ts
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
+    # 30秒内预热缓存可用
+    if _preheat_cache and time.time() - _preheat_ts < 30:
+        _preheat_cache["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        _preheat_cache["ui_metadata"] = {"version": "5.6.0", "last_refresh": now.strftime("%H:%M:%S"), "alert_count": 0, "uptime_hours": round((now - app_started).total_seconds() / 3600, 1), "cached": True}
+        return _preheat_cache
+
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
     scores = _load_db_scores()
     try:
         factor_raw = get_current_signals()
-    except Exception:
+    except Exception as e:
+        log.warning("Factor signals unavailable: %s", e)
         factor_raw = []
     factors = []
     for fr in factor_raw:
@@ -349,11 +458,13 @@ def gather_monitor_data():
 
     try:
         market = get_market_signal()
-    except Exception:
+    except Exception as e:
+        log.warning("Market signal unavailable: %s", e)
         market = {}
     try:
         operational_mode = MarketSense().get_operational_mode()
-    except Exception:
+    except Exception as e:
+        log.warning("Market sense unavailable: %s", e)
         operational_mode = {"mode": "neutral", "factor_invert": False,
                            "sell_trigger_weight": 1.0, "buy_threshold_shift": 0,
                            "regime_label": "震荡市", "avg_20d_return": 0}
@@ -361,7 +472,8 @@ def gather_monitor_data():
     try:
         sector_engine = SectorRotationEngine()
         sectors = sector_engine.get_sector_rank()
-    except Exception:
+    except Exception as e:
+        log.warning("Sector rotation unavailable: %s", e)
         sectors = []
 
     ratings = []
@@ -375,30 +487,24 @@ def gather_monitor_data():
                             "score": r.get("score", 0),
                             "signal_label": r.get("signal_label", "N/A"),
                             "signal_emoji": r.get("signal_emoji", "⚪")})
-        except Exception:
+        except Exception as exc:
+            log.debug("Rating unavailable for %s: %s", code, exc)
             ratings.append({"code": code, "name": name, "rating": "N/A",
                             "rating_emoji": "❓", "score": 0,
                             "signal_label": "N/A", "signal_emoji": "⚪"})
 
     # 每日净值快照（后台保存，不影响响应）
     try:
-        import json as _json
-        pf = _get_portfolio_summary()
-        conn = get_conn()
-        conn.execute("""INSERT OR REPLACE INTO nav_history
-            (date, total_value, cash, holdings_value, profit_pct, positions_json)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (today, pf["total_value"], pf["cash"], pf["holdings_value"],
-             pf["total_profit_pct"], _json.dumps(pf.get("positions", []))))
-        conn.commit(); conn.close()
-    except Exception:
-        pass
+        _persist_nav_snapshot(today, _get_portfolio_summary())
+    except Exception as exc:
+        log.warning("NAV snapshot persistence failed: %s", exc, exc_info=True)
 
     # 🆕 v3.0 UZI AI产业链卡位面板
     try:
         from uzi_insight import get_chain_summary_table
         uzi_chain = get_chain_summary_table()
-    except Exception:
+    except Exception as e:
+        log.warning("UZI chain unavailable: %s", e)
         uzi_chain = []
 
     # 🆕 v3.0 维度IC分析简报（缓存避免每次加载跑IC）
@@ -417,13 +523,27 @@ def gather_monitor_data():
             os.makedirs(os.path.dirname(_ic_cache), exist_ok=True)
             with open(_ic_cache, "w") as f:
                 json.dump(_ic_data, f, ensure_ascii=False, default=str)
-    except Exception:
+    except Exception as exc:
+        log.warning("IC recommendation unavailable: %s", exc, exc_info=True)
         _ic_data = {"summary": "IC分析暂不可用", "warnings": [], "promotions": []}
+
+    # v5.1 昨日数据用于Δ对比
+    yesterday_summary = {}
+    try:
+        from db import get_conn
+        conn = get_conn()
+        prev_row = conn.execute("SELECT total_value, cash, holdings_value, profit_pct FROM nav_history WHERE date < ? ORDER BY date DESC LIMIT 1", (today,)).fetchone()
+        conn.close()
+        if prev_row:
+            yesterday_summary = {"total_value": prev_row["total_value"], "cash": prev_row["cash"], "holdings_value": prev_row["holdings_value"], "profit_pct": prev_row["profit_pct"]}
+    except Exception:
+        pass
 
     return {
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": today,
         "scores": scores,
+        "yesterday_summary": yesterday_summary,
         "factors": factors,
         "market": market,
         "sectors": sectors,
@@ -447,6 +567,14 @@ def gather_monitor_data():
             "warnings": _ic_data.get("warnings", []),
             "promotions": _ic_data.get("promotions", []),
             "window": _ic_data.get("analysis_window", "30d"),
+        },
+        # v5.0 ui_metadata
+        "ui_metadata": {
+            "version": "5.1.0",
+            "action_bar": ["refresh", "copy", "status"],
+            "last_refresh": now.strftime("%H:%M:%S"),
+            "alert_count": len(_build_signal_brief(scores, _get_portfolio_summary()).get("risk_alerts", [])),
+            "uptime_hours": round((now - app_started).total_seconds() / 3600, 1),
         },
     }
 
@@ -481,13 +609,14 @@ def _get_position_advice(scores):
                     final_signal = get_position_signal(score, profit, is_holding=True)
                     if final_signal in ("STRONG_HOLD", "HOLD"):
                         action = final_signal
-                except Exception:
-                    pass  # fallback to raw action
+                except Exception as exc:
+                    log.debug("Position signal fallback for %s: %s", code, exc)
 
             # Kelly 仓位计算（跳过持仓数限制，已有持仓需要算Kelly）
             try:
                 sizing = pm.calc_position_size(code, sig.get("signal_confidence", 0.5), skip_limit_check=True)
-            except Exception:
+            except Exception as exc:
+                log.debug("Position sizing unavailable for %s: %s", code, exc)
                 sizing = {}
 
             # 加减仓建议
@@ -545,8 +674,8 @@ def _get_position_advice(scores):
                             "suggested_shares": sizing.get("shares", 0),
                             "suggested_amount": sizing.get("amount", 0),
                         })
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Candidate sizing unavailable for %s: %s", s["code"], exc)
         buy_candidates.sort(key=lambda x: x["score"], reverse=True)
 
         return {
@@ -595,7 +724,8 @@ def _get_stop_conditions():
                 "actions": action_map.get(code, []),
             })
         return result
-    except Exception:
+    except Exception as exc:
+        log.warning("Stop-condition summary unavailable: %s", exc, exc_info=True)
         return []
 
 def _get_target_tracker():
@@ -604,7 +734,8 @@ def _get_target_tracker():
         from portfolio import PortfolioManager
         pm = PortfolioManager()
         return pm.get_target_tracker()
-    except Exception:
+    except Exception as exc:
+        log.warning("Target tracker unavailable: %s", exc, exc_info=True)
         return {}
 
 def _build_compliance_flow(status: str) -> list[dict]:
@@ -650,7 +781,8 @@ def _get_recent_data_quality_warnings(limit: int = 3) -> list[dict]:
             if len(warnings) >= limit:
                 break
         return warnings
-    except Exception:
+    except Exception as exc:
+        log.warning("Data-quality warnings unavailable: %s", exc, exc_info=True)
         return []
 
 
@@ -698,28 +830,19 @@ def _get_auto_gate_card():
 
 def _get_quantdinger_consensus():
     """QuantDinger 风格客观共识（只读，短缓存）。"""
-    now = datetime.now()
-    if _cache["qd"] and _cache_time["qd"] and (now - _cache_time["qd"]) < CACHE_TTL["qd"]:
-        return _cache["qd"]
-    try:
-        data = build_quantdinger_consensus(limit=6)
-        _cache["qd"] = data
-        _cache_time["qd"] = now
-        return data
-    except Exception as e:
-        log.warning("QuantDinger consensus fallback failed: %s", e)
-        return _cache["qd"] or {
-            "latest_date": None,
-            "coverage": "0/0",
-            "coverage_pct": 0,
-            "universe_score": 0,
-            "universe_decision": "NO_DATA",
-            "quality_multiplier": 0,
-            "agreement_ratio": 0,
-            "signals": [],
-            "top_opportunities": [],
-            "risk_flags": [],
-        }
+    fallback = {
+        "latest_date": None,
+        "coverage": "0/0",
+        "coverage_pct": 0,
+        "universe_score": 0,
+        "universe_decision": "NO_DATA",
+        "quality_multiplier": 0,
+        "agreement_ratio": 0,
+        "signals": [],
+        "top_opportunities": [],
+        "risk_flags": [],
+    }
+    return _cache_load("qd", lambda: build_quantdinger_consensus(limit=6), fallback)
 
 def _build_signal_brief(scores, pf_summary):
     """从评分+持仓中提取可执行信号简报"""
@@ -761,59 +884,51 @@ def _build_signal_brief(scores, pf_summary):
 
 def _get_etf_top5():
     """ETF 动量轮动 Top 5（30分钟缓存）"""
-    now = datetime.now()
-    if _cache["etf"] and _cache_time["etf"] and (now - _cache_time["etf"]) < CACHE_TTL["etf"]:
-        return _cache["etf"]
-    try:
+    def load():
         ems = ETFMomentumStrategy()
-        ranks = ems.rank_all()
-        _cache["etf"] = ranks[:5]
-        _cache_time["etf"] = now
-        return _cache["etf"]
-    except Exception:
-        return _cache["etf"] or []
+        return ems.rank_all()[:5]
+    return _cache_load("etf", load, [])
 
 
 def _get_dividend_top5():
     """红利低波 Top 5（5分钟缓存）"""
-    now = datetime.now()
-    if _cache["dividend"] and _cache_time["dividend"] and (now - _cache_time["dividend"]) < CACHE_TTL["dividend"]:
-        return _cache["dividend"]
-    try:
+    def load():
         de = DividendEngine()
-        results = de.score_all()
-        _cache["dividend"] = results[:5]
-        _cache_time["dividend"] = now
-        return _cache["dividend"]
-    except Exception:
-        return _cache["dividend"] or []
+        return de.score_all()[:5]
+    return _cache_load("dividend", load, [])
+
+
+def _dashboard_position_details(positions: list[dict], total_value: float) -> list[dict]:
+    """Normalize display weights after the full portfolio value is known."""
+    denominator = float(total_value or 0)
+    result = []
+    for position in positions:
+        item = dict(position)
+        current_value = float(item.get("current_value") or 0)
+        item["weight"] = round(current_value / denominator * 100, 1) if denominator > 0 else 0
+        result.append(item)
+    return result
 
 
 def _get_portfolio_summary():
     """组合摘要 + 真实盈亏（5分钟缓存，使用 PortfolioManager）"""
-    now = datetime.now()
-    if _cache["pf"] and _cache_time["pf"] and (now - _cache_time["pf"]) < CACHE_TTL["pf"]:
-        return _cache["pf"]
-    try:
+    def load():
         pm = PortfolioManager()
         pf_data = pm.get_portfolio_value()
-        # Debug: force reload from fresh PortfolioManager
-        log.debug("Portfolio: total=%.0f cash=%.0f positions=%d", 
+        log.debug("Portfolio: total=%.2f cash=%.2f positions=%d",
             pf_data["total_value"], pf_data["cash"], pf_data["position_count"])
-        result = {
+        return {
             "positions": pf_data["position_count"],
-            "total_value": round(pf_data["total_value"], 0),
-            "cash": round(pf_data["cash"], 0),
-            "holdings_value": round(pf_data["holdings_value"], 0),
+            "total_value": round(pf_data["total_value"], 2),
+            "cash": round(pf_data["cash"], 2),
+            "holdings_value": round(pf_data["holdings_value"], 2),
             "total_profit_pct": pf_data["total_profit_pct"],
-            "total_profit_amount": round(pf_data["total_profit_amount"], 0),
-            "position_details": pf_data["positions"],  # 每只持仓的真实盈亏
+            "total_profit_amount": round(pf_data["total_profit_amount"], 2),
+            "position_details": _dashboard_position_details(
+                pf_data["positions"], pf_data["total_value"]
+            ),
         }
-        _cache["pf"] = result
-        _cache_time["pf"] = now
-        return result
-    except Exception:
-        return _cache["pf"] or {"positions": 0, "total_value": 0}
+    return _cache_load("pf", load, {"positions": 0, "total_value": 0})
 
 
 @app.route("/monitor")
@@ -823,6 +938,26 @@ def index():
     return render_template("monitor.html")
 
 
+@app.route("/api/quick-snapshot")
+def api_quick_snapshot():
+    """v5.2 快速快照: 内存缓存 + 10秒TTL, <200ms"""
+    cache_key = "_quick_snapshot_cache"
+    now = time.time()
+    if cache_key in _cache and now - _cache.get(cache_key + "_ts", 0) < 10:
+        return jsonify(_cache[cache_key])
+
+    try:
+        pf = _get_portfolio_summary()
+        scores = _load_db_scores()
+        gate = _get_auto_gate_card()
+        result = {"ok": True, "portfolio": pf, "scores": scores, "gate": {"state": gate.get("state", "?"), "sample_count": gate.get("sample_count", 0), "win_rate": gate.get("win_rate", 0)}, "timestamp": datetime.now().strftime("%H:%M:%S"), "cached": True}
+        _cache[cache_key] = result
+        _cache[cache_key + "_ts"] = now
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/monitor-data")
 def api_monitor_data():
     API_CALLS.labels(source="dashboard_api").inc()
@@ -830,9 +965,7 @@ def api_monitor_data():
         # ?force=1 时跳过缓存，强制拉实时数据
         force = request.args.get("force", "").lower() in ("1", "true", "yes")
         if force:
-            for key in _cache:
-                _cache[key] = None
-                _cache_time[key] = None
+            _cache_invalidate()
 
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
@@ -925,6 +1058,7 @@ def _db_only_portfolio_summary():
         total_value = cash + holdings_value
         initial = CAPITAL_CONFIG.get("initial_capital", 50000.0)
         total_profit_pct = (total_value - initial) / initial * 100
+        details = _dashboard_position_details(details, total_value)
 
         return {
             "positions": len(details),
@@ -985,17 +1119,21 @@ def _quick_db_fallback():
 def api_signal_history():
     """返回近 7 天买入信号及其绩效"""
     from db import get_conn
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT code, date, time, action, total_score, price,
-               outcome_1d, outcome_3d, outcome_5d, outcome_10d
-        FROM signal_log
-        WHERE date >= date('now', '-7 days')
-          AND action IN ('BUY','CAUTION_BUY','STRONG_BUY')
-        ORDER BY date DESC, time DESC
-        LIMIT 20
-    """).fetchall()
-    conn.close()
+    conn = None
+    try:
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT code, date, time, action, total_score, price,
+                   outcome_1d, outcome_3d, outcome_5d, outcome_10d
+            FROM signal_log
+            WHERE date >= date('now', '-7 days')
+              AND action IN ('BUY','CAUTION_BUY','STRONG_BUY')
+            ORDER BY date DESC, time DESC
+            LIMIT 20
+        """).fetchall()
+    finally:
+        if conn is not None:
+            conn.close()
     result = []
     for r in rows:
         result.append({
@@ -1088,13 +1226,20 @@ def api_metrics():
 def api_nav_history():
     """返回净值历史，用于前端 Canvas 绘制"""
     from db import get_conn
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT date, total_value, profit_pct
-        FROM nav_history
-        ORDER BY date ASC
-    """).fetchall()
-    conn.close()
+    conn = None
+    try:
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT date, total_value, profit_pct
+            FROM nav_history
+            ORDER BY date ASC
+        """).fetchall()
+    except Exception:
+        log.exception("读取净值历史失败")
+        return jsonify({"ok": False, "error": "净值历史暂不可用"}), 500
+    finally:
+        if conn is not None:
+            conn.close()
     result = []
     for r in rows:
         result.append({
@@ -1103,67 +1248,58 @@ def api_nav_history():
             "profit_pct": round(r["profit_pct"], 2) if r["profit_pct"] is not None else None,
         })
     return jsonify({"ok": True, "data": result})
+def _compute_factor_ic_payload() -> dict:
+    """Compute the canonical factor-IC payload used by every dashboard route."""
+    from factor_ic import compute_rank_ic, DIMENSION_LABELS
+    result = compute_rank_ic(days=30, window=20)
+    if 'error' in result:
+        raise RuntimeError(result['error'])
+    dims = list(result.get('latest', {}).keys())
+    summary = [{
+        'dimension': dim,
+        'label': DIMENSION_LABELS.get(dim, dim),
+        'latest_ic': result['latest'].get(dim, 0),
+        'mean_ic': result['mean_ic'].get(dim, 0),
+        'ic_ir': result['ic_ir'].get(dim, 0),
+        'win_rate': result['win_rate'].get(dim, 0),
+        'n_days': result['n_days'].get(dim, 0),
+    } for dim in dims]
+    summary.sort(key=lambda item: abs(item['latest_ic']), reverse=True)
+    rankings = result.get('rankings', {})
+    top_factors = [{
+        'dimension': dim, 'label': DIMENSION_LABELS.get(dim, dim), 'ic': value,
+    } for dim, value in rankings.get('best', [])][:3]
+    weak_factors = [{
+        'dimension': dim, 'label': DIMENSION_LABELS.get(dim, dim), 'ic': value,
+    } for dim, value in rankings.get('worst', [])]
+    trend = [{
+        'dimension': dim,
+        'label': DIMENSION_LABELS.get(dim, dim),
+        'values': result.get('all_ics', {}).get(dim, [])[-20:],
+    } for dim in dims[:3]]
+    return {
+        'updated': datetime.now().isoformat(),
+        'window': 20,
+        'days': 30,
+        'ic_summary': summary,
+        'ic_trend': trend,
+        'top_factors': top_factors,
+        'weak_factors': weak_factors[-3:] if weak_factors else [],
+    }
+
+
+def _get_factor_ic_payload() -> dict:
+    return _cache_load("factor_ic", _compute_factor_ic_payload, {})
+
+
 @app.route('/api/factor-ic')
 def api_factor_ic():
     """因子 IC 归因 — 各评分维度的 Rank IC"""
-    from factor_ic import compute_rank_ic, DIMENSION_LABELS
     try:
-        result = compute_rank_ic(days=30, window=20)
-        if 'error' in result:
-            return jsonify({'ok': False, 'error': result['error']}), 500
-
-        # Build summary list sorted by absolute IC
-        dims = list(result.get('latest', {}).keys())
-        summary = []
-        for dim in dims:
-            summary.append({
-                'dimension': dim,
-                'label': DIMENSION_LABELS.get(dim, dim),
-                'latest_ic': result['latest'].get(dim, 0),
-                'mean_ic': result['mean_ic'].get(dim, 0),
-                'ic_ir': result['ic_ir'].get(dim, 0),
-                'win_rate': result['win_rate'].get(dim, 0),
-                'n_days': result['n_days'].get(dim, 0),
-            })
-        summary.sort(key=lambda x: abs(x['latest_ic']), reverse=True)
-
-        # Top / weak factors
-        rankings = result.get('rankings', {})
-        top_factors = []
-        for dim, ic_val in rankings.get('best', []):
-            top_factors.append({
-                'dimension': dim,
-                'label': DIMENSION_LABELS.get(dim, dim),
-                'ic': ic_val,
-            })
-        weak_factors = []
-        for dim, ic_val in rankings.get('worst', []):
-            weak_factors.append({
-                'dimension': dim,
-                'label': DIMENSION_LABELS.get(dim, dim),
-                'ic': ic_val,
-            })
-
-        # Trend data (latest 20 days IC sequence for top 3 dimensions)
-        all_ics = result.get('all_ics', {})
-        trend = []
-        for dim in dims[:3]:
-            trend.append({
-                'dimension': dim,
-                'label': DIMENSION_LABELS.get(dim, dim),
-                'values': all_ics.get(dim, [])[-20:],
-            })
-
-        return jsonify({
-            'ok': True,
-            'updated': datetime.now().isoformat(),
-            'window': 20,
-            'days': 30,
-            'ic_summary': summary,
-            'ic_trend': trend,
-            'top_factors': top_factors[:3],
-            'weak_factors': weak_factors[-3:] if weak_factors else [],
-        })
+        payload = _get_factor_ic_payload()
+        if not payload:
+            raise RuntimeError("factor IC unavailable")
+        return jsonify({'ok': True, **payload})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -1247,9 +1383,7 @@ def api_trades():
 @require_write_auth
 def api_clear_cache():
     """清空所有API缓存，前端立即看到最新数据"""
-    for key in _cache:
-        _cache[key] = None
-        _cache_time[key] = None
+    _cache_invalidate()
     log.info("全部API缓存已清除")
     return jsonify({"ok": True, "msg": "缓存已清除"})
 
@@ -1292,10 +1426,14 @@ def api_hermes_trade():
                        detail.get('target_sell', 0),
                        detail.get('buy_zone_low', 0))
             # 更新 trade_amount
-            conn = get_conn()
-            conn.execute("UPDATE stocks SET trade_amount=? WHERE code=?", (amount, code))
-            conn.commit()
-            conn.close()
+            conn = None
+            try:
+                conn = get_conn()
+                conn.execute("UPDATE stocks SET trade_amount=? WHERE code=?", (amount, code))
+                conn.commit()
+            finally:
+                if conn is not None:
+                    conn.close()
             log.info("Hermes 买入: %s %d股 @%.2f = ¥%.0f", code, qty, price, amount)
         elif action == 'sell':
             clear_active(code)
@@ -1305,10 +1443,7 @@ def api_hermes_trade():
         _calibrate_cash()
 
         # 使缓存失效
-        for k in list(_cache.keys()):
-            _cache[k] = None
-            if k in _cache_time:
-                _cache_time[k] = None
+        _cache_invalidate()
 
         return jsonify({"ok": True, "msg": f"{'买入' if action=='buy' else '卖出'} {code} {price}×{qty}股", "amount": amount})
     except Exception as e:
@@ -1321,95 +1456,107 @@ def api_hermes_balance():
     """Hermes/WeChat 推送的资产校准
     JSON: { cash, positions: [{ code, price, quantity, cost }] }
     """
-    from db import get_conn, set_active, clear_active, add_trade, upsert_stock
+    from db import get_conn
     from config import STOCK_MAP
 
     data = request.get_json(silent=True) or {}
     if not data:
         return jsonify({"ok": False, "msg": "需要 JSON body"}), 400
 
+    conn = None
     try:
         today = datetime.now().strftime('%Y-%m-%d')
-
-        # Update cash
         cash = float(data.get('cash', 0))
+        positions = []
+        for raw in data.get('positions', []):
+            code = str(raw.get('code', '')).strip()
+            if not code:
+                continue
+            cost = float(raw.get('cost', 0))
+            qty = int(raw.get('quantity', 0))
+            if cost <= 0 or qty <= 0:
+                raise ValueError(f"持仓 {code} 的 cost/quantity 必须大于 0")
+            positions.append((code, cost, qty))
+
         conn = get_conn()
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM trades WHERE code='CASH'")
         conn.execute(
             "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
-            ('CASH', 'sell', cash, 1, today, 'Hermes资产校准', 0.0)
+            ('CASH', 'sell', cash, 1, today, 'Hermes资产校准', 0.0),
         )
-        conn.commit()
-        conn.close()
 
-        # Update positions
-        updated_codes = set()
-        for pos in data.get('positions', []):
-            code = pos.get('code', '')
-            if not code:
-                continue
-            updated_codes.add(code)
-
-            cost = float(pos.get('cost', 0))
-            qty = int(pos.get('quantity', 0))
-            price = float(pos.get('price', 0))
-
-            name = STOCK_MAP.get(code, {}).get('name', code)
-            upsert_stock({
-                'code': code, 'name': name, 'market': STOCK_MAP.get(code,{}).get('market','主板'),
-                'tier': STOCK_MAP.get(code,{}).get('tier',''),
-                'buy_price': cost, 'buy_date': today,
-                'target_high': 0, 'target_low': 0, 'stop_loss': 0,
-                'is_active': 1, 'notes': 'Hermes校准'
-            })
-
-            # Replace trades for this code
-            conn = get_conn()
+        updated_codes = {code for code, _, _ in positions}
+        for code, cost, qty in positions:
+            stock = STOCK_MAP.get(code, {})
+            conn.execute(
+                """
+                INSERT INTO stocks
+                    (code, name, market, tier, buy_price, buy_date,
+                     target_high, target_low, stop_loss, is_active, notes, trade_amount)
+                VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 1, 'Hermes校准', ?)
+                ON CONFLICT(code) DO UPDATE SET
+                    name=excluded.name, market=excluded.market, tier=excluded.tier,
+                    buy_price=excluded.buy_price, buy_date=excluded.buy_date,
+                    is_active=1, notes=excluded.notes, trade_amount=excluded.trade_amount
+                """,
+                (code, stock.get('name', code), stock.get('market', '主板'),
+                 stock.get('tier', 2), cost, today, cost * qty),
+            )
             conn.execute("DELETE FROM trades WHERE code=?", (code,))
             conn.execute(
                 "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
-                (code, 'buy', cost, qty, today, f'Hermes校准', cost * qty)
+                (code, 'buy', cost, qty, today, 'Hermes校准', cost * qty),
             )
-            conn.commit()
-            conn.close()
 
-        # Clear inactive old positions
-        conn = get_conn()
-        for r in conn.execute("SELECT code FROM stocks WHERE is_active=1 AND code NOT IN ({}) AND code != 'CASH'".format(
-            ','.join('?' for _ in updated_codes)), list(updated_codes)):
-            conn.execute("UPDATE stocks SET is_active=0 WHERE code=?", (r['code'],))
+        if updated_codes:
+            placeholders = ','.join('?' for _ in updated_codes)
+            conn.execute(
+                f"UPDATE stocks SET is_active=0 WHERE is_active=1 AND code!='CASH' AND code NOT IN ({placeholders})",
+                tuple(sorted(updated_codes)),
+            )
+        else:
+            conn.execute("UPDATE stocks SET is_active=0 WHERE is_active=1 AND code!='CASH'")
         conn.commit()
-        conn.close()
-
-        # Invalidate caches
-        for k in list(_cache.keys()):
-            _cache[k] = None
-            if k in _cache_time:
-                _cache_time[k] = None
+        _cache_invalidate()
 
         log.info("Hermes 资产校准完成: 现金 ¥%.0f, %d 只持仓", cash, len(updated_codes))
         return jsonify({"ok": True, "msg": f"校准完成: 现金¥{cash:.0f}, {len(updated_codes)}只持仓"})
     except Exception as e:
+        if conn is not None:
+            conn.rollback()
+        log.warning("Hermes balance calibration rolled back: %s", e, exc_info=True)
         return jsonify({"ok": False, "msg": str(e)}), 400
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _calibrate_cash():
     """根据 trades 表重新计算并记录现金余额"""
     from db import get_conn
     from config import CAPITAL_CONFIG
-    conn = get_conn()
-    rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code != 'CASH'").fetchall()
-    initial = CAPITAL_CONFIG.get('initial_capital', 50000)
-    bought = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'buy')
-    sold = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'sell')
-    cash = max(0, initial - bought + sold)
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn.execute("DELETE FROM trades WHERE code='CASH'")
-    conn.execute("INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
-                 ('CASH', 'sell', cash, 1, today, '自动校准', 0.0))
-    conn.commit()
-    conn.close()
-    return cash
+    conn = None
+    try:
+        conn = get_conn()
+        rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code != 'CASH'").fetchall()
+        initial = CAPITAL_CONFIG.get('initial_capital', 50000)
+        bought = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'buy')
+        sold = sum(r['trade_amount'] or r['price'] * r['quantity'] for r in rows if r['action'] == 'sell')
+        cash = max(0, initial - bought + sold)
+        today = datetime.now().strftime('%Y-%m-%d')
+        conn.execute("DELETE FROM trades WHERE code='CASH'")
+        conn.execute("INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
+                     ('CASH', 'sell', cash, 1, today, '自动校准', 0.0))
+        conn.commit()
+        return cash
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @app.route("/api/hermes/health")
@@ -1418,39 +1565,44 @@ def api_hermes_health():
     from db import get_conn
     from config import STOCK_MAP
     from datetime import date
-    conn = get_conn()
+    conn = None
     issues = []
+    try:
+        conn = get_conn()
+        # 检查1: 活跃持仓的净股数
+        for r in conn.execute("SELECT code, buy_price FROM stocks WHERE is_active=1 AND code!='CASH'").fetchall():
+            bought = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='buy'",(r['code'],)).fetchone()[0]
+            sold = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='sell'",(r['code'],)).fetchone()[0]
+            net = bought - sold
+            if net <= 0:
+                issues.append({"type": "stale_position", "code": r['code'], "detail": f"net={net}"})
 
-    # 检查1: 活跃持仓的净股数
-    for r in conn.execute("SELECT code, buy_price FROM stocks WHERE is_active=1 AND code!='CASH'").fetchall():
-        bought = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='buy'",(r['code'],)).fetchone()[0]
-        sold = conn.execute("SELECT COALESCE(SUM(quantity),0) FROM trades WHERE code=? AND action='sell'",(r['code'],)).fetchone()[0]
-        net = bought - sold
-        if net <= 0:
-            issues.append({"type": "stale_position", "code": r['code'], "detail": f"net={net}"})
+        # 检查2: 现金一致性
+        cash_rec = conn.execute("SELECT price FROM trades WHERE code='CASH' AND action='sell' ORDER BY rowid DESC LIMIT 1").fetchone()
+        cash_val = cash_rec['price'] if cash_rec else 0
+        rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code!='CASH'").fetchall()
+        initial = CAPITAL_CONFIG.get("initial_capital", 50000)
+        bought = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='buy')
+        sold = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='sell')
+        formula = max(0, initial - bought + sold)
+        if abs(cash_val - formula) > 100:
+            issues.append({"type": "cash_mismatch", "detail": f"record={cash_val:.0f} formula={formula:.0f} gap={cash_val-formula:.0f}"})
 
-    # 检查2: 现金一致性
-    cash_rec = conn.execute("SELECT price FROM trades WHERE code='CASH' AND action='sell' ORDER BY rowid DESC LIMIT 1").fetchone()
-    cash_val = cash_rec['price'] if cash_rec else 0
-    rows = conn.execute("SELECT action, trade_amount, price, quantity FROM trades WHERE code!='CASH'").fetchall()
-    initial = 50000
-    bought = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='buy')
-    sold = sum(r['trade_amount'] or r['price']*r['quantity'] for r in rows if r['action']=='sell')
-    formula = max(0, initial - bought + sold)
-    if abs(cash_val - formula) > 100:
-        issues.append({"type": "cash_mismatch", "detail": f"record={cash_val:.0f} formula={formula:.0f} gap={cash_val-formula:.0f}"})
-
-    # 检查3: 重复交易
-    for r in conn.execute("""
-        SELECT code, date, action, price, quantity, COUNT(*) as cnt
-        FROM trades WHERE date >= date('now','-7 days')
-        GROUP BY code, date, action, price, quantity
-        HAVING cnt > 1
-    """).fetchall():
-        issues.append({"type": "duplicate_trade", "code": r['code'],
-                       "detail": f"{r['date']} {r['action']} {r['price']}x{r['quantity']} ×{r['cnt']}"})
-
-    conn.close()
+        # 检查3: 重复交易
+        for r in conn.execute("""
+            SELECT code, date, action, price, quantity, COUNT(*) as cnt
+            FROM trades WHERE date >= date('now','-7 days')
+            GROUP BY code, date, action, price, quantity
+            HAVING cnt > 1
+        """).fetchall():
+            issues.append({"type": "duplicate_trade", "code": r['code'],
+                           "detail": f"{r['date']} {r['action']} {r['price']}x{r['quantity']} ×{r['cnt']}"})
+    except Exception:
+        log.exception("Hermes 数据完整性检查失败")
+        return jsonify({"ok": False, "error": "数据完整性检查失败"}), 500
+    finally:
+        if conn is not None:
+            conn.close()
 
     return jsonify({
         "ok": True,
@@ -1554,7 +1706,7 @@ def api_execute():
     """执行当前交易计划（仅记录到本地DB，不在券商下单）"""
     try:
         from auto_execute import generate_execution_plan
-        from db import set_active, clear_active, add_trade, get_conn
+        from db import set_active, clear_active, add_trade
         from config import STOCK_DETAILS
         from backtest_engine import recommend_atr_params
         from datetime import date
@@ -1571,8 +1723,7 @@ def api_execute():
 
         for s in plan["sells"]:
             # 安全闸：只卖出活跃持仓中的标的
-            stock = get_conn().execute("SELECT is_active FROM stocks WHERE code = ?", (s["code"],)).fetchone()
-            if not stock or not stock["is_active"]:
+            if not _is_active_stock(s["code"]):
                 log.warning(f"跳过卖出 {s['code']}: 非活跃持仓")
                 continue
             price = s["estimated_proceeds"] / max(s["shares"], 1)
@@ -1588,6 +1739,7 @@ def api_execute():
                 atr_rec = recommend_atr_params(b["code"])
                 stop_pct = atr_rec.get("suggested_stop_pct", 8.0)
             except Exception:
+                log.exception("ATR 参数读取失败，使用默认止损: %s", b["code"])
                 stop_pct = 8.0
             stop_price = round(price * (1 - stop_pct / 100), 2)
 
@@ -1596,28 +1748,16 @@ def api_execute():
             target_low = target.get("buy_zone_low", 0)
 
             if is_topup:
-                # 加仓：累加 trade_amount，不重置已有持仓
-                try:
-                    conn = get_conn()
-                    existing = conn.execute("SELECT trade_amount FROM stocks WHERE code=?", (b["code"],)).fetchone()
-                    old_amount = float(existing["trade_amount"] or 0) if existing else 0
-                    new_amount = old_amount + (b["amount"] or 0)
-                    conn.execute("UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
-                               (stop_price, new_amount, f"加仓+{b['shares']}股", b["code"]))
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
+                _update_execution_stock(
+                    b["code"], stop_price, b["amount"] or 0,
+                    f"加仓+{b['shares']}股", accumulate=True,
+                )
             else:
                 set_active(b["code"], price, today, target_high, target_low)
-                try:
-                    conn = get_conn()
-                    conn.execute("UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
-                               (stop_price, b["amount"], f"auto买入{b['shares']}股", b["code"]))
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
+                _update_execution_stock(
+                    b["code"], stop_price, b["amount"],
+                    f"auto买入{b['shares']}股",
+                )
 
             add_trade(b["code"], "buy", price, b["shares"], today,
                       f"auto: score={b.get('score',0):.0f} {b.get('signal','')}", trade_amount=b["amount"])
@@ -1630,17 +1770,65 @@ def api_execute():
         return jsonify({"ok": False, "msg": str(e)}), 500
 
 
-def _plan_already_executed(plan):
-    """检查计划是否已在今天执行过"""
+def _is_active_stock(code: str) -> bool:
+    """Read the active flag without leaking the short-lived connection."""
+    conn = None
     try:
-        from db import get_conn
-        from datetime import date
-        today = date.today().isoformat()
         conn = get_conn()
+        row = conn.execute(
+            "SELECT is_active FROM stocks WHERE code = ?", (code,)
+        ).fetchone()
+        return bool(row and row["is_active"])
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _update_execution_stock(
+    code: str,
+    stop_price: float,
+    trade_amount: float,
+    note: str,
+    *,
+    accumulate: bool = False,
+) -> None:
+    """Persist execution metadata in one observable DB operation."""
+    conn = None
+    try:
+        conn = get_conn()
+        amount = float(trade_amount or 0)
+        if accumulate:
+            row = conn.execute(
+                "SELECT trade_amount FROM stocks WHERE code = ?", (code,)
+            ).fetchone()
+            amount += float(row["trade_amount"] or 0) if row else 0
+        conn.execute(
+            "UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?",
+            (stop_price, amount, note, code),
+        )
+        conn.commit()
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        log.exception("执行计划元数据写入失败: %s", code)
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _plan_already_executed(plan: dict) -> bool:
+    """Check whether the specific trades in the plan were already recorded today."""
+    conn = None
+    try:
+        conn = get_conn()
+        today = datetime.now().strftime("%Y-%m-%d")
         trade_codes = set()
-        for r in conn.execute("SELECT code, action FROM trades WHERE date = ?", (today,)).fetchall():
+        for r in conn.execute(
+            "SELECT code, LOWER(action) AS action FROM trades WHERE date = ?",
+            (today,),
+        ).fetchall():
             trade_codes.add(f"{r['code']}:{r['action']}")
-        conn.close()
 
         plan_codes = set()
         for s in plan.get("sells", []):
@@ -1649,257 +1837,157 @@ def _plan_already_executed(plan):
             plan_codes.add(f"{b['code']}:buy")
 
         if not plan_codes:
-            return True  # 无计划 = 视为已执行
+            return True
         return plan_codes.issubset(trade_codes)
-    except Exception:
+    except Exception as exc:
+        log.warning("Execution-plan match failed: %s", exc, exc_info=True)
         return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
-# ===== 异常事件 API =====
 @app.route("/api/anomalies")
 def api_anomalies():
-    """返回未确认的异常事件（含价格异动/信号突变/因子突变）"""
+    """Return unacknowledged anomalies consumed by the risk dashboard."""
     try:
         from db import get_unacknowledged_anomalies
-        raw = get_unacknowledged_anomalies(limit=10)
+
         anomalies = []
-        for r in raw:
+        for item in get_unacknowledged_anomalies(limit=10):
+            row = dict(item)
             anomalies.append({
-                "id": r["id"],
-                "code": r["code"],
-                "name": r.get("name") or STOCK_MAP.get(r["code"], {}).get("name", r["code"]),
-                "level": r["level"],
-                "type": r["alert_type"],
-                "price": r["price"],
-                "message": r["message"][:200],
-                "created_at": r["created_at"],
+                "id": row["id"],
+                "code": row["code"],
+                "name": row.get("name") or STOCK_MAP.get(row["code"], {}).get("name", row["code"]),
+                "level": row["level"],
+                "type": row["alert_type"],
+                "price": row["price"],
+                "message": row["message"][:200],
+                "created_at": row["created_at"],
             })
-        emerg = [a for a in anomalies if a["level"] == "A"]
-        warnings = [a for a in anomalies if a["level"] == "B"]
-        info = [a for a in anomalies if a["level"] == "C"]
         return jsonify({
             "ok": True,
             "count": len(anomalies),
-            "emergency_count": len(emerg),
-            "warning_count": len(warnings),
-            "info_count": len(info),
+            "emergency_count": sum(item["level"] == "A" for item in anomalies),
+            "warning_count": sum(item["level"] == "B" for item in anomalies),
+            "info_count": sum(item["level"] == "C" for item in anomalies),
             "anomalies": anomalies[:5],
-            "emergencies": emerg[:3],
+            "emergencies": [item for item in anomalies if item["level"] == "A"][:3],
         })
-    except Exception as e:
-        log.error("anomalies API failed: %s", e, exc_info=True)
-        return jsonify({"ok": False, "error": str(e)})
-
-# ===== 今日策略增强 API（聚合大师+异动+信号） =====
-@app.route("/api/today-strategy")
-def api_today_strategy():
-    """返回今日策略增强数据：大师情绪摘要 + 最强买入信号 + 异动摘要"""
-    try:
-        from guru_wisdom import status as guru_status
-        from guru_wisdom import get_recent_quotes
-        stats = guru_status()
-        sd = stats["sentiment_distribution"]
-        total = max(sd["bullish"] + sd["bearish"] + sd["neutral"], 1)
-        recent_quotes = get_recent_quotes(3)
-        guru_summary = {
-            "bullish_pct": round(sd["bullish"] / total * 100),
-            "bearish_pct": round(sd["bearish"] / total * 100),
-            "gurus": stats["gurus"],
-            "total_quotes": stats["total_quotes"],
-            "recent_7d": stats["recent_quotes_7d"],
-            "latest_quotes": [
-                {"guru": q.get("cn_name", ""), "content": q.get("content", "")[:80],
-                 "sentiment": q.get("sentiment", "neutral")}
-                for q in recent_quotes[:3]
-            ],
-        }
-        signals = get_current_signals()
-        conviction = []
-        for s in sorted(signals, key=lambda x: x.get("signal", 0), reverse=True)[:5]:
-            code = s["code"]
-            name = STOCK_MAP.get(code, {}).get("name", code)
-            conviction.append({
-                "code": code,
-                "name": name,
-                "signal": s.get("signal", 0),
-                "rank": s.get("rank", 0),
-                "score": s.get("score", 0),
-            })
-        conviction = [c for c in conviction if c["signal"] > 55][:3]
-        from db import get_unacknowledged_anomalies
-        raw_anomalies = get_unacknowledged_anomalies(limit=5)
-        anomaly_summary = {
-            "total": len(raw_anomalies),
-            "emergency": len([a for a in raw_anomalies if a["level"] == "A"]),
-            "recent": [
-                {"name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
-                 "code": a["code"],
-                 "level": a["level"],
-                 "type": a["alert_type"],
-                 "message": a["message"][:100],
-                 "created_at": a["created_at"]}
-                for a in raw_anomalies[:3]
-            ],
-        }
-        return jsonify({
-            "ok": True,
-            "data": {
-                "guru": guru_summary,
-                "conviction": conviction,
-                "anomalies": anomaly_summary,
-            }
-        })
-    except Exception as e:
-        log.error("today-strategy API failed: %s", e, exc_info=True)
-        return jsonify({"ok": False, "error": str(e), "data": {
-            "guru": {"bullish_pct": 0, "bearish_pct": 0, "gurus": 0, "total_quotes": 0, "recent_7d": 0, "latest_quotes": []},
-            "conviction": [],
-            "anomalies": {"total": 0, "emergency": 0, "recent": []},
-        }})
+    except Exception as exc:
+        log.error("anomalies API failed: %s", exc, exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
-# ===== 快捷查询 API（手机书签一键直达） =====
-
-@app.route("/api/nl-query")
-def api_nl_query():
-    """自然语言查询 — 中文意图识别，调用现有分析函数"""
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify({"ok": False, "error": "请提供参数 ?q=你的问题"})
-
-    try:
-        from db import get_conn, get_unacknowledged_anomalies
-        from auto_execute import generate_execution_plan
-        conn = get_conn()
-
-        intent = _detect_intent(q)
-
-        # ── 卖出/该卖/止盈止损 ──
-        if intent == "sell":
-            plan = generate_execution_plan(dry_run=True)
-            sells = [{
-                "code": s["code"], "name": s["name"],
-                "reason": s.get("reasons", [])[:3],
-                "pnl": s.get("pnl_pct", 0),
-            } for s in plan.get("sells", [])]
-            return jsonify({
-                "ok": True, "intent": "sell",
-                "answer": f"今日卖出候选 {len(sells)} 只" if sells else "今日无卖出计划",
-                "sells": sells,
-            })
-
-        # ── 买入/该买/机会 ──
-        elif intent == "buy":
-            plan = generate_execution_plan(dry_run=True)
-            buys = [{
-                "code": b["code"], "name": b["name"],
-                "score": b.get("score", 0), "reason": b.get("reason", ""),
-            } for b in plan.get("buys", [])]
-            return jsonify({
-                "ok": True, "intent": "buy",
-                "answer": f"买入候选 {len(buys)} 只" if buys else "今日无买入候选",
-                "buys": sorted(buys, key=lambda x: x["score"], reverse=True),
-            })
-
-        # ── 盈亏/赚赔/收益 ──
-        elif intent == "pnl":
-            rows = conn.execute("""
-                SELECT s.code, s.name, s.buy_price,
-                       d.close as current_price,
-                       ROUND((d.close - s.buy_price) / s.buy_price * 100, 2) as pnl_pct
-                FROM stocks s
-                LEFT JOIN (SELECT code, close FROM daily_snapshots
-                           WHERE date = (SELECT MAX(date) FROM daily_snapshots)) d
-                  ON s.code = d.code
-                WHERE s.is_active = 1 AND s.buy_price > 0
-            """).fetchall()
-            positions = [{
-                "code": r["code"], "name": r["name"],
-                "pnl_pct": round(r["pnl_pct"], 1) if r["pnl_pct"] else 0,
-            } for r in rows]
-            total = sum(p["pnl_pct"] for p in positions)
-            return jsonify({
-                "ok": True, "intent": "pnl",
-                "answer": f"总盈亏 {total:+.1f}%，持仓 {len(positions)} 只",
-                "total_pnl_pct": round(total, 1),
-                "positions": positions,
-            })
-
-        # ── 预警/风险/异常 ──
-        elif intent == "alert":
-            raw = get_unacknowledged_anomalies(limit=10)
-            alerts = [{
-                "code": a["code"],
-                "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
-                "level": a["level"], "msg": a["message"][:120],
-            } for a in raw]
-            emergency = len([a for a in raw if a["level"] == "A"])
-            return jsonify({
-                "ok": True, "intent": "alert",
-                "answer": f"{emergency}条紧急，{len(alerts)}条预警" if emergency else f"{len(alerts)}条预警",
-                "emergency": emergency, "alerts": alerts,
-            })
-
-        # ── 汇总/状态/怎么样 ──
-        else:
-            plan = generate_execution_plan(dry_run=True)
-            raw = get_unacknowledged_anomalies(limit=3)
-            return jsonify({
-                "ok": True, "intent": "summary",
-                "answer": f"持仓{_count_positions(conn)}只，买入候选{len(plan.get('buys',[]))}只，"
-                          f"预警{len(raw)}条",
-                "details": {
-                    "positions": _count_positions(conn),
-                    "buy_candidates": len(plan.get("buys", [])),
-                    "sell_candidates": len(plan.get("sells", [])),
-                    "alerts": len(raw),
-                },
-            })
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-def _detect_intent(q: str) -> str:
-    """中文意图识别"""
-    ql = q.lower()
-    # 卖出/止盈/止损/该卖
-    if any(w in q for w in ("卖", "止盈", "止损", "清仓", "减仓", "脱手", "该跑")):
+def _detect_intent(query: str) -> str:
+    if any(word in query for word in ("卖", "止盈", "止损", "清仓", "减仓", "脱手", "该跑")):
         return "sell"
-    # 买入/机会/该买/加仓
-    if any(w in q for w in ("买", "机会", "加仓", "建仓", "入场", "该上")):
+    if any(word in query for word in ("买", "机会", "加仓", "建仓", "入场", "该上")):
         return "buy"
-    # 盈亏/收益/赚赔/赚了
-    if any(w in q for w in ("盈亏", "收益", "赚", "亏", "赔", "盈利", "损益")):
+    if any(word in query for word in ("盈亏", "收益", "赚", "亏", "赔", "盈利", "损益")):
         return "pnl"
-    # 预警/风险/异常/警报
-    if any(w in q for w in ("预警", "风险", "异常", "警报", "告警", "踩雷")):
+    if any(word in query for word in ("预警", "风险", "异常", "警报", "告警", "踩雷")):
         return "alert"
     return "summary"
 
 
 def _count_positions(conn) -> int:
-    try:
-        r = conn.execute(
-            "SELECT COUNT(*) as c FROM stocks WHERE is_active = 1 AND buy_price > 0"
-        ).fetchone()
-        return r["c"] if r else 0
-    except Exception:
-        return 0
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM stocks WHERE is_active=1 AND code!='CASH' AND buy_price>0"
+    ).fetchone()
+    return int(row["count"] if row else 0)
 
 
-def _plan_already_executed(plan: dict) -> bool:
-    """检测执行计划是否已执行"""
+@app.route("/api/nl-query")
+def api_nl_query():
+    """Small deterministic Chinese intent query over current dashboard facts."""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"ok": False, "error": "请提供参数 ?q=你的问题"}), 400
     try:
+        from auto_execute import generate_execution_plan
+        from db import get_unacknowledged_anomalies
+
+        intent = _detect_intent(query)
+        if intent in {"buy", "sell", "summary"}:
+            plan = generate_execution_plan(dry_run=True)
+        if intent == "buy":
+            buys = [{
+                "code": item["code"], "name": item["name"],
+                "score": item.get("score", 0), "reason": item.get("reason", ""),
+            } for item in plan.get("buys", [])]
+            return jsonify({"ok": True, "intent": intent,
+                            "answer": f"买入候选 {len(buys)} 只" if buys else "今日无买入候选",
+                            "buys": sorted(buys, key=lambda item: item["score"], reverse=True)})
+        if intent == "sell":
+            sells = [{
+                "code": item["code"], "name": item["name"],
+                "reason": item.get("reasons", [])[:3], "pnl": item.get("pnl_pct", 0),
+            } for item in plan.get("sells", [])]
+            return jsonify({"ok": True, "intent": intent,
+                            "answer": f"今日卖出候选 {len(sells)} 只" if sells else "今日无卖出计划",
+                            "sells": sells})
+        if intent == "alert":
+            raw = [dict(item) for item in get_unacknowledged_anomalies(limit=10)]
+            alerts = [{"code": item["code"], "level": item["level"], "msg": item["message"][:120]}
+                      for item in raw]
+            emergency = sum(item["level"] == "A" for item in raw)
+            return jsonify({"ok": True, "intent": intent, "emergency": emergency,
+                            "answer": f"{emergency}条紧急，{len(alerts)}条预警", "alerts": alerts})
+
         conn = get_conn()
-        today = datetime.now().strftime("%Y-%m-%d")
-        r = conn.execute(
-            "SELECT COUNT(*) as c FROM trades WHERE date(created_at) = ?",
-            (today,),
-        ).fetchone()
-        return bool(r and r["c"] > 0)
-    except Exception:
-        return False
+        try:
+            if intent == "pnl":
+                summary = _quick_position_pnl(conn)
+                return jsonify({"ok": True, "intent": intent,
+                                "answer": f"持仓盈亏 {summary['total_pct']:+.2f}%",
+                                **summary})
+            alerts = get_unacknowledged_anomalies(limit=3)
+            count = _count_positions(conn)
+            return jsonify({"ok": True, "intent": "summary",
+                            "answer": f"持仓{count}只，买入候选{len(plan.get('buys', []))}只，预警{len(alerts)}条",
+                            "details": {"positions": count,
+                                        "buy_candidates": len(plan.get("buys", [])),
+                                        "sell_candidates": len(plan.get("sells", [])),
+                                        "alerts": len(alerts)}})
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.error("NL query failed: %s", exc, exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/operations-center")
+def api_operations_center():
+    """Expose reconciliation, quality, risk-task, PAPER, and history audits."""
+    try:
+        from operations_center import get_dashboard_data
+
+        return jsonify({"ok": True,
+                        "updated": datetime.now().isoformat(timespec="seconds"),
+                        "data": get_dashboard_data()})
+    except Exception as exc:
+        log.error("operations-center API failed: %s", exc, exc_info=True)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/broker-snapshot", methods=["POST"])
+@require_write_auth
+def api_broker_snapshot():
+    """Validate and import one immutable broker account snapshot."""
+    try:
+        from operations_center import import_broker_snapshot
+
+        payload = request.get_json(silent=True) or {}
+        dry_run = bool(payload.pop("dry_run", False))
+        result = import_broker_snapshot(payload, dry_run=dry_run)
+        return jsonify({"ok": True, "data": result})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        log.error("Broker snapshot import failed: %s", exc, exc_info=True)
+        return jsonify({"ok": False, "error": "broker snapshot import failed"}), 500
 
 
 _app = app  # 供外部引用
@@ -2127,7 +2215,11 @@ def api_backtest(code):
         results = []
         for name, strat in strategies.items():
             try:
-                r = run_backtest(code, strat, initial_capital=50000)
+                r = run_backtest(
+                    code,
+                    strat,
+                    initial_capital=CAPITAL_CONFIG.get("initial_capital", 50000),
+                )
                 results.append({
                     "strategy": name,
                     "total_return": r.get("total_return_pct", 0),
@@ -2137,7 +2229,8 @@ def api_backtest(code):
                     "trades": r.get("total_trades", 0),
                     "final_value": r.get("final_value", 0),
                 })
-            except Exception:
+            except Exception as exc:
+                log.debug("Backtest unavailable for %s/%s: %s", code, name, exc)
                 results.append({"strategy": name, "error": "data insufficient"})
 
         return jsonify({"ok": True, "code": code, "strategies": results})
@@ -2194,21 +2287,15 @@ def api_coach():
 def api_factor_ic_dashboard():
     """因子IC可视化数据 — 供看板消费"""
     try:
-        from factor_ic import compute_rank_ic, DIMENSION_LABELS
-        result = compute_rank_ic(days=30, window=20)
-        if "error" in result:
-            return jsonify({"ok": False, "error": result["error"]}), 500
-        dims = list(result.get("latest", {}).keys())
-        bars = []
-        for dim in dims:
-            latest = result["latest"].get(dim, 0)
-            mean = result["mean_ic"].get(dim, 0)
-            ir = result["ic_ir"].get(dim, 0)
-            wr = result["win_rate"].get(dim, 0)
-            bars.append({"dim": dim, "label": DIMENSION_LABELS.get(dim, dim),
-                         "latest_ic": round(latest, 3), "mean_ic": round(mean, 3),
-                         "ic_ir": round(ir, 2), "win_rate": round(wr, 1)})
-        bars.sort(key=lambda x: abs(x["latest_ic"]), reverse=True)
+        payload = _get_factor_ic_payload()
+        bars = [{
+            "dim": item["dimension"],
+            "label": item["label"],
+            "latest_ic": round(item["latest_ic"], 3),
+            "mean_ic": round(item["mean_ic"], 3),
+            "ic_ir": round(item["ic_ir"], 2),
+            "win_rate": round(item["win_rate"], 1),
+        } for item in payload.get("ic_summary", [])]
         return jsonify({"ok": True, "bars": bars[:9],
                         "top": bars[:3], "weak": bars[-3:] if len(bars)>=6 else []})
     except Exception as e:
@@ -2240,9 +2327,13 @@ def api_compare():
 
         # 沪深300 基准 (近似: 从快照取最近收盘)
         from db import get_conn
-        conn = get_conn()
-        hs = conn.execute("SELECT close FROM daily_snapshots WHERE code='000300' ORDER BY date DESC LIMIT 1").fetchone()
-        conn.close()
+        conn = None
+        try:
+            conn = get_conn()
+            hs = conn.execute("SELECT close FROM daily_snapshots WHERE code='000300' ORDER BY date DESC LIMIT 1").fetchone()
+        finally:
+            if conn is not None:
+                conn.close()
         benchmark = {"name":"沪深300","return": round((hs["close"]/3500 - 1)*100, 2) if hs and hs["close"] else None}
 
         return jsonify({"ok": True,
@@ -2335,14 +2426,17 @@ def api_health():
     health = {"status": "ok", "checks": {}}
 
     # DB完整性
+    conn = None
     try:
         conn = get_conn()
         tables = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
-        conn.close()
         health["checks"]["db"] = {"ok": True, "tables": tables}
     except Exception as e:
         health["checks"]["db"] = {"ok": False, "error": str(e)}
         health["status"] = "degraded"
+    finally:
+        if conn is not None:
+            conn.close()
 
     # 看板进程
     try:
@@ -2376,41 +2470,168 @@ def api_quantdinger_consensus():
 # ===== 数据源状态 API =====
 @app.route("/api/data-source-status")
 def api_data_source_status():
-    """检测主备数据源连通性"""
+    """v5.1 多源健康检测: Sina / Tencent / AKShare / mootdx"""
     from datetime import datetime as dt
-    status = {"sina": {"reachable": False, "latency_ms": 0},
-              "tencent": {"reachable": False, "latency_ms": 0}}
+    from data_engine import fetch_realtime, sina_fetch_raw
 
-    # Sina 测试
+    status = {
+        "sina":    {"reachable": False, "latency_ms": 0, "data_points": 0},
+        "tencent": {"reachable": False, "latency_ms": 0, "data_points": 0},
+        "akshare": {"reachable": False, "latency_ms": 0, "data_points": 0},
+        "mootdx":  {"reachable": False, "latency_ms": 0, "data_points": 0},
+    }
+
+    # Sina
     try:
         t0 = time.time()
         raw = sina_fetch_raw([ALL_CODES[0]])
         if raw and "var hq_str" in raw:
             status["sina"]["reachable"] = True
             status["sina"]["latency_ms"] = round((time.time() - t0) * 1000)
+            status["sina"]["data_points"] = raw.count(";") + 1
     except Exception as e:
         status["sina"]["error"] = str(e)[:80]
 
-    # 腾讯行情测试
+    # Tencent
     try:
         t0 = time.time()
         data = fetch_realtime([ALL_CODES[0]], source="tencent")
         if data and data[0].get("price"):
             status["tencent"]["reachable"] = True
             status["tencent"]["latency_ms"] = round((time.time() - t0) * 1000)
+            status["tencent"]["data_points"] = len(data)
     except Exception as e:
         status["tencent"]["error"] = str(e)[:80]
+
+    # AKShare
+    try:
+        t0 = time.time()
+        data = fetch_realtime([ALL_CODES[0]], source="akshare")
+        if data and data[0].get("price"):
+            status["akshare"]["reachable"] = True
+            status["akshare"]["latency_ms"] = round((time.time() - t0) * 1000)
+            status["akshare"]["data_points"] = len(data)
+    except Exception as e:
+        status["akshare"]["error"] = str(e)[:80]
+
+    # mootdx (通达信, 限IP最少的源)
+    try:
+        from mootdx.quotes import Quotes
+        t0 = time.time()
+        client = Quotes.factory(market='std', timeout=5)
+        quote = client.quotes(symbol=ALL_CODES[:3])
+        if quote and len(quote) > 0:
+            status["mootdx"]["reachable"] = True
+            status["mootdx"]["latency_ms"] = round((time.time() - t0) * 1000)
+            status["mootdx"]["data_points"] = len(quote)
+    except Exception as e:
+        status["mootdx"]["error"] = str(e)[:80]
+
+    # 健康评分: reachable=1, latency<2s=+0.5, 综合
+    scores = {}
+    for src, s in status.items():
+        score = 50 if s["reachable"] else 0
+        if s["reachable"] and s["latency_ms"] < 2000:
+            score += 40
+        elif s["reachable"]:
+            score += 20
+        if s.get("data_points", 0) > 5:
+            score += 10
+        scores[src] = min(score, 100)
+
+    # Persist to DB
+    try:
+        from db import get_conn
+        conn = get_conn()
+        for src, s in status.items():
+            conn.execute(
+                "INSERT INTO source_health_log (source, reachable, latency_ms, data_points, error) VALUES (?,?,?,?,?)",
+                (src, 1 if s["reachable"] else 0, s["latency_ms"], s.get("data_points", 0), s.get("error", "")),
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    # Get recent history
+    history = {}
+    try:
+        from db import get_conn
+        conn = get_conn()
+        for src in status:
+            rows = conn.execute(
+                "SELECT reachable, latency_ms, checked_at FROM source_health_log WHERE source=? ORDER BY checked_at DESC LIMIT 20",
+                (src,),
+            ).fetchall()
+            history[src] = [{"reachable": bool(r[0]), "latency_ms": r[1], "time": r[2]} for r in rows]
+        conn.close()
+    except Exception:
+        pass
+
+    # 自动推荐优先级: 按评分排序
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    recommended = [s for s, sc in ranked if scores[s] >= 60]
 
     return jsonify({
         "ok": True,
         "timestamp": dt.now().isoformat(),
-        "primary": "sina",
-        "fallback": "tencent",
+        "recommended_priority": recommended,
+        "scores": scores,
         "sources": status,
+        "history": history,
     })
+def _quick_position_pnl(conn) -> dict:
+    """Build a cash-aware, share-weighted P&L summary from DB facts."""
+    cash_row = conn.execute(
+        "SELECT price FROM trades WHERE code='CASH' AND LOWER(action)='sell' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    cash = float(cash_row["price"] or 0) if cash_row else 0.0
+    rows = conn.execute(
+        """
+        SELECT s.code, s.name, s.buy_price,
+               COALESCE((SELECT SUM(CASE WHEN LOWER(t.action)='buy' THEN t.quantity ELSE -t.quantity END)
+                         FROM trades t WHERE t.code=s.code), 0) AS shares,
+               COALESCE((SELECT close FROM daily_snapshots d WHERE d.code=s.code ORDER BY d.date DESC LIMIT 1), s.buy_price) AS current_price
+        FROM stocks s
+        WHERE s.is_active=1 AND s.code!='CASH' AND s.buy_price>0
+        ORDER BY s.code
+        """
+    ).fetchall()
+    positions = []
+    holdings_value = total_cost = 0.0
+    for row in rows:
+        shares = max(int(row["shares"] or 0), 0)
+        cost = shares * float(row["buy_price"] or 0)
+        value = shares * float(row["current_price"] or 0)
+        profit = value - cost
+        holdings_value += value
+        total_cost += cost
+        positions.append({
+            "code": row["code"],
+            "name": row["name"],
+            "shares": shares,
+            "buy_price": round(float(row["buy_price"] or 0), 3),
+            "current_price": round(float(row["current_price"] or 0), 3),
+            "profit_amount": round(profit, 2),
+            "profit_pct": round(profit / cost * 100, 2) if cost else 0,
+        })
+    calculated_profit = holdings_value - total_cost
+    return {
+        "positions": positions,
+        "cash": round(cash, 2),
+        "holdings_value": round(holdings_value, 2),
+        "total_assets": round(cash + holdings_value, 2),
+        "total_cost": round(total_cost, 2),
+        "total_profit_amount": round(calculated_profit, 2),
+        "calculated_profit_amount": round(calculated_profit, 2),
+        "total_pct": round(calculated_profit / total_cost * 100, 2) if total_cost else 0,
+    }
+
+
 @app.route("/api/quick")
 def api_quick():
     """一键汇总：持仓盈亏 + 今日信号 + 未读预警"""
+    conn = None
     try:
         from db import get_conn, get_unacknowledged_anomalies
         from auto_execute import generate_execution_plan
@@ -2476,37 +2697,24 @@ def api_quick():
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @app.route("/api/quick/pnl")
 def api_quick_pnl():
     """纯盈亏数据"""
+    conn = None
     try:
         conn = get_conn()
-        positions = conn.execute("""
-            SELECT s.code, s.name, s.buy_price,
-                   d.close as current_price,
-                   ROUND((d.close - s.buy_price) / s.buy_price * 100, 2) as pnl_pct
-            FROM stocks s
-            LEFT JOIN (SELECT code, close FROM daily_snapshots
-                       WHERE date = (SELECT MAX(date) FROM daily_snapshots)) d ON s.code = d.code
-            WHERE s.is_active = 1 AND s.buy_price > 0
-        """).fetchall()
-
-        positions_data = []
-        total = 0
-        for r in positions:
-            p = round(r["pnl_pct"], 1) if r["pnl_pct"] else 0
-            positions_data.append({"code": r["code"], "name": r["name"], "pnl_pct": p})
-            total += p
-
-        return jsonify({
-            "ok": True,
-            "total_pnl_pct": round(total, 1),
-            "positions": positions_data,
-        })
+        summary = _quick_position_pnl(conn)
+        return jsonify({"ok": True, **summary})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @app.route("/api/quick/alerts")

@@ -58,14 +58,14 @@ except Exception:
         "factor": 0.19,       # 因子引擎（三周期融合）
         "technical": 0.10,    # 技术面 + 情绪
         "moat": 0.09,         # 护城河因子
-        "capital": 0.04,      # v3.3 资金面（融资/大宗/筹码/分红）
+        "capital": 0.03,      # v3.3 资金面（融资/大宗/筹码/分红, 轻量补充）
     }
 
-# v3.0: 7 维核心（移除 base — IC=-0.13 持续14天为负，静态手动评分无预测力）
+# v5.5: 权重统一 — reset从 defaults 读取, fallback和defaults对齐
 _SCORE_WEIGHT_DEFAULTS = {
     "zone": 0.20, "momentum": 0.18, "volume": 0.04,
     "serenity": 0.17, "factor": 0.19, "technical": 0.10, "moat": 0.09,
-    "capital": 0.03,   # v3.3 资金面（融资/大宗/筹码/分红, 轻量补充）
+    "capital": 0.03,
 }
 for k, v in _SCORE_WEIGHT_DEFAULTS.items():
     score_weight.setdefault(k, v)
@@ -119,6 +119,29 @@ def _apply_regime_shifts(weights: dict, regime_label: str) -> dict:
     return shifted
 
 
+_EVOLVED_WEIGHTS_CACHE = None
+_EVOLVED_WEIGHTS_CACHE_TS = 0
+
+def refresh_weights():
+    """v5.5 刷新模块级权重状态 — Flask长期运行时调用"""
+    global score_weight, _active_regime, _OPERATIONAL_MODE
+    try:
+        from weight_adjuster import load_adjusted_weights
+        score_weight = load_adjusted_weights()
+        for k, v in _SCORE_WEIGHT_DEFAULTS.items():
+            score_weight.setdefault(k, v)
+        score_weight.pop("base", None); score_weight.pop("guru_wisdom", None); score_weight.pop("sentiment", None)
+        _sw_total = sum(score_weight.values())
+        if abs(_sw_total - 1.0) > 0.001:
+            for k in score_weight:
+                score_weight[k] = round(score_weight[k] / _sw_total, 4)
+        _active_regime = None  # force re-detect on next score_all
+        _OPERATIONAL_MODE = None
+        log.info("权重刷新完成: %s", {k: round(v,3) for k,v in score_weight.items()})
+    except Exception as e:
+        log.warning("权重刷新失败(保持现有): %s", e)
+
+
 def load_evolved_weights() -> dict:
     """v4.0 IC驱动的权重自进化 — 从反思数据中学习最优维度权重
 
@@ -126,7 +149,10 @@ def load_evolved_weights() -> dict:
     IC>0的维度+3%权重，IC<-0.1的维度-3%权重。
     量能维度(volume)如果IC<-0.2则降至0。
     """
-    import json
+    import json, time
+    global _EVOLVED_WEIGHTS_CACHE, _EVOLVED_WEIGHTS_CACHE_TS
+    if _EVOLVED_WEIGHTS_CACHE and time.time() - _EVOLVED_WEIGHTS_CACHE_TS < 300:  # 5min TTL
+        return dict(_EVOLVED_WEIGHTS_CACHE)
     try:
         from db import get_conn
         conn = get_conn()
@@ -174,6 +200,8 @@ def load_evolved_weights() -> dict:
             for k in weights:
                 weights[k] = round(weights[k] / total, 4)
 
+        _EVOLVED_WEIGHTS_CACHE = dict(weights)
+        _EVOLVED_WEIGHTS_CACHE_TS = time.time()
         return weights
     except Exception:
         return dict(_SCORE_WEIGHT_DEFAULTS)
@@ -243,7 +271,7 @@ _IC_TO_SCORE_KEY = {
     "moat_score": "moat",
     "zone_score": "zone",
 }
-_CACHED_INVERT_DIMS = None  # 缓存IC驱动的待翻转因子集合
+# v5.5 removed: dead cache, _get_invert_score_keys recomputes fresh each call  # 缓存IC驱动的待翻转因子集合
 
 def _get_invert_score_keys() -> set:
     """返回应翻转的因子评分键集合（条件翻转，仅均值回归模式）
@@ -491,7 +519,8 @@ def score_all() -> list[dict]:
         from sentiment_engine import compute_sentiment_scores_batch
         codes_batch = [s["code"] for s in snapshots]
         batch_sentiment = compute_sentiment_scores_batch(codes_batch)
-    except Exception:
+    except Exception as e:
+        log.debug(f'[scorer] 批量情绪计算失败(回退逐个计算): {e}')
         batch_sentiment = {}
 
     # 市场风格感知
@@ -503,8 +532,8 @@ def score_all() -> list[dict]:
             _regime = ms.get_market_regime()
             _label = _regime.get('regime_label', '震荡市')
             _market_summary = ms.generate_summary()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f'[scorer] MarketSense 不可用(使用默认制度): {e}')
 
     # 生成信号
     from portfolio import get_portfolio
@@ -635,10 +664,12 @@ def score_all() -> list[dict]:
                         "agreement": _agreement,
                         "cycle_bonus": cycle_bonus,
                     }
-                except Exception:
+                except Exception as e:
+                    log.debug(f'[scorer] {code}: 多周期因子融合失败(回退单周期): {e}')
                     multi_cycle_score = factor_score
                     cycle_factors_raw = {}
-            except Exception:
+            except Exception as e:
+                log.debug(f'[scorer] {code}: 因子引擎失败(回退50): {e}')
                 factor_score = 50
 
         # 🆕 技术面评分
@@ -707,7 +738,8 @@ def score_all() -> list[dict]:
         try:
             from capital_flow import compute_capital_score
             capital_score = compute_capital_score(code).get("score", 50)
-        except Exception:
+        except Exception as e:
+            log.debug(f'[scorer] {code}: 资金面评分不可用: {e}')
             capital_score = 50
         total = (
             zone_score * score_weight.get("zone", 0.20) +
@@ -795,7 +827,7 @@ def score_all() -> list[dict]:
         }
         save_score_history(code, scores)
 
-        # P5: 实时回写评分到 stocks 表
+        # P5: 实时回写评分到 stocks 表 (v5.5: errors logged)
         try:
             from db import get_conn as _get_conn
             _conn = _get_conn()

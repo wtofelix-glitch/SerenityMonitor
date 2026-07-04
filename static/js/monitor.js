@@ -1,9 +1,6 @@
-/* ============================================================
-   Serenity Monitor v3.0 — 前端渲染引擎
-   ───────────────────────────────────────────────────────────
-   3-Tab 布局: 总览 / 持仓 / 风控
-   30 秒自动刷新，Chart.js 净值曲线
-   ============================================================ */
+/* Serenity Monitor dashboard renderer. */
+
+/* Serenity Monitor dashboard renderer. */
 
 'use strict';
 
@@ -13,6 +10,8 @@ const STATE = {
   chartInstance: null,
   activeTab: 'overview',
   refreshInterval: null,
+  refreshController: null,
+  renderedTabs: new Set(),
 };
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -38,6 +37,37 @@ function writeHeaders(base) {
   const token = getWriteToken();
   if (token) headers['X-Serenity-Token'] = token;
   return headers;
+}
+
+function cssToken(name, fallback) {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function dashboardSkeleton(rows = 3) {
+  return `<div class="dashboard-skeleton" aria-label="正在加载数据">
+    <span class="skeleton-heading"></span>
+    ${Array.from({ length: rows }, () => '<span class="skeleton-row"></span>').join('')}
+  </div>`;
+}
+
+function retryDashboardLoad() {
+  const target = $('tab-' + STATE.activeTab);
+  if (target) target.innerHTML = dashboardSkeleton();
+  refresh(true);
+}
+
+function componentError(message, retryFunction) {
+  const retry = retryFunction || 'retryDashboardLoad';
+  return `<div class="error-state" role="alert"><strong>${message}</strong>
+    <button class="retry-btn" type="button" onclick="${retry}()">重试</button></div>`;
+}
+
+function fetchJSON(url, options) {
+  return fetch(url, options).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  });
 }
 
 // ─── DOM 快捷引用 ─────────────────────────────────────────────
@@ -141,56 +171,168 @@ function debounce(fn, delay) {
 
 // ─── TAB 导航 ─────────────────────────────────────────────────
 function initTabs() {
-  document.querySelectorAll('.tab-btn').forEach(btn => {
+  const tabs = [...document.querySelectorAll('.tab-btn')];
+  tabs.forEach((btn, index) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    btn.addEventListener('keydown', event => {
+      let nextIndex = null;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (index + 1) % tabs.length;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (index - 1 + tabs.length) % tabs.length;
+      if (event.key === 'Home') nextIndex = 0;
+      if (event.key === 'End') nextIndex = tabs.length - 1;
+      if (nextIndex == null) return;
+      event.preventDefault();
+      tabs[nextIndex].focus();
+      switchTab(tabs[nextIndex].dataset.tab);
+    });
   });
 }
 
-function switchTab(tabId) {
+function switchTab(tabId, force = false) {
   STATE.activeTab = tabId;
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tabId));
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + tabId));
+  document.querySelectorAll('.tab-btn').forEach(button => {
+    const active = button.dataset.tab === tabId;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  document.querySelectorAll('.tab-content').forEach(panel => {
+    const active = panel.id === 'tab-' + tabId;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+
+  // v5.1 总览页显示快捷操作栏
+  const ab = $('action-bar');
+  if (ab) ab.style.display = tabId === 'overview' ? 'flex' : 'none';
 
   if (!STATE.data) return;
+  if (!force && STATE.renderedTabs.has(tabId)) return;
   if (tabId === 'overview') renderOverview(STATE.data);
   else if (tabId === 'holdings') renderHoldingsTab(STATE.data);
   else if (tabId === 'sentinel') { renderSentinelTab(STATE.data); loadSentinelData(); }
   else if (tabId === 'risk') { renderRiskTab(STATE.data); loadNavHistory(); }
+  else if (tabId === 'operations') { renderOperationsTab(); loadOperationsData(); }
+  else if (tabId === 'live') { renderLiveTab(STATE.data); startLiveRefresh(); }
+  STATE.renderedTabs.add(tabId);
+}
+
+// ─── v5.0 Toast 通知系统 ─────────────────────────────────────────
+function showToast(msg, type) {
+  type = type || 'info';
+  let container = document.querySelector('.toast-container');
+  if (!container) { container = document.createElement('div'); container.className = 'toast-container'; document.body.appendChild(container); }
+  const icons = { success: '✅', error: '🚨', warning: '⚠️', info: 'ℹ️' };
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || 'info');
+  el.innerHTML = '<span class="toast-icon">' + (icons[type] || 'ℹ️') + '</span><span class="toast-msg">' + msg + '</span>';
+  container.appendChild(el);
+  setTimeout(() => { el.classList.add('exiting'); setTimeout(() => el.remove(), 200); }, 3500);
 }
 
 // ─── 初始化 ────────────────────────────────────────────────────
 function init() {
   initTabs();
-  refresh();
-  STATE.refreshInterval = setInterval(refresh, 30000);
+  switchTab(STATE.activeTab);
+  // v5.1 快速初始加载：独立于refresh，避免AbortController冲突
+  loadInitialData();
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) scheduleRefresh();
+    else refresh(true);
+  });
+}
+
+function loadInitialData() {
+  // v5.1 两阶段加载: 快速快照(<1s) → 立即展示 → 全量数据后台刷新
+  var overviewEl = document.getElementById('tab-overview');
+  if (overviewEl) overviewEl.innerHTML = '<div style="color:var(--gold);padding:20px;text-align:center">⏳ 加载中...</div>';
+
+  // Phase 1: 快速快照(DB only, <500ms)
+  fetch('/api/quick-snapshot')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok && d.portfolio) {
+        // 构造最小可用数据展示
+        STATE.data = {
+          portfolio_summary: d.portfolio,
+          scores: d.scores || [],
+          auto_gate: d.gate || {},
+          signal_brief: { buy_count: 0, risk_count: 0, buy_candidates: [], risk_alerts: [] },
+          market: {}, operational_mode: {}, quantdinger_consensus: {},
+          position_advice: {}, uzi_chain: [], ic_analysis: {},
+        };
+        renderAll();
+      }
+    })
+    .catch(function() { /* Phase 1 failed, wait for Phase 2 */ })
+    .finally(function() {
+      // Phase 2: 全量数据(后台静默刷新, 不阻塞展示)
+      fetch('/api/monitor-data')
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (d.ok) { STATE.data = d.data; renderAll(); }
+        })
+        .catch(function() {})
+        .finally(function() { scheduleRefresh(); });
+    });
 }
 
 // ─── 数据刷新 ──────────────────────────────────────────────────
 function refresh(force) {
+  if (STATE.refreshController && !force) return;
+  if (STATE.refreshController) STATE.refreshController.abort();
+  const controller = new AbortController();
+  STATE.refreshController = controller;
   const timeEl = $('header-time');
   if (timeEl) timeEl.textContent = '⟳ 刷新中...';
   const url = force ? '/api/monitor-data?force=1' : '/api/monitor-data';
-  fetch(url)
-    .then(r => r.json())
+  fetch(url, { signal: controller.signal })
+    .then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    })
     .then(d => {
       if (d.ok) { STATE.data = d.data; renderAll(); }
-      else showError('数据获取失败');
+      else { showToast(d.error || '数据获取失败', 'error'); }
     })
-    .catch(err => { if (err && err.name === 'AbortError') return; showError('网络错误'); });
+    .catch(err => { if (err && err.name !== 'AbortError') showToast(`数据加载失败：${err.message || '网络错误'}`, 'error'); })
+    .finally(() => {
+      if (STATE.refreshController === controller) STATE.refreshController = null;
+      scheduleRefresh();
+    });
 }
 
 function renderAll() {
   updateHeader();
   updateMarketTape();
-  switchTab(STATE.activeTab);
+  STATE.renderedTabs.clear();
+  switchTab(STATE.activeTab, true);
+  checkGateStateChange();
+  pushSignalAlerts();
+}
+
+function refreshDelay() {
+  if (document.hidden) return 60000;
+  const now = new Date();
+  const minutes = now.getHours() * 60 + now.getMinutes();
+  const day = now.getDay();
+  if (day === 0 || day === 6) return 30000; // 周末
+  // 盘中 09:30-11:30 + 13:00-15:00 → 5s
+  if ((minutes >= 570 && minutes <= 690) || (minutes >= 780 && minutes <= 900)) return 5000;
+  // 盘前/午间 → 10s
+  if (minutes >= 540 || (minutes > 690 && minutes < 780)) return 10000;
+  return 30000; // 盘后
+}
+
+function scheduleRefresh() {
+  clearTimeout(STATE.refreshInterval);
+  STATE.refreshInterval = setTimeout(() => refresh(false), refreshDelay());
 }
 
 function manualRefresh() {
   const btn = $('refresh-btn');
   if (btn) btn.classList.add('spinning');
   refresh(true);
-  clearInterval(STATE.refreshInterval);
-  STATE.refreshInterval = setInterval(refresh, 30000);
   setTimeout(() => { if (btn) btn.classList.remove('spinning'); }, 700);
 }
 
@@ -199,6 +341,13 @@ function updateHeader() {
   const d = STATE.data; if (!d) return;
   const el = $('header-time');
   if (el) el.textContent = d.timestamp || d.date || '—';
+  const badge = $('session-badge');
+  if (badge) {
+    const mkt = d.market || {};
+    const session = getSession(d);
+    badge.textContent = session.label;
+    badge.className = 'session-badge ' + session.tone;
+  }
 }
 
 // ─── 行情条 ────────────────────────────────────────────────────
@@ -225,7 +374,7 @@ function updateMarketTape() {
 // TAB 1 — 总览
 // ═══════════════════════════════════════════════════════════
 function renderOverview(d) {
-  if (!d) { $('tab-overview').innerHTML = '<div class="loading-state"><span class="loading-spinner"></span><div class="loading-text">加载中...</div></div>'; return; }
+  if (!d) { $('tab-overview').innerHTML = dashboardSkeleton(5); return; }
 
   const pf = d.portfolio_summary || {};
   const sb = d.signal_brief || {};
@@ -246,6 +395,8 @@ function renderOverview(d) {
   let html = '';
 
   // ── Hero ────────────────────────────────────────────────
+  const yesterday = d.yesterday_summary || {};
+  const dayChange = yesterday.total_value ? pf.total_value - yesterday.total_value : 0;
   html += `
   <section class="hero-compact">
     <div class="hero-equity">${fmtCurrency(pf.total_value)}</div>
@@ -266,8 +417,8 @@ function renderOverview(d) {
   // ── NL Search ───────────────────────────────────────────
   html += `
   <div class="nl-search-bar">
-    <input type="text" id="nl-query-input" class="nl-search-input" placeholder="问 Serenity... 如"今天该买什么""收益怎么样""有风险吗"">
-    <button class="nl-search-btn" onclick="doNLQuery()">→</button>
+    <input type="text" id="nl-query-input" class="nl-search-input" placeholder="问 Serenity，例如：今天该买什么？">
+    <button class="nl-search-btn" onclick="doNLQuery()" aria-label="提交自然语言查询" title="提交查询">→</button>
   </div>
   <div id="nl-result"></div>`;
 
@@ -306,46 +457,34 @@ function renderOverview(d) {
   // ── Position Quick View ─────────────────────────────────
   html += buildPositionQuickView(d);
 
-  // ── 🆕 v3.5 Premium Signal Cards — 玻璃拟态 + 渐变 ──────
+  // ── v5.1 紧凑信号卡片 + 信号分布图 ──
   const scores = d.scores || [];
   const heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(p => p.code) : []);
   const buys = scores.filter(s => !heldCodes.has(s.code) && ['STRONG_BUY', 'BUY','CAUTION_BUY'].includes(s.signal_action)).slice(0, 4);
 
+  // 信号分布图 + 信号卡片 2列(桌面端)
+  html += `<div class="desktop-overview-grid"><div class="card signal-group-card"><div class="card-header"><span class="card-title">📡 信号分布</span></div><div class="card-body">${renderSignalDistChart(scores)}</div></div>`;
+
   if (buys.length > 0) {
-    let signalCards = '';
+    let signalCards = '<div class="card signal-group-card"><div class="card-header"><span class="card-title">🎯 买入候选</span><span class="card-subtitle">' + buys.length + '个</span></div><div class="card-body" style="display:flex;flex-direction:column;gap:6px">';
     buys.forEach((b, i) => {
-      const signalTier = b.signal_action === 'STRONG_BUY' ? 3 : b.signal_action === 'BUY' ? 2 : 1;
-      const gradient = ['rgba(255,214,10,0.06)', 'rgba(255,159,10,0.06)', 'rgba(255,69,58,0.06)'][signalTier-1];
-      const border = ['rgba(255,214,10,0.18)', 'rgba(255,159,10,0.16)', 'rgba(255,69,58,0.16)'][signalTier-1];
-      const accentColor = ['#FFD60A', '#FF9F0A', '#FF453A'][signalTier-1];
-      const label = {STRONG_BUY:'强力买入', BUY:'买入', CAUTION_BUY:'谨慎买入'}[b.signal_action];
-      const uziInfo = b.uzi_chain_tier ? `<span class="sig-meta-badge">${b.uzi_chain_tier}</span>` : '';
-      const targetText = b.target_sell && b.target_sell > 0 ? '¥' + fmt(b.target_sell, 0) : '—';
-      signalCards += `
-      <div class="signal-premium-card" style="background:linear-gradient(135deg, ${gradient}, rgba(0,0,0,0.3));border-color:${border}">
-        <div class="sig-premium-rank">#${i+1}</div>
-        <div class="sig-premium-body">
-          <div class="sig-premium-header">
-            <span class="sig-name">${b.name}</span>
-            <span class="sig-code">${b.code}</span>
-            ${uziInfo}
-          </div>
-          <div class="sig-premium-footer">
-            <span class="sig-score-ring" style="color:${accentColor}">${fmt(b.total_score, 0)}<span class="sig-score-unit">分</span></span>
-            <span class="sig-label-pill" style="background:${accentColor}22;color:${accentColor}">${label}</span>
-            <span class="sig-zone">${b.zone_label || ''}</span>
-          </div>
+      const label = {STRONG_BUY:'强买',BUY:'买入',CAUTION_BUY:'谨慎'}[b.signal_action];
+      const accentColor = b.signal_action==='STRONG_BUY'?'var(--up)':b.signal_action==='BUY'?'#FF453A':'var(--gold)';
+      signalCards += `<div class="compact-signal">
+        <span class="compact-signal-rank">#${i+1}</span>
+        <div class="compact-signal-body">
+          <span class="compact-signal-name">${b.name}</span>
+          <span class="compact-signal-code">${b.code.slice(-3)}</span>
+          <span class="compact-signal-score" style="color:${accentColor}">${fmt(b.total_score,0)}<span style="font-size:10px;opacity:.7">分</span></span>
+          <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:${accentColor}22;color:${accentColor}">${label}</span>
         </div>
-        <div class="sig-premium-tail">
-          <div class="sig-price">${b.close > 0 ? '¥'+fmt(b.close, 2) : '—'}</div>
-          <div class="sig-target">目标 ${targetText}</div>
-        </div>
+        <div class="compact-signal-price">${b.close>0?'¥'+fmt(b.close,2):'—'}<br><span style="font-size:9px;color:var(--text-tertiary)">目标 ${b.target_sell>0?'¥'+fmt(b.target_sell,0):'—'}</span></div>
       </div>`;
     });
-    html += `<div class="card signal-group-card">
-      <div class="card-header"><span class="card-title">📡 今日信号</span><span class="card-subtitle">${buys.length}个候选</span></div>
-      <div class="card-body">${signalCards}</div></div>`;
+    signalCards += '</div></div>';
+    html += signalCards;
   }
+  html += '</div>'; // close desktop-overview-grid
 
   // ── 🆕 v3.5 Premium PnL Cards — 渐变盈亏 ──────────────────
   const posDetails = (d.portfolio_summary || {}).position_details || [];
@@ -555,19 +694,21 @@ function renderHoldingsTab(d) {
   if (details.length) {
     html += `<div class="card"><div class="card-header"><span class="card-title">持仓明细</span><span class="card-subtitle">${details.length} 只 · 总权益 ${fmtCurrency(pf.total_value)}</span></div><div class="card-body">
       <div class="data-table-wrap"><table class="position-table"><thead><tr>
-        <th>标的</th><th class="text-right">盈亏</th><th class="text-right">权重</th><th class="text-right">成本</th><th>信号</th><th></th>
+        <th>标的</th><th class="text-right">现价</th><th class="text-right">市值</th><th class="text-right">盈亏</th><th class="text-right">盈亏%</th><th class="text-right">权重</th><th>信号</th><th></th>
       </tr></thead><tbody>`;
 
     details.forEach(p => {
       const isUp = (p.profit_pct || 0) >= 0;
       const sig = scores.find(s => s.code === p.code) || {};
       html += `<tr>
-        <td><span class="pos-name ${isUp ? 'up' : 'down'}">${p.name || '—'}</span><br><span class="pos-code">${p.code || ''}</span></td>
-        <td class="text-right ${isUp ? 'up' : 'down'}" style="font-weight:600">${(p.profit_pct >= 0 ? '+' : '') + fmt(p.profit_pct, 2)}%</td>
-        <td class="text-right text-dim">${fmt(p.weight, 1)}%</td>
-        <td class="text-right text-dim">¥${fmt(p.buy_price)}</td>
-        <td><span class="pq-signal ${signClass(sig.signal_action || 'HOLD')}" style="font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">${sig.signal_action || 'HOLD'}</span></td>
-        <td><button onclick="showConfig('${p.code}')" style="background:none;border:1px solid var(--border-color);color:var(--text-tertiary);font-size:12px;cursor:pointer;border-radius:4px;padding:2px 6px" title="设置">⚙</button></td>
+            <td><span class="pos-name ${isUp ? 'up' : 'down'}">${p.name || '—'}</span><br><span class="pos-code">${p.code || ''}</span></td>
+            <td class="text-right text-dim" style="font-family:var(--font-num)">¥${fmt(p.current_price)}</td>
+            <td class="text-right" style="font-weight:600;font-family:var(--font-num)">¥${fmt(p.current_value, 0)}</td>
+            <td class="text-right ${isUp ? 'up' : 'down'}" style="font-weight:600;font-family:var(--font-num)">${p.profit_amount >= 0 ? '+' : ''}¥${fmt(Math.abs(p.profit_amount || 0), 0)}</td>
+            <td class="text-right ${isUp ? 'up' : 'down'}" style="font-weight:600">${(p.profit_pct >= 0 ? '+' : '') + fmt(p.profit_pct, 2)}%</td>
+            <td class="text-right text-dim">${fmt(p.weight, 1)}%</td>
+            <td><span class="pq-signal ${signClass(sig.signal_action || 'HOLD')}" style="font-size:9px;font-weight:600;padding:2px 6px;border-radius:3px">${sig.signal_action || 'HOLD'}</span></td>
+            <td><button onclick="showConfig('${p.code}')" style="background:none;border:1px solid var(--border-color);color:var(--text-tertiary);font-size:12px;cursor:pointer;border-radius:4px;padding:2px 6px" title="设置">⚙</button></td>
       </tr>`;
     });
     html += '</tbody></table></div></div></div>';
@@ -800,7 +941,7 @@ function renderNavChart(data) {
       labels: dates,
       datasets: [{
         label: '净值', data: values,
-        borderColor: '#FFD700',
+        borderColor: cssToken('--gold', '#d9b84f'),
         backgroundColor: function(context) {
           const { ctx, chartArea } = context.chart;
           if (!chartArea) return 'rgba(255,215,0,0.06)';
@@ -810,7 +951,7 @@ function renderNavChart(data) {
           return gradient;
         },
         fill: true, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
-        pointHoverBackgroundColor: '#FFD700', pointHoverBorderColor: '#000', pointHoverBorderWidth: 2,
+        pointHoverBackgroundColor: cssToken('--gold', '#d9b84f'), pointHoverBorderColor: cssToken('--bg-root', '#000'), pointHoverBorderWidth: 2,
         tension: 0.05,
       }]
     },
@@ -842,8 +983,7 @@ function renderNavChart(data) {
 // ─── Anomaly Data ──────────────────────────────────────────────
 function loadAnomalyData() {
   const el = $('anomaly-content'); if (!el) return;
-  fetch('/api/anomalies')
-    .then(r => r.json())
+  fetchJSON('/api/anomalies')
     .then(d => {
       if (!d.ok || !d.anomalies || !d.anomalies.length) {
         el.innerHTML = '<div class="empty-state"><div class="text">暂无未确认异动 ✅</div></div>'; return;
@@ -858,14 +998,13 @@ function loadAnomalyData() {
       }).join('');
       el.innerHTML = `<div style="font-size:11px;color:var(--text-tertiary);margin-bottom:6px">共 ${d.count || d.anomalies.length} 条未确认</div>${items}`;
     })
-    .catch(() => { el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`异动数据加载失败：${error.message}`, 'loadAnomalyData'); });
 }
 
 // ─── Signal Performance ───────────────────────────────────────
 function loadSignalPerformance() {
   const el = $('signal-perf-content'); if (!el) return;
-  fetch('/api/signal-performance')
-    .then(r => r.json())
+  fetchJSON('/api/signal-performance')
     .then(d => {
       if (!d.ok || !d.signal_actions || !d.signal_actions.length) { el.innerHTML = '<div class="empty-state"><div class="text">暂无数据</div></div>'; return; }
       const s = d.summary || {};
@@ -883,14 +1022,13 @@ function loadSignalPerformance() {
       html += '</tbody></table></div>';
       el.innerHTML = html;
     })
-    .catch(() => { el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`信号统计加载失败：${error.message}`, 'loadSignalPerformance'); });
 }
 
 // ─── Journal ──────────────────────────────────────────────────
 function loadJournal() {
   const el = $('journal-content'); if (!el) return;
-  fetch('/api/journal')
-    .then(r => r.json())
+  fetchJSON('/api/journal')
     .then(d => {
       if (!d.ok) { el.innerHTML = '<div class="empty-state"><div class="text">暂无数据</div></div>'; return; }
       const entries = d.entries || [];
@@ -911,14 +1049,14 @@ function loadJournal() {
       html += '</tbody></table></div>';
       el.innerHTML = html;
     })
-    .catch(() => { el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`交易日志加载失败：${error.message}`, 'loadJournal'); });
 }
 
 // ═══════════════════════════════════════════════════════════
 // SENTINEL TAB
 // ═══════════════════════════════════════════════════════════
 function renderSentinelTab(d) {
-  $('tab-sentinel').innerHTML = '<div class="loading-state"><span class="loading-spinner"></span><div class="loading-text">加载哨兵数据...</div></div>';
+  $('tab-sentinel').innerHTML = dashboardSkeleton(4);
 }
 
 function loadSentinelData() {
@@ -1035,7 +1173,7 @@ function loadSentinelData() {
     }
 
     $('tab-sentinel').innerHTML = html;
-  }).catch(() => { $('tab-sentinel').innerHTML = '<div class="error-state">加载失败</div>'; });
+  }).catch(error => { $('tab-sentinel').innerHTML = componentError(`哨兵数据加载失败：${error.message}`, 'loadSentinelData'); });
 }
 
 function safeJSON(v) {
@@ -1051,8 +1189,7 @@ function loadSentinelPerformance() {}  // merged into loadSentinelData
 // ═══════════════════════════════════════════════════════════
 function loadPaperAccount() {
   const el = $('paper-content'); if (!el) return;
-  fetch('/api/paper-portfolio')
-    .then(r => r.json())
+  fetchJSON('/api/paper-portfolio')
     .then(d => {
       if (!d.ok) { el.innerHTML = '<div class="empty-state"><div class="text">模拟数据暂不可用</div></div>'; return; }
       const pf = d.portfolio || {};
@@ -1081,7 +1218,7 @@ function loadPaperAccount() {
           <span class="${(cmp.diff_amount >= 0 ? 'up' : 'down')}" style="font-weight:600">${(cmp.diff_amount >= 0 ? '+' : '')}¥${fmt(Math.abs(cmp.diff_amount), 0)}</span>
         </div>`;
     })
-    .catch(() => { el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`模拟账户加载失败：${error.message}`, 'loadPaperAccount'); });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1206,12 +1343,11 @@ function loadBacktest() {
     ? STATE.data.portfolio_summary.position_details.map(function(p){return p.code}).slice(0,3) : ['600460'];
   if (!codes.length) return;
 
-  fetch('/api/backtest/' + codes[0])
-    .then(function(r){return r.json()})
-    .then(function(d){
+  fetchJSON('/api/backtest/' + codes[0])
+    .then(d => {
       if (!d.ok || !d.strategies) { el.innerHTML = '<div class="empty-state"><div class="text">回测数据不足</div></div>'; return; }
-      var h = '<div class="data-table-wrap"><table class="data-table"><thead><tr><th>策略</th><th class="text-right">收益</th><th class="text-right">Sharpe</th><th class="text-right">回撤</th><th class="text-right">胜率</th></tr></thead><tbody>';
-      d.strategies.forEach(function(s){
+      let h = '<div class="data-table-wrap"><table class="data-table"><thead><tr><th>策略</th><th class="text-right">收益</th><th class="text-right">Sharpe</th><th class="text-right">回撤</th><th class="text-right">胜率</th></tr></thead><tbody>';
+      d.strategies.forEach(s => {
         if (s.error) return;
         h += '<tr><td>' + s.strategy + '</td>'
           + '<td class="text-right ' + (s.total_return >= 0 ? 'up' : 'down') + '">' + (s.total_return >= 0 ? '+' : '') + fmt(s.total_return, 1) + '%</td>'
@@ -1222,26 +1358,25 @@ function loadBacktest() {
       h += '</tbody></table></div>';
       el.innerHTML = h;
     })
-    .catch(function(){ el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`回测数据加载失败：${error.message}`, 'loadBacktest'); });
 }
 
 // ═══════════════════════════════════════════════════════════
 // FACTOR IC DASHBOARD
 // ═══════════════════════════════════════════════════════════
 function loadFactorIC() {
-  var el = $('factor-ic-content'); if (!el) return;
-  fetch('/api/factor-ic-dashboard')
-    .then(function(r){return r.json()})
-    .then(function(d){
+  const el = $('factor-ic-content'); if (!el) return;
+  fetchJSON('/api/factor-ic-dashboard')
+    .then(d => {
       if (!d.ok || !d.bars) { el.innerHTML = '<div class="empty-state"><div class="text">IC数据暂不可用</div></div>'; return; }
-      var maxAbs = 0;
-      d.bars.forEach(function(b){var a=Math.abs(b.latest_ic); if(a>maxAbs)maxAbs=a;});
-      var h = '';
-      d.bars.forEach(function(b){
-        var absIC = Math.abs(b.latest_ic);
-        var barW = maxAbs > 0 ? (absIC/maxAbs*100).toFixed(0) : 0;
-        var side = b.latest_ic >= 0 ? 'up' : 'down';
-        var barColor = b.latest_ic >= 0 ? 'var(--up)' : 'var(--down)';
+      let maxAbs = 0;
+      d.bars.forEach(b => { const value = Math.abs(b.latest_ic); if (value > maxAbs) maxAbs = value; });
+      let h = '';
+      d.bars.forEach(b => {
+        const absIC = Math.abs(b.latest_ic);
+        const barW = maxAbs > 0 ? (absIC/maxAbs*100).toFixed(0) : 0;
+        const side = b.latest_ic >= 0 ? 'up' : 'down';
+        const barColor = b.latest_ic >= 0 ? 'var(--up)' : 'var(--down)';
         h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px">';
         h += '<span style="width:60px;font-weight:600;text-align:right;font-size:11px">' + b.label + '</span>';
         h += '<span style="width:36px;text-align:right;font-family:var(--font-num);font-size:11px" class="' + side + '">' + (b.latest_ic>=0?'+':'') + b.latest_ic.toFixed(3) + '</span>';
@@ -1254,13 +1389,13 @@ function loadFactorIC() {
       if (d.top && d.top.length) {
         h += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light);font-size:10px;color:var(--text-tertiary)">';
         h += '🏆 最强: ';
-        d.top.forEach(function(t,i){if(i>0)h+=', ';h+=t.label + ' ' + (t.latest_ic>=0?'+':'') + t.latest_ic.toFixed(2)});
-        if (d.weak && d.weak.length) { h += '<br>⚠️ 最弱: '; d.weak.forEach(function(w,i){if(i>0)h+=', ';h+=w.label + ' ' + (w.latest_ic>=0?'+':'') + w.latest_ic.toFixed(2)}); }
+        d.top.forEach((t, i) => { if (i > 0) h += ', '; h += t.label + ' ' + (t.latest_ic >= 0 ? '+' : '') + t.latest_ic.toFixed(2); });
+        if (d.weak && d.weak.length) { h += '<br>⚠️ 最弱: '; d.weak.forEach((w, i) => { if (i > 0) h += ', '; h += w.label + ' ' + (w.latest_ic >= 0 ? '+' : '') + w.latest_ic.toFixed(2); }); }
         h += '</div>';
       }
       el.innerHTML = h;
     })
-    .catch(function(){ el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`因子 IC 加载失败：${error.message}`, 'loadFactorIC'); });
 }
 
 // ─── Error ────────────────────────────────────────────────────
@@ -1272,20 +1407,19 @@ function showError(msg) {
     active.insertAdjacentHTML('afterbegin', `<div class="refresh-notice">${msg}，保留上次稳定数据</div>`);
     return;
   }
-  document.querySelectorAll('.tab-content.active').forEach(tc => { tc.innerHTML = `<div class="error-state">${msg}</div>`; });
+  document.querySelectorAll('.tab-content.active').forEach(tc => { tc.innerHTML = componentError(msg); });
 }
 
 // ═══════════════════════════════════════════════════════════
 // COMPARE — 纸面 vs 真实 vs 沪深300
 // ═══════════════════════════════════════════════════════════
 function loadCompare() {
-  var el = $('compare-content'); if (!el) return;
-  fetch('/api/compare')
-    .then(function(r){return r.json()})
-    .then(function(d){
+  const el = $('compare-content'); if (!el) return;
+  fetchJSON('/api/compare')
+    .then(d => {
       if (!d.ok) { el.innerHTML = '<div class="empty-state"><div class="text">对比数据暂不可用</div></div>'; return; }
-      var diff = d.diff_paper_vs_real || 0;
-      var h = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">';
+      const diff = d.diff_paper_vs_real || 0;
+      let h = '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px">';
       h += '<div style="text-align:center;padding:8px;background:var(--bg-card);border-radius:8px"><div style="font-size:10px;color:var(--text-tertiary)">真实账户</div><div style="font-size:16px;font-weight:700;font-family:var(--font-num)" class="' + (d.real.pnl>=0?'up':'down') + '">' + (d.real.pnl>=0?'+':'') + fmt(d.real.pnl,1) + '%</div><div style="font-size:10px;color:var(--text-tertiary)">¥' + fmt(d.real.total,0) + '</div></div>';
       h += '<div style="text-align:center;padding:8px;background:var(--bg-card);border-radius:8px"><div style="font-size:10px;color:var(--text-tertiary)">纸面模拟</div><div style="font-size:16px;font-weight:700;font-family:var(--font-num)" class="' + (d.paper.pnl>=0?'up':'down') + '">' + (d.paper.pnl>=0?'+':'') + fmt(d.paper.pnl,1) + '%</div><div style="font-size:10px;color:var(--text-tertiary)">¥' + fmt(d.paper.total,0) + '</div></div>';
       if (d.benchmark && d.benchmark.return !== null) {
@@ -1295,41 +1429,40 @@ function loadCompare() {
       h += '<div style="font-size:10px;color:var(--text-tertiary);padding:5px 8px;background:var(--bg-card);border-radius:6px;text-align:center">纸面 vs 真实: <span class="' + (diff>=0?'up':'down') + '" style="font-weight:600">' + (diff>=0?'+':'') + fmt(diff,2) + '%</span></div>';
       el.innerHTML = h;
     })
-    .catch(function(){ el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`收益对比加载失败：${error.message}`, 'loadCompare'); });
 }
 
 // ═══════════════════════════════════════════════════════════
 // RISK MATRIX — VaR + 相关性
 // ═══════════════════════════════════════════════════════════
 function loadRiskMatrix() {
-  var el = $('risk-matrix-content'); if (!el) return;
-  fetch('/api/risk-matrix')
-    .then(function(r){return r.json()})
-    .then(function(d){
+  const el = $('risk-matrix-content'); if (!el) return;
+  fetchJSON('/api/risk-matrix')
+    .then(d => {
       if (!d.ok || d.error) { el.innerHTML = '<div class="empty-state"><div class="text">风险数据不足(需≥2只持仓≥10周历史)</div></div>'; return; }
-      var r = d.risk || {};
-      var m = d.matrix || {};
-      var h = '';
+      const risk = d.risk || {};
+      const matrix = d.matrix || {};
+      let h = '';
 
       // VaR bar
       h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-bottom:8px">';
-      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">VaR 95%</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num);color:var(--accent-orange)">-' + r.var_95_pct + '%</div></div>';
-      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">最大回撤</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num);color:var(--down)">-' + r.max_drawdown_pct + '%</div></div>';
-      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">Sharpe</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num)" class="' + (r.sharpe>=1?'up':'gold') + '">' + fmt(r.sharpe,2) + '</div></div>';
+      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">VaR 95%</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num);color:var(--accent-orange)">-' + risk.var_95_pct + '%</div></div>';
+      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">最大回撤</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num);color:var(--down)">-' + risk.max_drawdown_pct + '%</div></div>';
+      h += '<div style="text-align:center;padding:6px;background:var(--bg-card);border-radius:6px"><div style="font-size:9px;color:var(--text-tertiary)">Sharpe</div><div style="font-size:15px;font-weight:700;font-family:var(--font-num)" class="' + (risk.sharpe>=1?'up':'gold') + '">' + fmt(risk.sharpe,2) + '</div></div>';
       h += '</div>';
 
       // Correlation table (compact)
-      if (m.codes && m.codes.length >= 2) {
+      if (matrix.codes && matrix.codes.length >= 2) {
         h += '<div style="font-size:10px;color:var(--text-tertiary);margin-bottom:4px">相关性矩阵</div>';
         h += '<div class="data-table-wrap"><table class="data-table"><thead><tr><th></th>';
-        m.codes.forEach(function(c){h += '<th style="font-size:9px">' + (c.length==6?c.slice(-3):c) + '</th>'});
+        matrix.codes.forEach(code => { h += '<th style="font-size:9px">' + (code.length === 6 ? code.slice(-3) : code) + '</th>'; });
         h += '</tr></thead><tbody>';
-        for (var i = 0; i < m.codes.length; i++) {
-          h += '<tr><td style="font-weight:600;font-size:10px">' + (m.codes[i].length==6?m.codes[i].slice(-3):m.codes[i]) + '</td>';
-          for (var j = 0; j < m.codes.length; j++) {
-            var val = (m.correlation[i]||[])[j] || 0;
-            var cls = Math.abs(val) < 0.3 ? 'gold' : (val > 0.7 ? 'down' : '');
-            h += '<td class="text-right ' + cls + '">' + val.toFixed(2) + '</td>';
+        for (let i = 0; i < matrix.codes.length; i++) {
+          h += '<tr><td style="font-weight:600;font-size:10px">' + (matrix.codes[i].length === 6 ? matrix.codes[i].slice(-3) : matrix.codes[i]) + '</td>';
+          for (let j = 0; j < matrix.codes.length; j++) {
+            const value = (matrix.correlation[i] || [])[j] || 0;
+            const cls = Math.abs(value) < 0.3 ? 'gold' : (value > 0.7 ? 'down' : '');
+            h += '<td class="text-right ' + cls + '">' + value.toFixed(2) + '</td>';
           }
           h += '</tr>';
         }
@@ -1337,20 +1470,276 @@ function loadRiskMatrix() {
       }
 
       // Stress tests
-      var s = d.stress || {};
-      if (Object.keys(s).length) {
+      const stress = d.stress || {};
+      if (Object.keys(stress).length) {
         h += '<div style="margin-top:6px;display:flex;gap:8px;font-size:9px;color:var(--text-tertiary)">';
         h += '<span>压力测试:</span>';
-        h += '<span>2008: <strong style="color:var(--up)">-' + s["2008_crisis"] + '%</strong></span>';
-        h += '<span>2015: <strong style="color:var(--up)">-' + s["2015_crash"] + '%</strong></span>';
-        h += '<span>COVID: <strong style="color:var(--up)">-' + s["covid_crash"] + '%</strong></span>';
+        h += '<span>2008: <strong style="color:var(--up)">-' + stress["2008_crisis"] + '%</strong></span>';
+        h += '<span>2015: <strong style="color:var(--up)">-' + stress["2015_crash"] + '%</strong></span>';
+        h += '<span>COVID: <strong style="color:var(--up)">-' + stress["covid_crash"] + '%</strong></span>';
         h += '</div>';
       }
 
       el.innerHTML = h;
     })
-    .catch(function(){ el.innerHTML = '<div class="error-state">加载失败</div>'; });
+    .catch(error => { el.innerHTML = componentError(`风险矩阵加载失败：${error.message}`, 'loadRiskMatrix'); });
+}
+
+// ═══════════════════════════════════════════════════════════
+// OPERATIONS — 对账 / 数据质量 / 风险任务 / PAPER
+// ═══════════════════════════════════════════════════════════
+function renderOperationsTab() {
+  const el = $('tab-operations');
+  if (el) el.innerHTML = dashboardSkeleton(5);
+}
+
+function retryOperationsData() {
+  renderOperationsTab();
+  loadOperationsData();
+}
+
+function operationsStatusLabel(status) {
+  return ({ matched:'已对齐', warning:'需复核', blocked:'已阻断', completed:'已完成',
+            blocked_invalid_baseline:'基线无效' })[status] || '未运行';
+}
+
+function loadOperationsData() {
+  const el = $('tab-operations');
+  if (!el) return;
+  fetch('/api/operations-center')
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then(payload => {
+      if (!payload.ok) throw new Error(payload.error || '运营数据不可用');
+      const data = payload.data || {};
+      const reconciliation = data.reconciliation || {};
+      const quality = data.quality || {};
+      const settlement = quality.settlement_diagnostics || {};
+      const recovery = data.risk_recovery || {};
+      const paper = data.paper || {};
+      const run = data.operations_run || {};
+      const tasks = data.tasks || [];
+      const nav = (data.analytics || {}).nav || {};
+      const taskRows = tasks.slice(0, 8).map(task => `<div class="ops-task">
+        <span class="ops-task-severity ${task.severity || 'warning'}"></span>
+        <div><strong>${task.code ? task.code + ' · ' : ''}${task.title || '待复核'}</strong>
+        <small>${task.summary || '需要人工确认'}</small></div>
+        <em>${task.task_type || '任务'}</em></div>`).join('');
+      el.innerHTML = `<div class="ops-grid">
+        <section class="card ops-summary" aria-label="运营状态摘要">
+          <div><span>账户对账</span><strong>${operationsStatusLabel(reconciliation.status)}</strong><small>${reconciliation.broker_snapshot_at || '无快照'}</small></div>
+          <div><span>开放任务</span><strong>${tasks.length}</strong><small>${tasks.filter(task => task.severity === 'critical').length} 项关键</small></div>
+          <div><span>高置信行情</span><strong>${fmt(quality.high_confidence_pct || 0, 1)}%</strong><small>${quality.high_confidence || 0}/${quality.total || 0}</small></div>
+          <div><span>PAPER</span><strong>${paper.orders_filled || 0}/${paper.orders_generated || 0}</strong><small>${operationsStatusLabel(paper.status)}</small></div>
+        </section>
+        <section class="card ops-control"><div class="card-header"><span class="card-title">对账与可信度</span></div>
+          <div class="ops-ledger"><span>资产差异 <b>${fmtCurrency(reconciliation.asset_drift || 0)}</b></span>
+          <span>现金差异 <b>${fmtCurrency(reconciliation.cash_drift || 0)}</b></span>
+          <span>当前仓位 <b>${fmt(recovery.current_invested_pct || 0, 1)}%</b></span>
+          <span>自动池参考 <b>${fmt(recovery.reference_auto_pool_pct || 0, 0)}%</b></span>
+          <span>待结算 <b>${settlement.pending || 0}</b></span>
+          <span>到期阻塞 <b>${settlement.due_blocked || 0}</b></span>
+          <span>处置方式 <b>${recovery.manual_confirmation_required ? '人工复核' : '无需操作'}</b></span></div></section>
+        <section class="card ops-queue"><div class="card-header"><span class="card-title">待处理任务</span><span class="card-subtitle">${tasks.length} 项</span></div>
+          <div>${taskRows || '<div class="empty-state">没有开放任务</div>'}</div></section>
+        <section class="card ops-history"><div class="card-header"><span class="card-title">券商对账净值</span><span class="card-subtitle">${nav.point_count || 0} 个快照</span></div>
+          <div class="ops-ledger"><span>当前收益 <b>${pctStr(Number(nav.current_return_pct || 0))}</b></span>
+          <span>当前回撤 <b>${pctStr(Number(nav.current_drawdown_pct || 0))}</b></span>
+          <span>最大回撤 <b>${fmt(nav.max_drawdown_pct || 0, 2)}%</b></span>
+          <span>历史峰值 <b>${fmtCurrency(nav.peak_value || 0)}</b></span></div></section>
+        <section class="card ops-run"><div class="card-header"><span class="card-title">最近运营周期</span></div>
+          <div class="ops-run-state"><strong>${operationsStatusLabel(run.status)}</strong><span>${run.run_date || '尚未运行'} · ${run.mode || '—'}</span></div></section>
+      </div>`;
+    })
+    .catch(error => { el.innerHTML = componentError(`运营数据加载失败：${error.message}`, 'retryOperationsData'); });
 }
 
 // ─── INIT ─────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// v5.1 浏览器通知
+// ═══════════════════════════════════════════════════════════
+let _lastGateState = null;
+function checkGateStateChange() {
+  const d = STATE.data; if (!d) return;
+  const gate = d.auto_gate || {};
+  const state = gate.state || '';
+  if (_lastGateState && _lastGateState !== state) {
+    const msg = `闸门状态变更: ${_lastGateState} → ${state}`;
+    showToast(msg, state === 'LOCKED' ? 'error' : 'warning');
+    if (Notification && Notification.permission === 'granted') {
+      new Notification('Serenity 闸门变化', { body: msg, icon: '/static/icon-192.png' });
+    }
+    // v5.2 推送闸门变化到 Mission Control → Telegram
+    fetch('http://localhost:3001/api/alerts/gate-change', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({oldState:_lastGateState, newState:state, reasons:gate.reasons||[]})
+    }).catch(function(){});
+  }
+  _lastGateState = state;
+}
+// 请求通知权限
+if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+  Notification.requestPermission();
+}
+
+// ═══════════════════════════════════════════════════════════
+// v5.1 信号分布图表
+// ═══════════════════════════════════════════════════════════
+function renderSignalDistChart(scores) {
+  if (!scores || !scores.length) return '';
+  const counts = {};
+  scores.forEach(s => { const a = s.signal_action || '—'; counts[a] = (counts[a] || 0) + 1; });
+  const labels = Object.keys(counts);
+  const max = Math.max(...Object.values(counts), 1);
+  let html = '<div style="display:flex;flex-direction:column;gap:4px;min-width:120px">';
+  const colors = {BUY:'#FF3B30',CAUTION_BUY:'#FF453A',STRONG_BUY:'#FF3B30',HOLD:'#FFD60A',WATCH:'#FF9F0A',WEAK_HOLD:'#FFD60A',SELL:'#34C759',STOP_LOSS:'#30D158',TAKE_PROFIT:'#FFD60A'};
+  labels.forEach(l => {
+    const w = Math.round((counts[l]/max)*100);
+    html += `<div style="display:flex;align-items:center;gap:6px;font-size:10px">
+      <span style="width:36px;text-align:right;color:var(--text-tertiary)">${l}</span>
+      <div style="flex:1;height:10px;border-radius:5px;background:rgba(255,255,255,0.06)">
+        <div style="width:${w}%;height:100%;border-radius:5px;background:${colors[l]||'#666'};transition:width .6s"></div>
+      </div>
+      <span style="width:16px;color:var(--text-secondary);font-weight:600">${counts[l]}</span>
+    </div>`;
+  });
+  return html + '</div>';
+}
+
+// ═══════════════════════════════════════════════════════════
+// v5.1 快捷操作
+// ═══════════════════════════════════════════════════════════
+function quickActions() {
+  return `<div class="action-bar" id="action-bar">
+    <button class="action-btn primary" onclick="window.open('/monitor','_self')">🔄 刷新</button>
+    <button class="action-btn" onclick="navigator.clipboard.writeText(JSON.stringify(STATE.data?.portfolio_summary||{}));showToast('已复制持仓摘要','success')">📋 复制</button>
+    <button class="action-btn" onclick="showToast('盘中 5s · 盘后 30s 自动刷新中','info')">ℹ️ 状态</button>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// v5.1 Δ值辅助函数
+// ═══════════════════════════════════════════════════════════
+function applyDelta(el, current, previous) {
+  if (!previous || !current) return el;
+  const diff = current - previous;
+  const pct = previous ? (diff / previous * 100) : 0;
+  const cls = diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat';
+  const sign = diff > 0 ? '+' : '';
+  return el + `<span class="delta ${cls}" style="margin-left:6px">${sign}${fmt(diff,0)} (${sign}${fmt(pct,1)}%)</span>`;
+}
+
 document.addEventListener('DOMContentLoaded', init);
+
+// ═══════════════════════════════════════════════════════════
+// v5.3 LIVE TAB — 盯盘模式
+// ═══════════════════════════════════════════════════════════
+let _liveTimer = null;
+let _liveStartTime = null;
+
+function startLiveRefresh() {
+  if (_liveTimer) clearInterval(_liveTimer);
+  _liveStartTime = Date.now();
+  _liveTimer = setInterval(function() {
+    if (document.hidden || STATE.activeTab !== 'live') {
+      clearInterval(_liveTimer); _liveTimer = null; return;
+    }
+    var el = document.getElementById('tab-live');
+    if (!el) return;
+    fetch('/api/quick-snapshot')
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (d.ok && d.portfolio) {
+          STATE.data = STATE.data || {};
+          STATE.data.portfolio_summary = d.portfolio;
+          STATE.data.scores = d.scores || STATE.data.scores || [];
+          renderLiveTab(STATE.data);
+        }
+      })
+      .catch(function(){});
+  }, 5000);
+}
+
+function renderLiveTab(d) {
+  var el = document.getElementById('tab-live');
+  if (!el) return;
+  var pf = d.portfolio_summary || {};
+  var pnl = pf.total_profit_pct || 0;
+  var positions = pf.position_details || [];
+  var scores = d.scores || [];
+  var uptime = _liveStartTime ? Math.floor((Date.now() - _liveStartTime) / 1000) : 0;
+  var mins = Math.floor(uptime / 60), secs = uptime % 60;
+
+  var h = '';
+  // Header with timer
+  h += '<div class="live-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+  h += '<div><span style="font-size:20px;font-weight:700">👁️ 盯盘</span><span style="font-size:11px;color:var(--text-tertiary);margin-left:8px">每5秒刷新</span></div>';
+  h += '<div style="font-size:11px;color:var(--text-tertiary);font-family:var(--font-mono)">⏱ ' + mins + ':' + (secs < 10 ? '0' : '') + secs + '</div>';
+  h += '</div>';
+
+  // Hero P&L bar
+  h += '<div class="hero-compact" style="margin-bottom:12px">';
+  h += '<div class="hero-equity">' + fmtCurrency(pf.total_value) + '</div>';
+  h += '<div class="hero-pnl-row"><span class="hero-pnl-today ' + clsPct(pnl) + '">' + (pnl >= 0 ? '+' : '') + fmt(pnl, 2) + '%</span>';
+  h += '<span class="hero-pnl-total">浮盈 ' + fmtCurrency(pf.total_profit_amount || 0) + '</span></div>';
+  h += '</div>';
+
+  // Position cards with live P&L
+  if (positions.length) {
+    h += '<div class="live-positions" style="display:flex;flex-direction:column;gap:8px">';
+    positions.forEach(function(p) {
+      var isUp = (p.profit_pct || 0) >= 0;
+      var sig = scores.find(function(s){return s.code===p.code}) || {};
+      var bgColor = isUp ? 'rgba(255,59,48,0.04)' : 'rgba(52,199,89,0.04)';
+      h += '<div class="live-position-card" style="background:' + bgColor + ';border:0.5px solid var(--glass-border);border-radius:12px;padding:12px;transition:all .3s">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+      h += '<div><span style="font-size:16px;font-weight:600">' + (p.name || p.code) + '</span><span style="font-size:11px;color:var(--text-tertiary);margin-left:6px">' + (p.code || '') + '</span></div>';
+      h += '<div style="text-align:right"><div style="font-size:11px;color:var(--text-tertiary)">⏺ 实时</div><div style="font-size:18px;font-weight:700;font-family:var(--font-num)" class="' + (isUp ? 'up' : 'down') + '">' + fmtCurrency(p.current_value) + '</div></div>';
+      h += '</div>';
+      h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">';
+      h += '<div style="display:flex;gap:16px;font-size:11px">';
+      h += '<span>成本 <b style="font-family:var(--font-num)">¥' + fmt(p.buy_price) + '</b></span>';
+      h += '<span>现价 <b style="font-family:var(--font-num);color:' + (isUp ? 'var(--up)' : 'var(--down)') + '">¥' + fmt(p.current_price) + '</b></span>';
+      h += '<span>股数 <b>' + fmt(p.shares, 0) + '</b></span>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:8px;align-items:center">';
+      h += '<span class="' + (isUp ? 'up' : 'down') + '" style="font-size:20px;font-weight:700;font-family:var(--font-num)">' + (isUp ? '+' : '') + fmt(p.profit_pct, 2) + '%</span>';
+      if (sig.signal_action) h += '<span class="signal-label-' + sig.signal_action + '" style="font-size:9px;padding:2px 6px;border-radius:3px">' + sig.signal_action + '</span>';
+      h += '</div>';
+      h += '</div></div>';
+    });
+    h += '</div>';
+  } else {
+    h += '<div class="empty-state"><div class="text">暂无持仓</div></div>';
+  }
+
+  el.innerHTML = h;
+}
+
+// ═══════════════════════════════════════════════════════════
+// v5.7 信号实时推送 — STRONG_BUY/SELL → Telegram
+// ═══════════════════════════════════════════════════════════
+function pushSignalAlerts() {
+  var d = STATE.data; if (!d) return;
+  var scores = d.scores || [];
+  var heldCodes = new Set((d.portfolio_summary || {}).position_details ? d.portfolio_summary.position_details.map(function(p){return p.code}) : []);
+  var alerts = [];
+  scores.forEach(function(s) {
+    if (s.signal_action === 'STRONG_BUY' && !heldCodes.has(s.code)) {
+      alerts.push('🟢 ' + s.name + '(' + s.code + ') STRONG_BUY ' + s.total_score + '分');
+    } else if (s.signal_action === 'SELL' && heldCodes.has(s.code)) {
+      alerts.push('🔴 ' + s.name + '(' + s.code + ') SELL ' + s.total_score + '分');
+    } else if (s.signal_action === 'TAKE_PROFIT' && heldCodes.has(s.code)) {
+      alerts.push('💰 ' + s.name + '(' + s.code + ') TAKE_PROFIT');
+    }
+  });
+  if (alerts.length > 0) {
+    fetch('http://localhost:3001/api/alerts/gate-change', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({oldState:'signal_check', newState:'signal_alert', reasons:alerts})
+    }).catch(function(){});
+    alerts.forEach(function(a) { showToast(a, 'warning'); });
+  }
+}

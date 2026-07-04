@@ -669,6 +669,20 @@ def init_db():
         )
     """)
 
+    # v5.1 数据源健康日志
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS source_health_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            reachable INTEGER NOT NULL DEFAULT 0,
+            latency_ms REAL DEFAULT 0,
+            data_points INTEGER DEFAULT 0,
+            error TEXT DEFAULT '',
+            checked_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shl_source_checked ON source_health_log(source, checked_at)")
+
     for sql in _index_sqls:
         conn.execute(sql)
     conn.commit()
@@ -2215,6 +2229,41 @@ def get_conviction_history(days: int = 30) -> list[dict]:
             d["regime_weights"] = {}
         result.append(d)
     return result
+
+
+def auto_fill_journal_reflections():
+    """v5.0 自动回填交易日志的反思字段 — 从 score_reflections 提取对应反思文本"""
+    import json
+    conn = get_conn()
+    # 查找 reflection 为空但有 entry/exit 评分的交易
+    rows = conn.execute(
+        "SELECT id, code, date, action, score_at_entry, score_at_exit, profit_pct FROM trading_journal WHERE reflection IS NULL ORDER BY date DESC LIMIT 20"
+    ).fetchall()
+    filled = 0
+    for r in rows:
+        code = r["code"]
+        trade_date = r["date"]
+        # 从 score_reflections 获取对应日期和股票的反思
+        ref_row = conn.execute(
+            "SELECT reflection_text FROM score_reflections WHERE code=? AND date=? ORDER BY date DESC LIMIT 1",
+            (code, trade_date),
+        ).fetchone()
+        if ref_row and ref_row["reflection_text"]:
+            # 提取关键句子(前200字)
+            text = ref_row["reflection_text"][:300]
+            # 加交易损益信息
+            pnl = r["profit_pct"] or 0
+            pnl_note = f"[损益: {pnl:+.1f}%] " if pnl != 0 else ""
+            reflection = pnl_note + text
+            conn.execute(
+                "UPDATE trading_journal SET reflection=?, updated_at=datetime('now','localtime') WHERE id=?",
+                (reflection, r["id"]),
+            )
+            filled += 1
+
+    conn.commit()
+    conn.close()
+    return {"filled": filled}
 
 
 def get_latest_conviction() -> Optional[dict]:

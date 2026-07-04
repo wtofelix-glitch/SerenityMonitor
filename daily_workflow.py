@@ -372,13 +372,73 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 自动调仓失败: {e}")
 
-    # ── 🚀 受控半自动排队（--execute 模式）──────────────
-    if do_execute and (plan.get('sells') or plan.get('buys')):
-        step('🚀 受控半自动排队')
+    # ── v5.2 月度参数寻优(每月第一个交易日) ──────────
+    try:
+        from backtest_engine import grid_search
+        if today.day <= 7 and today.weekday() < 5:
+            step('6b/8 回测参数寻优')
+            best = grid_search()
+            if best.get("params"):
+                print(f"  ✅ 最优: buy_th={best['params']['buy_threshold']} sl={best['params']['stop_loss_pct']} sharpe={best['sharpe']:.2f} wr={best['win_rate']}%")
+    except Exception:
+        pass
+
+    # ── v5.2 全市场扫描(每周六) ─────────────────────
+    try:
+        if today.weekday() == 5:  # 周六
+            step('6c/8 全市场扫描')
+            from candidate_scanner_full import scan_mainboard
+            top = scan_mainboard(top_n=10)
+            if top:
+                print(f"  ✅ 全市场 TOP10:")
+                for i, c in enumerate(top[:10]):
+                    print(f"     {i+1}. {c['name']:6s}({c['code']}) {c['total_score']:.0f}分 {c.get('suggestion','')}")
+    except Exception as e:
+        print(f"  ⚠️ 全市场扫描失败: {e}")
+
+    # ── 🚀 v5.0 自动决策（--auto 模式）──────────────
+    do_auto = '--auto' in sys.argv
+    do_live = '--live' in sys.argv
+    if do_auto and (plan.get('sells') or plan.get('buys')):
+        step('🚀 闸门自动决策')
         try:
-            run_controlled_execution_step(plan, dry_run=dry_run)
+            from auto_execute import auto_execute_if_gate_allows
+            result = auto_execute_if_gate_allows(plan)
+            if result.get("staged", 0) > 0:
+                print(f"  ✅ {result['staged']} 笔已排队")
+            elif result.get("paper_trades", 0) > 0:
+                print(f"  📝 {result['paper_trades']} 笔纸面交易")
         except Exception as e:
-            print(f"  ❌ 受控半自动排队失败: {e}")
+            print(f"  ❌ 自动决策失败: {e}")
+
+    # ── v5.6 微仓实盘: --live 模式 ─────────────────────
+    if do_live and (plan.get('sells') or plan.get('buys')):
+        step('💰 微仓实盘执行')
+        try:
+            from ths_bridge import auto_execute_to_ths
+            # 微仓限制: 单笔 ≤ ¥5000, 每日 ≤ ¥10000
+            MAX_PER_TRADE = 5000
+            MAX_DAILY = 10000
+            scaled_plan = {
+                "sells": plan.get("sells", []),
+                "buys": [{
+                    **b,
+                    "shares": min(b.get("shares", 100), int(MAX_PER_TRADE / max(b.get("price", 50), 1) / 100) * 100),
+                    "amount": min(b.get("amount", 0) or b.get("price", 50) * b.get("shares", 100), MAX_PER_TRADE),
+                    "reasons": b.get("reasons", ["自动信号"])[:1] + ["微仓实盘"]
+                } for b in plan.get("buys", [])[:2]],  # 每日最多2笔
+            }
+            total_amount = sum(b.get("amount", 0) for b in scaled_plan["buys"])
+            if total_amount > MAX_DAILY:
+                scaled_plan["buys"] = scaled_plan["buys"][:1]
+            result = auto_execute_to_ths(scaled_plan, dry_run=False)
+            buys_ok = [r for r in result.get("buys", []) if r.get("status") == "pending_confirm"]
+            sells_ok = [r for r in result.get("sells", []) if r.get("status") == "pending_confirm"]
+            print(f"  💰 微仓: {len(buys_ok)}买 {len(sells_ok)}卖 (单笔≤¥{MAX_PER_TRADE:,})")
+            for r in buys_ok:
+                print(f"     📋 {r.get('instruction', r.get('code','?'))[:80]}")
+        except Exception as e:
+            print(f"  ❌ 微仓实盘失败: {e}")
 
     # ── 7. T1 回补检查 ────────────────────────────────
     try:

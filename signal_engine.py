@@ -55,7 +55,8 @@ def _fetch_conviction_thresholds() -> dict:
     try:
         from db import get_latest_conviction
         cv = get_latest_conviction()
-    except Exception:
+    except Exception as e:
+        log.debug(f"conviction 数据不可用(使用默认阈值): {e}")
         cv = None
     
     if not cv or cv.get("date") != today:
@@ -822,7 +823,7 @@ def confirm_buy_signal(code: str, tech: dict, alpha_signals: dict) -> dict:
     # 条件6: Alpha因子不负面
     total_checks += 1
     if alpha_signals:
-        avg_alpha = sum(v for v in alpha_signals.values() if v is not None) / max(1, len(alpha_signals))
+        non_null = [v for v in alpha_signals.values() if v is not None]; avg_alpha = sum(non_null) / max(1, len(non_null))
         if avg_alpha >= SIGNAL_CONFIG["factor_signal_confirm"]:
             confirm_count += 1
             reasons.append(f"✓ Alpha因子积极 ({avg_alpha:+.2f})")
@@ -935,6 +936,7 @@ def generate_signals(codes: list[str] = None, portfolio: "PortfolioManager" = No
             if sig:
                 signals.append(sig)
         except Exception as e:
+            log.warning(f"[signal] {code}: 信号生成异常: {e}")
             signals.append({
                 "code": code,
                 "name": STOCK_MAP.get(code, {}).get("name", code),
@@ -1105,6 +1107,24 @@ def _generate_single_signal(code: str, realtime_data: dict,
             elif "SELL_PARTIAL" in sa["action"]:
                 # 止盈：保留原始评分，独立信号级别
                 action = "TAKE_PROFIT"
+
+    # ── v5.2 多时间框架动量共振 ──
+    # 5日/20日 momentum 同时为正 → 标注"高确信"
+    multi_tf_resonance = False
+    try:
+        hist = get_price_history(code, 30)
+        if hist and len(hist) >= 25:
+            close_5 = float(hist[0].get("close", 0))
+            close_base = float(hist[4].get("close", 0)) if len(hist) > 5 else close_5
+            close_20d_base = float(hist[19].get("close", 0)) if len(hist) > 20 else close_base
+            mtm_5d = (close_5 - close_base) / close_base if close_base > 0 else 0
+            mtm_20d = (close_5 - close_20d_base) / close_20d_base if close_20d_base > 0 else 0
+            multi_tf_resonance = mtm_5d > 0 and mtm_20d > 0
+            if multi_tf_resonance and action in ("STRONG_BUY", "BUY", "CAUTION_BUY"):
+                detail["reason"] = detail.get("reason", "") + " | 多周期共振[5d+20d↑]"
+                total_score = min(total_score + 3, 95)  # 共振加分
+    except Exception:
+        pass
                 # total_score 不变（止盈不降分）
 
     # 8.5 🆕 SELL 信号缓冲确认 — 防止超卖反弹前误卖
@@ -1129,8 +1149,8 @@ def _generate_single_signal(code: str, realtime_data: dict,
             action = "WATCH"
             log.info("  🛑 动量衰竭拦截 %s: 5日涨幅%.1f%%>15%%, %s→WATCH", name, change_5d,
                      "STRONG_BUY" if action in ("STRONG_BUY","BUY") else "CAUTION_BUY")
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug(f"momentum_exhaustion {code}: {e}")
 
     # 9. 买入确认（仅对非持仓标的）
     buy_confirm = None

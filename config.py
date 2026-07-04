@@ -373,6 +373,40 @@ RISK_CONFIG = {
     "max_single_loss_pct": -0.06,      # 单只亏损不超过 -6%
     "max_consecutive_losses": 2,       # 连续亏损2笔 → 强制空仓
     "cool_down_days": 3,               # 强制空仓天数
+    # v5.5 复利里程碑 — Kelly基线自动提升门槛
+    "compound_milestones": [
+        (1.20, 0.03),  # NAV 1.2x → Kelly +3%
+        (1.50, 0.05),  # NAV 1.5x → Kelly +5%
+        (2.00, 0.08),  # NAV 2.0x → Kelly +8%
+        (3.00, 0.10),  # NAV 3.0x → Kelly +10%
+    ],
+    "kelly_cap": 0.50,  # 单笔仓位绝对上限
+}
+
+# ============================================================
+# v5.5 进化配置 — 从scorer/signal硬编码提取
+# ============================================================
+EVOLUTION_CONFIG = {
+    # IC权重调整步长
+    "ic_weight_step": 0.03,
+    "ic_positive_threshold": 0.05,    # IC > 此值 → 加权重
+    "ic_negative_threshold": -0.10,   # IC < 此值 → 减权重
+    "max_single_weight": 0.30,
+    "min_single_weight": 0.01,
+    # volume维度特殊处理
+    "volume_kill_threshold": -0.20,   # IC < 此值 → 权重归零
+    # 选股可预测性
+    "predictability_grades": {"A": 70, "B": 55, "C": 40},
+    "predictability_min_samples": 5,
+    "predictability_downgrade_pct": 0.20,  # D级股票降权20%
+    # 多周期融合
+    "triple_cycle_weights": (0.40, 0.40, 0.20),
+    "cycle_agreement_bonus": (8, 3, 0),  # 3周期/2周期/0
+    # 技术/情绪融合
+    "tech_sentiment_ratio": (0.80, 0.20),
+    # 制度偏移(可调整幅度)
+    "regime_shift_max_single": 0.10,  # 单维度最大偏移
+    "regime_weight_floor": 0.02,       # 归一化后最低权重
 }
 
 # ============================================================

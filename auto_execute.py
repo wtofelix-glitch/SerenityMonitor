@@ -1140,6 +1140,72 @@ def _pending_count() -> int:
     return c
 
 
+def auto_execute_if_gate_allows(plan: dict) -> dict:
+    """v5.0 根据闸门状态自动决策执行级别:
+    - LOCKED → 跳过(仅打印计划)
+    - PAPER → 纸面交易自动执行(paper_trader)
+    - SEMI_AUTO → 生成 pending_confirm 订单
+    """
+    from auto_gate import get_latest_gate_result
+    from paper_trader import PaperTrader
+    from db import get_conn
+    from config import STOCK_MAP
+
+    gate = get_latest_gate_result()
+    state = gate.get("state", "LOCKED") if gate else "LOCKED"
+    print(f"\n  🤖 自动执行决策: 闸门状态={state}")
+
+    if state == "LOCKED":
+        print(f"  🔒 闸门锁定 — 跳过执行，仅分析")
+        # 纸面交易仍然执行(为闸门积累样本)
+        pt = PaperTrader()
+        from datetime import date
+        paper_results = pt.auto_trade_from_signals(date.today().isoformat())
+        if paper_results:
+            print(f"  📝 纸面交易: {len(paper_results)} 笔(闸门样本积累)")
+        return {"state": "LOCKED", "executed": False, "paper_trades": len(paper_results)}
+
+    elif state == "PAPER":
+        # PAPER 状态: 仅纸面交易
+        pt = PaperTrader()
+        from datetime import date
+        paper_results = pt.auto_trade_from_signals(date.today().isoformat())
+        buys = [r for r in paper_results if r.get("status") == "buy"]
+        sells = [r for r in paper_results if r.get("status") == "sell"]
+        print(f"  📝 纸面执行: {len(buys)}买 {len(sells)}卖")
+        for r in buys[:3]:
+            print(f"     🟢 {r.get('name','?')} {r.get('shares',0)}股 @¥{r.get('price',0):.2f}")
+        return {"state": "PAPER", "executed": False, "paper_trades": len(paper_results)}
+
+    elif state == "SEMI_AUTO":
+        # 半自动: 生成 pending_confirm 订单，等待用户确认
+        staged = 0
+        conn = get_conn()
+        for entry in plan.get("buys", [])[:3]:
+            conn.execute(
+                "INSERT INTO execution_log (code, action, status, price, shares, amount, reason, created_at) VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))",
+                (entry.get("code"), "buy", "pending_confirm", entry.get("price", 0),
+                 entry.get("shares", 0), entry.get("amount", 0),
+                 f"SEMI_AUTO: {entry.get('reasons', ['自动信号'])[0] if entry.get('reasons') else '自动信号'}"))
+        conn.commit()
+        staged += len(plan.get("buys", [])[:3])
+
+        for entry in plan.get("sells", []):
+            conn.execute(
+                "INSERT INTO execution_log (code, action, status, price, shares, amount, reason, created_at) VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))",
+                (entry.get("code"), "sell", "pending_confirm", entry.get("estimated_proceeds", 0) / max(entry.get("shares", 1), 1),
+                 entry.get("shares", 0), entry.get("estimated_proceeds", 0),
+                 f"SEMI_AUTO: {entry.get('reasons', ['自动信号'])[0] if entry.get('reasons') else '自动信号'}"))
+        conn.commit()
+        staged += len(plan.get("sells", []))
+        conn.close()
+
+        print(f"  ✅ SEMI_AUTO: {staged} 笔已排队 pending_confirm")
+        return {"state": "SEMI_AUTO", "executed": False, "staged": staged}
+
+    return {"state": state, "executed": False}
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
     do_push = "--push" in sys.argv
@@ -1147,6 +1213,7 @@ def main():
     do_force_execute = "--force-execute" in sys.argv
     do_stats = "--stats" in sys.argv
     do_premarket = "--premarket" in sys.argv
+    do_auto = "--auto" in sys.argv
 
     # ── 独立模式 ──
     if do_stats:
@@ -1161,6 +1228,10 @@ def main():
 
     plan = generate_execution_plan(dry_run=dry_run)
     print(plan["summary"])
+
+    # ── v5.0 自动执行: 根据闸门状态自动决策 ──
+    if do_auto:
+        result = auto_execute_if_gate_allows(plan)
 
     # ── 自动执行 ──
     if do_execute and (plan["sells"] or plan["buys"]):

@@ -700,45 +700,77 @@ def format_recommend_result(result: dict) -> str:
 
 
 def grid_search(codes: list[str] = None, days: int = 250, silent: bool = True) -> dict:
-    """v4.0 网格搜索最优参数组合 — 对买入阈值、止损线、仓位比例做网格搜索
+    """v5.2 网格搜索最优参数 — 基于历史信号 outcome 数据直接评估
 
     搜索空间:
-    - buy_threshold: [0.25, 0.30, 0.35, 0.40, 0.45] (多因子策略入场阈值)
-    - stop_loss_pct: [0.03, 0.05, 0.06, 0.08, 0.10]
-    - position_pct: [0.20, 0.25, 0.30, 0.35, 0.40]
+    - buy_threshold: 最小买入总分阈值 [55, 60, 62, 65, 68, 70]
+    - stop_loss_pct: 止损线 [0.03, 0.05, 0.06, 0.08, 0.10]
+    - position_pct: 仓位比例不搜索（依赖 Kelly 公式）
 
-    返回最优参数组合及其夏普比率、胜率、平均收益。
+    使用 signal_log 的 outcome_5d 作为真实回测数据
     """
-    if codes is None:
-        codes = ["002281", "000988", "600487"]
+    from db import get_conn
 
-    best = {"sharpe": -999, "params": {}, "win_rate": 0, "avg_return": 0}
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT code, date, action, total_score, outcome_5d, is_holding "
+        "FROM signal_log WHERE outcome_5d IS NOT NULL ORDER BY date DESC LIMIT 500"
+    ).fetchall()
+    conn.close()
 
-    for buy_th in [0.25, 0.30, 0.35, 0.40, 0.45]:
+    samples = [dict(r) for r in rows]
+    if len(samples) < 20:
+        return {"error": f"样本不足({len(samples)}), 需≥20", "params": {}, "sharpe": 0}
+
+    best = {"sharpe": -999, "win_rate": 0, "avg_return": 0, "params": {}}
+
+    for buy_th in [55, 60, 62, 65, 68, 70]:
         for sl_pct in [0.03, 0.05, 0.06, 0.08, 0.10]:
-            for pos_pct in [0.20, 0.25, 0.30, 0.35, 0.40]:
-                try:
-                    results = []
-                    for code in codes:
-                        bt = MultiFactorStrategy(name=f"grid_{buy_th}_{sl_pct}_{pos_pct}")
-                        r = bt.run(
-                            code, days=days,
-                            buy_threshold=buy_th,
-                            stop_loss_pct=sl_pct,
-                            position_pct=pos_pct,
-                            silent=silent,
-                        )
-                        if r and r.get("sharpe") is not None:
-                            results.append(r)
+            trades: list[float] = []
+            wins = 0
+            for s in samples:
+                score = float(s.get("total_score", 50))
+                outcome = float(s.get("outcome_5d", 0))
+                action = s.get("action", "")
+                is_holding = s.get("is_holding", 0)
 
-                    if results:
-                        avg_sharpe = sum(r["sharpe"] for r in results) / len(results)
-                        avg_wr = sum(r.get("win_rate", 0) for r in results) / len(results)
-                        avg_ret = sum(r.get("total_return", 0) for r in results) / len(results)
-                        if avg_sharpe > best["sharpe"]:
-                            best = {"sharpe": avg_sharpe, "win_rate": avg_wr, "avg_return": avg_ret,
-                                    "params": {"buy_threshold": buy_th, "stop_loss_pct": sl_pct, "position_pct": pos_pct}}
-                except Exception:
-                    continue
+                # 模拟: 买入信号且分数超阈值 → 执行; 持有且 outcome<止损 → 止损
+                if action in ("BUY", "STRONG_BUY", "CAUTION_BUY") and score >= buy_th:
+                    trades.append(outcome)
+                    if outcome > 0:
+                        wins += 1
+                elif is_holding and action in ("SELL", "STOP_LOSS") and outcome < sl_pct * -100:
+                    trades.append(sl_pct * -100)  # 止损
+                elif is_holding and outcome < sl_pct * -100:
+                    trades.append(sl_pct * -100)  # 止损触发
+
+            if len(trades) < 5:
+                continue
+
+            avg_ret = sum(trades) / len(trades)
+            wr = wins / len(trades) if trades else 0
+            vol = (sum((t - avg_ret) ** 2 for t in trades) / len(trades)) ** 0.5 if len(trades) > 1 else 1
+            sharpe = avg_ret / vol if vol > 0 else 0
+
+            if sharpe > best["sharpe"]:
+                best = {"sharpe": round(sharpe, 3), "win_rate": round(wr * 100, 1), "avg_return": round(avg_ret, 2), "params": {"buy_threshold": buy_th, "stop_loss_pct": sl_pct}, "samples": len(trades)}
+
+    # Persist
+    if best["params"]:
+        try:
+            from datetime import date
+            conn = get_conn()
+            conn.execute(
+                "INSERT INTO param_optimization (date, param_name, best_value, sharpe, win_rate, avg_return) VALUES (?,?,?,?,?,?)",
+                (date.today().isoformat(), "buy_threshold", best["params"]["buy_threshold"], best["sharpe"], best["win_rate"], best["avg_return"]),
+            )
+            conn.execute(
+                "INSERT INTO param_optimization (date, param_name, best_value, sharpe, win_rate, avg_return) VALUES (?,?,?,?,?,?)",
+                (date.today().isoformat(), "stop_loss_pct", best["params"]["stop_loss_pct"], best["sharpe"], best["win_rate"], best["avg_return"]),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     return best

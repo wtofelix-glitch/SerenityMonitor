@@ -521,13 +521,8 @@ def evaluate_auto_gate(explain: bool = False) -> dict[str, Any]:
 
 
 def _persist_gate_result(conn, result: dict[str, Any]) -> None:
-    # 幂等保护：同一天同一 strategy_version 只保留一条记录
-    existing = conn.execute(
-        "SELECT id FROM auto_trade_gate WHERE date=? AND strategy_version=?",
-        (result["date"], result["strategy_version"]),
-    ).fetchone()
-    if existing:
-        conn.execute("DELETE FROM auto_trade_gate WHERE id=?", (existing["id"],))
+    # v5.5 UPSERT: 用 INSERT OR REPLACE + 唯一索引防止重复, 替代 DELETE+INSERT
+    # 如果 date+strategy_version 已存在则更新, 否则插入
     conn.execute(
         """
         INSERT INTO auto_trade_gate

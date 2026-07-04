@@ -26,6 +26,11 @@ except ImportError:
 
 def _market_prefix_for_code(code: str) -> Optional[str]:
     """Return Sina/Tencent market prefix for an A-share code."""
+    # Broad-market benchmarks are Shanghai indices even though their six-digit
+    # identifiers begin with 000. Treating them as Shenzhen instruments yields
+    # empty/incorrect quotes and prevents T+1/T+6 excess-return settlement.
+    if code in {"000300", "000905"}:
+        return "sh"
     info = STOCK_MAP.get(code)
     if info and info.get("market"):
         return info["market"]
@@ -131,8 +136,29 @@ def parse_sina_line(line: str) -> Optional[dict]:
         return None
 
 
+def get_best_source() -> str:
+    """v5.1 根据健康评分自动选择最优数据源。返回 source key."""
+    try:
+        from db import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT source, AVG(reachable) as avail, AVG(latency_ms) as avg_lat, COUNT(*) as n "
+            "FROM source_health_log WHERE checked_at > datetime('now','-1 hour') "
+            "GROUP BY source HAVING n >= 2 ORDER BY avail DESC, avg_lat ASC"
+        ).fetchall()
+        conn.close()
+        # 可用率 >= 80% 的源中选延迟最低的
+        candidates = [(r["source"], r["avail"] or 0, r["avg_lat"] or 0) for r in rows if (r["avail"] or 0) >= 0.8]
+        if candidates:
+            candidates.sort(key=lambda x: (-x[1], x[2]))  # v5.5: 高可用优先,低延迟次之
+            return candidates[0][0]
+    except Exception:
+        pass
+    return "tencent"  # fallback
+
+
 def fetch_realtime(code_list: Optional[list[str]] = None,
-                   source: str = "tencent") -> list[dict]:
+                   source: str = "auto") -> list[dict]:
     """
     获取多只股票的实时行情
     返回解析后的字典列表
@@ -140,8 +166,10 @@ def fetch_realtime(code_list: Optional[list[str]] = None,
     Parameters
     ----------
     source : str
-        "tencent" (默认, PE/PB/市值) / "sina" / "akshare"
+        "auto" (v5.1 自动选择最优源) / "tencent" / "sina" / "akshare"
     """
+    if source == "auto":
+        source = get_best_source()
     if code_list is None:
         code_list = ALL_CODES
 
@@ -150,27 +178,33 @@ def fetch_realtime(code_list: Optional[list[str]] = None,
     if not code_list:
         return []
 
-    if source == "akshare":
-        return _akshare_fetch_realtime(code_list)
-    if source == "tencent":
-        return _tencent_fetch_realtime(code_list)
+    # v5.5 自动回退链: 主源失败→尝试下一个可用源
+    FALLBACK_ORDER = ["tencent", "sina", "akshare"]
+    FALLBACK_ORDER = [s for s in FALLBACK_ORDER if s != source]
+    FALLBACK_ORDER.insert(0, source)
 
-    # ── 默认：Sina ──
-    if METRICS_AVAILABLE:
-        API_CALLS.labels(source="sina").inc()
-    try:
-        raw = sina_fetch_raw(code_list)
-    except Exception:
-        if METRICS_AVAILABLE:
-            API_ERRORS.labels(source="sina").inc()
-        raise
+    last_error = None
+    for src in FALLBACK_ORDER:
+        try:
+            if src == "akshare":
+                result = _akshare_fetch_realtime(code_list)
+            elif src == "tencent":
+                result = _tencent_fetch_realtime(code_list)
+            else:  # sina
+                if METRICS_AVAILABLE:
+                    API_CALLS.labels(source="sina").inc()
+                raw = sina_fetch_raw(code_list)
+                lines_raw = [l for l in raw.replace("\\n", "\n").split("\n") if l.strip() and "=" in l] if raw else []
+                parsed = [parse_sina_line(line) for line in lines_raw]
+                result = [p for p in parsed if p is not None]
+            if result and any(r.get("price", 0) > 0 for r in result):
+                return result
+        except Exception as e:
+            last_error = e
+            continue
 
-    results = []
-    for line in raw.strip().split("\n"):
-        parsed = parse_sina_line(line)
-        if parsed:
-            results.append(parsed)
-    return results
+    log.warning("所有数据源不可用: %s", last_error)
+    return []
 
 
 def _akshare_fetch_realtime(code_list: list[str]) -> list[dict]:

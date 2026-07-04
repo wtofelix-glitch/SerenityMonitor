@@ -100,14 +100,14 @@ class PortfolioManager:
         try:
             # ① CASH 覆盖记录（手动校准值）
             cash_row = conn.execute(
-                "SELECT price FROM trades WHERE code='CASH' AND action='sell' AND rowid IN (SELECT max(rowid) FROM trades WHERE code='CASH')"
+                "SELECT price FROM trades WHERE code='CASH' AND action='sell' ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
             if cash_row and cash_row["price"] and cash_row["price"] > 0:
                 return cash_row["price"]
 
             # ② 公式计算
             rows = conn.execute(
-                "SELECT action, price, quantity, trade_amount FROM trades"
+                "SELECT action, price, quantity, trade_amount FROM trades WHERE code!='CASH'"
             ).fetchall()
         except Exception:
             return self.initial_capital
@@ -193,10 +193,13 @@ class PortfolioManager:
                 "profit_pct": round(profit_pct, 2),
                 "profit_amount": round(profit_amount, 2),
                 "is_free": is_free_position,
-                "weight": round(current_value / (cash + holdings_value) * 100, 1) if (cash + holdings_value) > 0 else 0,
             })
 
+        # Second pass: compute correct weights using full total_value
         total_value = cash + holdings_value
+        for d in details:
+            d["weight"] = round(d["current_value"] / total_value * 100, 1) if total_value > 0 else 0
+
         total_profit_pct = (total_value - self.initial_capital) / self.initial_capital * 100
 
         return {
@@ -250,12 +253,12 @@ class PortfolioManager:
         except Exception:
             _kelly_base, _kelly_mult = 0.2, 0.5
 
-        # 复利里程碑: 根据NAV增长自动提升Kelly基线
+        # v5.5 复利里程碑累加: NAV每增长20%→Kelly+0.03, 1.5x→+0.05, 2x→+0.08, 3x→+0.10
         nav_growth = total / self.initial_capital if self.initial_capital > 0 else 1.0
-        compound_boost = 0
+        compound_boost = 0.0
         for milestone, boost in [(1.2, 0.03), (1.5, 0.05), (2.0, 0.08), (3.0, 0.10)]:
             if nav_growth >= milestone:
-                compound_boost = boost
+                compound_boost = boost  # 取最高里程碑的boost
         _kelly_base = min(_kelly_base + compound_boost, 0.40)
 
         kelly_fraction = _kelly_base + signal_confidence * _kelly_mult
