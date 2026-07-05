@@ -300,29 +300,36 @@ CAPITAL_CONFIG = {
     "target_capital": 102133.0,        # 目标翻倍 → 102133
     "target_months": 3,                # 3 个月
     "max_positions": 3,                # v4.0 2→3: 分散风险同时保持集中度
-    "max_single_weight": 0.85,         # 单只最大仓位 85%（翻倍目标→重仓集中）
-    "min_single_weight": 0.30,         # 单只最小仓位 30%
+    "max_single_weight": 0.35,         # v4 §10.2: 85%→35% (降杠杆, T+1锁定风险控制)
+    "min_single_weight": 0.10,         # v4: 30%→10% (允许小仓位试探)
     "enter_threshold": 68,             # 买入最低评分（放宽至68→抓更多机会）
     "exit_threshold": 48,              # 持仓评分跌破此值建议卖出
-    "reserve_cash_ratio": 0.03,        # 保留 3% 现金（翻倍目标→现金=浪费）
+    "reserve_cash_ratio": 0.10,        # v4: 3%→10% (现金最低保留)
     "commission_rate": 0.00025,        # 佣金万2.5
     "stamp_tax_rate": 0.001,           # 印花税千1（卖出时）
-    # 🆕 激进翻倍模式 — 一键切换保守/激进策略参数
-    # True: 高Kelly仓位 + 紧止损 + 低现金 + 更宽标的筛选
-    # 翻倍模式建议: 震荡市/牛市开启，连续亏损>2笔后关闭
-    "aggressive_mode": True,
-    # Kelly 翻倍参数（portfolio.py 动态读取）
-    "_kelly_base": 0.3,              # 翻倍模式: 0.3 (保守0.2)
-    "_kelly_multiplier": 0.55,       # 翻倍模式: 0.55 → range 0.3~0.85 (保守0.5→0.2~0.7)
+    # v4 Phase 1: aggressive_mode 禁用（交易内核冻结期, 降杠杆）
+    "aggressive_mode": False,
+    # Kelly 参数 — v4 §10.3: 默认 0.25 Kelly, 连续3月跑赢Frozen→0.50 Kelly
+    "_kelly_base": 0.25,             # v4: 0.3→0.25 (保守)
+    "_kelly_multiplier": 0.30,       # v4: 0.55→0.30 → range 0.25~0.55 (降杠杆)
+    # v4 §10: 新增约束
+    "t1_new_buy_max_pct": 0.25,       # T+1 新买入单票上限 25%
+    "t1_locked_total_max_pct": 0.40,  # T+1 锁定仓位总上限 40%
+    "theme_exposure_max_pct": 0.50,   # 单主题暴露上限 50%
+    "t4_defensive_floor_pct": 0.20,   # T4 防御底仓最低 20%
 }
 
 
 def get_effective_config() -> dict:
     """根据 aggressive_mode 返回实际生效的参数
-    
-    翻倍目标下激进模式的参数偏移：
+
+    v4 Phase 1 内核冻结: aggressive_mode 已禁用 (False)。
+    所有激进参数偏移（单票85%/Kelly 1.0/止盈35%等）不再生效。
+    解冻条件：连续3个月跑赢 Frozen Baseline + 消融实验通过。
+
+    翻倍目标下激进模式的参数偏移（v4 冻结前, 仅供参考）：
     - Kelly fraction: 0.3-0.85 (保守 0.2-0.7)
-    - min_single_weight: 0.15 (保守 0.30) 
+    - min_single_weight: 0.15 (保守 0.30)
     - reserve_cash: 0.01 (保守 0.03)
     - enter_threshold: 64 (保守 68)
     - exit_threshold: 42 (保守 48)

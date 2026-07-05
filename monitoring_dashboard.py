@@ -2418,6 +2418,149 @@ def api_llm_status():
     from research_llm import AVAILABLE, LLM_MODEL
     return jsonify({"ok": True, "available": AVAILABLE, "model": LLM_MODEL})
 
+# ===== v4 治理 API =====
+@app.route("/api/v4/governance")
+def api_v4_governance():
+    """v4 治理面板数据 — 内核冻结 + 三系统对比 + 审计日志 + 观察模式"""
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+
+    # ── 1. 内核冻结状态 ──
+    freeze_data = {"frozen": True, "modules": [], "total_frozen": 0, "total_managed": 0}
+    try:
+        from kernel_freeze import frozen_summary
+        fs = frozen_summary()
+        freeze_data = {
+            "frozen": True,
+            "modules": fs.get("modules", []),
+            "total_frozen": fs.get("total_frozen", 0),
+            "total_managed": fs.get("total_managed", 0),
+            "last_freeze": fs.get("last_freeze", ""),
+            "freeze_reason": fs.get("freeze_reason", ""),
+        }
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # ── 2. 三系统对比 ──
+    comparison = {
+        "system_a": {"name": "Frozen Baseline", "total_signals": 0, "top3": []},
+        "system_b": {"name": "Adaptive", "total_signals": 0, "top3": []},
+        "system_c": {"name": "Equal Weight", "daily_return": 0, "weekly_return": 0, "nav": 0},
+        "divergences": [],
+        "agreement_rate": 0,
+        "divergence_count": 0,
+    }
+    try:
+        from frozen_baseline import BaselineComparator
+        bc = BaselineComparator()
+        a_signals = bc.get_signals_today() if hasattr(bc, "get_signals_today") else []
+        comparison["system_a"]["total_signals"] = len(a_signals)
+        comparison["system_a"]["top3"] = a_signals[:3]
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        from frozen_baseline import BaselineComparator
+        bc = BaselineComparator()
+        # Adaptive signals from same comparator
+        b_signals = bc.get_adaptive_signals() if hasattr(bc, "get_adaptive_signals") else []
+        comparison["system_b"]["total_signals"] = len(b_signals)
+        comparison["system_b"]["top3"] = b_signals[:3]
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        from equal_weight_basket import EqualWeightBasket
+        eb = EqualWeightBasket()
+        comparison["system_c"]["daily_return"] = eb.get_daily_return() if hasattr(eb, "get_daily_return") else 0
+        comparison["system_c"]["weekly_return"] = eb.get_weekly_return() if hasattr(eb, "get_weekly_return") else 0
+        comparison["system_c"]["nav"] = eb.get_nav() if hasattr(eb, "get_nav") else 0
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # 分歧计算
+    try:
+        a_codes = {s["code"] for s in comparison["system_a"]["top3"]}
+        b_codes = {s["code"] for s in comparison["system_b"]["top3"]}
+        all_codes = a_codes | b_codes
+        if all_codes:
+            agreement = len(a_codes & b_codes)
+            comparison["agreement_rate"] = round(agreement / len(all_codes) * 100, 1)
+            comparison["divergence_count"] = len(a_codes ^ b_codes)
+            for code in a_codes ^ b_codes:
+                a_hit = next((s for s in comparison["system_a"]["top3"] if s["code"] == code), None)
+                b_hit = next((s for s in comparison["system_b"]["top3"] if s["code"] == code), None)
+                comparison["divergences"].append({
+                    "code": code,
+                    "name": (a_hit or b_hit or {}).get("name", code),
+                    "in_system_a": a_hit is not None,
+                    "in_system_b": b_hit is not None,
+                })
+    except Exception:
+        pass
+
+    # ── 3. 审计日志统计 ──
+    audit_stats = {
+        "total": 0, "executed": 0, "blocked": 0, "overridden": 0, "settled": 0,
+        "execution_rate": 0, "override_rate": 0, "pending_settlements": 0,
+    }
+    try:
+        from audit_logger import get_audit_logger
+        al = get_audit_logger()
+        raw = al.get_stats() if hasattr(al, "get_stats") else {}
+        audit_stats.update({
+            "total": raw.get("total", 0),
+            "executed": raw.get("executed", 0),
+            "blocked": raw.get("blocked", 0),
+            "overridden": raw.get("overridden", 0),
+            "settled": raw.get("settled", 0),
+            "pending_settlements": raw.get("pending_settlements", 0),
+        })
+        total_decisions = audit_stats["total"] or 1
+        audit_stats["execution_rate"] = round(audit_stats["executed"] / total_decisions * 100, 1)
+        audit_stats["override_rate"] = round(audit_stats["overridden"] / total_decisions * 100, 1)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # ── 4. 观察模式状态 ──
+    obs_status = {"mode": "NORMAL", "trigger_reason": "", "time_entered": "", "days_remaining": 0, "liquidation_status": ""}
+    try:
+        from observation_mode import get_status
+        obs = get_status() if callable(get_status) else {}
+        if obs:
+            obs_status.update({
+                "mode": obs.get("mode", "NORMAL"),
+                "trigger_reason": obs.get("trigger_reason", ""),
+                "time_entered": obs.get("time_entered", ""),
+                "days_remaining": obs.get("days_remaining", 0),
+                "liquidation_status": obs.get("liquidation_status", ""),
+            })
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return jsonify({
+        "ok": True,
+        "timestamp": now.isoformat(),
+        "date": today,
+        "freeze": freeze_data,
+        "comparison": comparison,
+        "audit": audit_stats,
+        "observation": obs_status,
+    })
+
+
 # ===== 系统健康 API =====
 @app.route("/api/health")
 def api_health():
@@ -2750,4 +2893,9 @@ if __name__ == "__main__":
     log.info("🅳 Serenity Monitor 移动端看板启动 — http://localhost:%s/monitor", DASHBOARD_PORT)
     log.info("📊 Prometheus 指标: http://localhost:%s/metrics", DASHBOARD_PORT)
     log.info("⚡ 快捷: /api/quick /api/quick/pnl /api/quick/alerts")
-    app.run(host="0.0.0.0", port=DASHBOARD_PORT, debug=False, threaded=True)
+    app.run(
+        host=os.environ.get("SERENITY_DASHBOARD_HOST", "127.0.0.1"),
+        port=DASHBOARD_PORT,
+        debug=False,
+        threaded=True,
+    )

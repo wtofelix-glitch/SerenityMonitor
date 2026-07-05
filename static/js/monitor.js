@@ -214,6 +214,7 @@ function switchTab(tabId, force = false) {
   else if (tabId === 'risk') { renderRiskTab(STATE.data); loadNavHistory(); }
   else if (tabId === 'operations') { renderOperationsTab(); loadOperationsData(); }
   else if (tabId === 'live') { renderLiveTab(STATE.data); startLiveRefresh(); }
+  else if (tabId === 'governance') { renderGovernanceTab(); loadGovernanceData(); }
   STATE.renderedTabs.add(tabId);
 }
 
@@ -1742,4 +1743,132 @@ function pushSignalAlerts() {
     }).catch(function(){});
     alerts.forEach(function(a) { showToast(a, 'warning'); });
   }
+}
+
+// ═══════════════════════════════════════════════════════════
+// v4 Governance Tab — 内核冻结 + 三系统对比 + 审计 + 观察模式
+// ═══════════════════════════════════════════════════════════
+function renderGovernanceTab() {
+  var el = $('tab-governance');
+  if (!el) return;
+  el.innerHTML = dashboardSkeleton(6);
+}
+
+function loadGovernanceData() {
+  var el = $('tab-governance');
+  if (!el) return;
+  fetchJSON('/api/v4/governance')
+    .then(function(d) {
+      if (!d || !d.ok) { el.innerHTML = componentError('治理数据暂不可用'); return; }
+      renderGovernanceContent(d);
+    })
+    .catch(function(e) {
+      el.innerHTML = componentError('治理数据加载失败：' + e.message, 'loadGovernanceData');
+    });
+}
+
+function renderGovernanceContent(d) {
+  var el = $('tab-governance');
+  if (!el) return;
+  var f = d.freeze || {};
+  var cmp = d.comparison || {};
+  var aud = d.audit || {};
+  var obs = d.observation || {};
+
+  var html = '';
+
+  // ── 1. 内核冻结状态 ──
+  var modulesHtml = '';
+  var mods = f.modules || [];
+  if (mods.length > 0) {
+    mods.forEach(function(m) {
+      var locked = m.frozen || m.locked || false;
+      modulesHtml += '<tr><td>' + (m.name || m.module || '?') + '</td>'
+        + '<td style="text-align:center;font-size:16px">' + (locked ? '🔒' : '🔓') + '</td>'
+        + '<td class="text-dim" style="font-size:10px">' + (m.version || m.reason || '') + '</td></tr>';
+    });
+  } else {
+    modulesHtml = '<tr><td colspan="3" class="text-dim" style="text-align:center;padding:12px">暂无模块数据</td></tr>';
+  }
+  html += '<div class="card"><div class="card-header"><h3 class="card-title">内核冻结状态</h3>'
+    + '<span class="card-subtitle">' + (f.total_frozen || 0) + '/' + (f.total_managed || 0) + ' 冻结</span></div>'
+    + '<div class="data-table-wrap"><table class="data-table"><thead><tr><th>模块</th><th style="text-align:center;width:40px">状态</th><th>版本/备注</th></tr></thead>'
+    + '<tbody>' + modulesHtml + '</tbody></table></div>';
+  if (f.freeze_reason) {
+    html += '<div style="margin-top:8px;font-size:11px;color:var(--gold)">📋 ' + f.freeze_reason + '</div>';
+  }
+  html += '</div>';
+
+  // ── 2. 三系统对比 ──
+  var divergencesHtml = '';
+  var divs = cmp.divergences || [];
+  if (divs.length > 0) {
+    divs.forEach(function(dv) {
+      divergencesHtml += '<tr><td>' + dv.name + '</td><td style="font-family:var(--font-mono);font-size:10px">' + dv.code + '</td>'
+        + '<td style="text-align:center">' + (dv.in_system_a ? 'A' : '—') + '</td>'
+        + '<td style="text-align:center">' + (dv.in_system_b ? 'B' : '—') + '</td></tr>';
+    });
+  }
+  html += '<div class="card"><div class="card-header"><h3 class="card-title">三系统对比</h3></div>';
+
+  // 三系统 KPI 行
+  html += '<div class="kpi-row" style="margin-bottom:8px">'
+    + '<div class="kpi-item"><div class="kpi-label">System A<br>Frozen Baseline</div><div class="kpi-value">' + (cmp.system_a ? cmp.system_a.total_signals : 0) + '</div><div class="kpi-sub">今日信号</div></div>'
+    + '<div class="kpi-item"><div class="kpi-label">System B<br>Adaptive</div><div class="kpi-value">' + (cmp.system_b ? cmp.system_b.total_signals : 0) + '</div><div class="kpi-sub">今日信号</div></div>'
+    + '<div class="kpi-item"><div class="kpi-label">System C<br>Equal Weight</div><div class="kpi-value ' + clsPct(cmp.system_c ? cmp.system_c.daily_return : 0) + '">' + pctStr(cmp.system_c ? cmp.system_c.daily_return : 0) + '</div><div class="kpi-sub">日收益 | NAV ¥' + fmt(cmp.system_c ? cmp.system_c.nav : 0, 0) + '</div></div>'
+    + '</div>';
+
+  // 协议率
+  html += '<div style="display:flex;gap:12px;margin-bottom:8px;font-size:12px">'
+    + '<span>协议率: <b style="color:var(--gold)">' + (cmp.agreement_rate || 0) + '%</b></span>'
+    + '<span>分歧数: <b style="color:var(--accent-orange)">' + (cmp.divergence_count || 0) + '</b></span>'
+    + '</div>';
+
+  // 分歧表
+  if (divergencesHtml) {
+    html += '<div class="data-table-wrap"><table class="data-table"><thead><tr><th>标的</th><th>代码</th><th style="text-align:center;width:36px">A</th><th style="text-align:center;width:36px">B</th></tr></thead>'
+      + '<tbody>' + divergencesHtml + '</tbody></table></div>';
+  }
+  html += '</div>';
+
+  // ── 3. 决策审计日志 ──
+  html += '<div class="card"><div class="card-header"><h3 class="card-title">决策审计日志</h3></div>'
+    + '<div class="gate-grid">'
+    + '<div><span>总计</span><b>' + (aud.total || 0) + '</b></div>'
+    + '<div><span>已执行</span><b style="color:var(--down)">' + (aud.executed || 0) + '</b></div>'
+    + '<div><span>已拦截</span><b style="color:var(--up)">' + (aud.blocked || 0) + '</b></div>'
+    + '<div><span>已覆写</span><b style="color:var(--accent-orange)">' + (aud.overridden || 0) + '</b></div>'
+    + '<div><span>已结算</span><b>' + (aud.settled || 0) + '</b></div>'
+    + '<div><span>执行率</span><b style="color:var(--gold)">' + (aud.execution_rate || 0) + '%</b></div>'
+    + '<div><span>覆写率</span><b>' + (aud.override_rate || 0) + '%</b></div>'
+    + '<div><span>待结算</span><b style="color:' + ((aud.pending_settlements || 0) > 0 ? 'var(--up)' : 'var(--text-secondary)') + '">' + (aud.pending_settlements || 0) + '</b></div>'
+    + '</div></div>';
+
+  // ── 4. 观察模式状态 ──
+  var mode = obs.mode || 'NORMAL';
+  var modeCls = mode === 'NORMAL' ? 'down' : (mode === 'OBSERVATION' ? 'gold' : 'up');
+  var modeBg = mode === 'NORMAL' ? 'var(--down-bg)' : (mode === 'OBSERVATION' ? 'var(--gold-bg)' : 'var(--up-bg)');
+  html += '<div class="card"><div class="card-header"><h3 class="card-title">观察模式</h3>'
+    + '<span class="card-subtitle ' + modeCls + '" style="font-weight:700;font-size:13px">' + mode + '</span></div>';
+
+  if (mode === 'OBSERVATION') {
+    html += '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6">'
+      + '<div>触发原因: ' + (obs.trigger_reason || '—') + '</div>'
+      + '<div>进入时间: ' + (obs.time_entered || '—') + '</div>'
+      + '<div>剩余天数: <b style="color:var(--gold)">' + (obs.days_remaining || 0) + ' 天</b></div>'
+      + '</div>';
+  } else if (mode === 'EMERGENCY') {
+    html += '<div style="font-size:12px;color:var(--text-secondary);line-height:1.6">'
+      + '<div>触发原因: ' + (obs.trigger_reason || '—') + '</div>'
+      + '<div>平仓状态: <b style="color:var(--up)">' + (obs.liquidation_status || '—') + '</b></div>'
+      + '</div>';
+  } else {
+    html += '<div class="text-dim" style="font-size:12px;padding:8px 0">系统正常运行，无观察/紧急模式触发。</div>';
+  }
+  html += '</div>';
+
+  // 时间戳
+  html += '<div class="text-dim" style="text-align:center;font-size:10px;padding:16px 0">数据时间: ' + (d.timestamp || '—') + ' | 日期: ' + (d.date || '—') + '</div>';
+
+  el.innerHTML = html;
 }

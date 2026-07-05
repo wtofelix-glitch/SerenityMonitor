@@ -2181,6 +2181,9 @@ def main():
         "ablation-report": lambda: cmd_ablation_report(),
         "frozen-compare": lambda: cmd_frozen_compare(),
         "correlation-report": lambda: cmd_correlation_report(),
+        "phase4-checklist": lambda: __import__('phase4_checklist').run_checklist(),
+        "observe-status": lambda: cmd_observe_status(),
+        "weekly-report": lambda: cmd_weekly_report(),
     }
 
     if cmd in commands:
@@ -2331,6 +2334,33 @@ def cmd_correlation_report():
         print(cc.summary_report())
     except ImportError:
         print("correlation_cluster 模块不可用")
+
+def cmd_observe_status():
+    """显示观察模式状态。"""
+    try:
+        from observation_mode import get_observer
+        obs = get_observer()
+        status = obs.get_status()
+        emoji = {"NORMAL": "🟢", "OBSERVATION": "🔶", "EMERGENCY": "🔴"}
+        print(f"  观察模式: {emoji.get(status['mode'], '❓')} {status['mode']}")
+        if status["active"]:
+            print(f"  触发条件: {status['trigger_condition']}")
+            print(f"  触发原因: {status['trigger_reason']}")
+            print(f"  进入时间: {status['entered_at']}")
+            print(f"  已持续: {status['days_active']} 天")
+            print(f"  新开仓: {'禁止' if not obs.is_trading_allowed() else '允许'}")
+            print(f"  减仓: {'允许' if obs.is_sell_allowed() else '禁止'}")
+    except ImportError:
+        print("observation_mode 模块不可用")
+
+def cmd_weekly_report():
+    """生成周度三系统对比报告。"""
+    from weekly_comparison_report import generate_weekly_report, save_report, push_report
+    report = generate_weekly_report()
+    print(report)
+    if "--push" in sys.argv:
+        save_report(report)
+        push_report(report)
 
 
 if __name__ == "__main__":
