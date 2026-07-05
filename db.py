@@ -683,6 +683,69 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shl_source_checked ON source_health_log(source, checked_at)")
 
+    # v4 Phase 2: 决策审计链 (decision_audit_log)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS decision_audit_log (
+            decision_id         TEXT PRIMARY KEY,
+            created_at          TEXT NOT NULL,
+            stock_code          TEXT NOT NULL,
+            -- 策略版本
+            strategy_version    TEXT NOT NULL DEFAULT 'v4-phase1-frozen',
+            config_hash         TEXT NOT NULL DEFAULT '',
+            kernel_frozen       INTEGER DEFAULT 1,
+            -- 数据快照
+            data_snapshot_id    INTEGER,
+            feature_snapshot_hash TEXT DEFAULT '',
+            -- 评分与信号
+            score_components_json TEXT DEFAULT '{}',
+            total_score         REAL DEFAULT 0,
+            signal_type         TEXT DEFAULT '',
+            baseline_signal     TEXT DEFAULT '',
+            adaptive_signal     TEXT DEFAULT '',
+            signal_divergence   TEXT DEFAULT '',
+            -- 市场状态
+            market_regime       TEXT DEFAULT '',
+            theme_exposure      REAL DEFAULT 0,
+            correlation_cluster TEXT DEFAULT '',
+            -- 可成交性
+            t1_locked           INTEGER DEFAULT 0,
+            limit_status        TEXT DEFAULT 'normal',
+            can_execute         INTEGER DEFAULT 1,
+            cannot_execute_reason TEXT DEFAULT '',
+            -- 收益预期
+            expected_return_gross REAL DEFAULT 0,
+            expected_return_net   REAL DEFAULT 0,
+            expected_cost         REAL DEFAULT 0,
+            -- 风控
+            risk_checks_json    TEXT DEFAULT '{}',
+            suggested_position  REAL DEFAULT 0,
+            suggested_position_pct REAL DEFAULT 0,
+            -- 执行
+            execution_status    TEXT DEFAULT 'pending',
+            actual_trade_id     INTEGER,
+            fill_price          REAL DEFAULT 0,
+            slippage            REAL DEFAULT 0,
+            actual_position     REAL DEFAULT 0,
+            -- 人工干预
+            human_override      INTEGER DEFAULT 0,
+            human_override_reason TEXT DEFAULT '',
+            operator_notes      TEXT DEFAULT '',
+            -- 事后结算
+            t1_return_net       REAL,
+            t5_return_net       REAL,
+            t20_return_net      REAL,
+            benchmark_return    REAL,
+            excess_return       REAL,
+            -- 归因
+            post_mortem_label   TEXT DEFAULT '',
+            post_mortem_detail  TEXT DEFAULT '',
+            settled_at          TEXT DEFAULT ''
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_code_date ON decision_audit_log(stock_code, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_signal ON decision_audit_log(signal_type, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_settled ON decision_audit_log(settled_at, execution_status)")
+
     for sql in _index_sqls:
         conn.execute(sql)
     conn.commit()

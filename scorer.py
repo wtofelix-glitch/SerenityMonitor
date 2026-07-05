@@ -46,20 +46,31 @@ except ImportError:
     MARKET_SENSE_AVAILABLE = False
 
 # 动态权重 — 优先加载 weight_adjuster 的调整后权重
+# v4 Phase 1 内核冻结: 权重固定为默认值, 不从 weight_adjuster 加载
+_KERNEL_FROZEN = True  # 由 kernel_freeze.is_frozen("weight_adjuster") 控制
 try:
-    from weight_adjuster import load_adjusted_weights
-    score_weight = load_adjusted_weights()
-except Exception:
+    from kernel_freeze import is_frozen as _kf_is_frozen
+    _KERNEL_FROZEN = _kf_is_frozen("weight_adjuster") or _kf_is_frozen("market_sense_regime_shifts")
+except ImportError:
+    pass
+
+if _KERNEL_FROZEN:
+    # 冻结模式: 使用固定默认权重
     score_weight = {
-        "zone": 0.20,        # 价格位置（v3.0: 动态60日通道）
-        "momentum": 0.17,     # 动量
-        "volume": 0.04,       # 成交量
-        "serenity": 0.17,     # Serenity 框架匹配度
-        "factor": 0.19,       # 因子引擎（三周期融合）
-        "technical": 0.10,    # 技术面 + 情绪
-        "moat": 0.09,         # 护城河因子
-        "capital": 0.03,      # v3.3 资金面（融资/大宗/筹码/分红, 轻量补充）
+        "zone": 0.20, "momentum": 0.18, "volume": 0.04,
+        "serenity": 0.17, "factor": 0.19, "technical": 0.10, "moat": 0.09,
+        "capital": 0.03,
     }
+else:
+    try:
+        from weight_adjuster import load_adjusted_weights
+        score_weight = load_adjusted_weights()
+    except Exception:
+        score_weight = {
+            "zone": 0.20, "momentum": 0.17, "volume": 0.04,
+            "serenity": 0.17, "factor": 0.19, "technical": 0.10, "moat": 0.09,
+            "capital": 0.03,
+        }
 
 # v5.5: 权重统一 — reset从 defaults 读取, fallback和defaults对齐
 _SCORE_WEIGHT_DEFAULTS = {
@@ -248,8 +259,11 @@ try:
         _active_regime = _ms.get_market_regime().get("regime_label", "震荡市")
 except Exception:
     pass
-score_weight = _apply_regime_shifts(score_weight, _active_regime)
-log.info("市场状态: %s → 权重已自适应调整", _active_regime)
+if not _KERNEL_FROZEN:
+    score_weight = _apply_regime_shifts(score_weight, _active_regime)
+    log.info("市场状态: %s → 权重已自适应调整", _active_regime)
+else:
+    log.info("市场状态: %s → [内核冻结] 忽略市场体制权重偏移，使用固定权重", _active_regime)
 
 # ============================================================
 # 🆕 操作模式感知：均值回归 vs 趋势跟踪
@@ -826,6 +840,32 @@ def score_all() -> list[dict]:
             }
         }
         save_score_history(code, scores)
+
+        # ── v4 Phase 2: 决策审计链 ──
+        try:
+            from audit_logger import get_audit_logger as _get_al
+            _al = _get_al()
+            _al.log_signal(
+                code=code,
+                signal_type=signal_action,
+                total_score=round(total, 1),
+                score_components={
+                    "zone": round(zone_score, 1),
+                    "momentum": round(momentum_score, 1),
+                    "volume": round(volume_score, 1),
+                    "serenity": serenity_score,
+                    "factor": round(factor_score, 1),
+                    "technical": round(technical_score, 1),
+                    "moat": moat_score,
+                    "capital": round(capital_score, 1) if 'capital_score' in dir() else 50,
+                },
+                market_regime=_label,
+                baseline_signal="",  # Frozen Baseline 信号（由 Phase 2b 填充）
+                adaptive_signal=signal_action,
+                risk_checks={},
+            )
+        except Exception:
+            pass  # 审计日志写入失败不影响主流程
 
         # P5: 实时回写评分到 stocks 表 (v5.5: errors logged)
         try:

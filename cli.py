@@ -50,6 +50,7 @@ Serenity Monitor CLI
      python3 cli.py auto-gate --explain    # 🆕 自动交易统计闸门
      python3 cli.py strategy-version       # 🆕 当前冻结策略版本
      python3 cli.py compliance-status      # 🆕 合规报告状态
+     python3 cli.py broker-snapshot <json-file> [--dry-run]
      python3 cli.py auto-exec             # 🚀 强制信号执行（含重试）
      python3 cli.py auto-stats            # 📊 信号执行统计
      python3 cli.py auto-premarket        # ⏰ 盘前简报推送
@@ -68,6 +69,7 @@ Serenity Monitor CLI
 """
 import sys
 import importlib
+import json
 import os
 from datetime import date
 
@@ -97,6 +99,7 @@ from factor_interpreter import cmd_factor_interpret
 from candidate_scanner_full import cmd_scan_mainboard
 from trading_log_sync import cmd_sync_log
 from auto_execute import generate_execution_plan, main as cmd_auto_execute
+from debate_engine import cmd_strategy_debate
 import quick_backtest
 from trade_record import cmd_trade_record, cmd_trade_log
 from factor_attribution import generate_factor_report, detect_factor_decay
@@ -225,6 +228,21 @@ def cmd_record_real_data():
         f"expired_unsettled={settle_result['expired_unsettled']} "
         f"non_executable={settle_result['non_executable']}"
     )
+    if settle_result.get("reason_counts"):
+        print(f"settlement blockers={settle_result['reason_counts']}")
+
+
+def cmd_broker_snapshot():
+    """Import a validated immutable broker-account snapshot from JSON."""
+    from operations_center import import_broker_snapshot
+
+    args = [arg for arg in sys.argv[2:] if arg != "--dry-run"]
+    if not args:
+        raise SystemExit("用法: python3 cli.py broker-snapshot <json-file> [--dry-run]")
+    with open(args[0], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    result = import_broker_snapshot(payload, dry_run="--dry-run" in sys.argv)
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
 
 def cmd_auto_gate():
@@ -2142,6 +2160,7 @@ def main():
         "auto-gate": cmd_auto_gate,
         "strategy-version": cmd_strategy_version,
         "compliance-status": cmd_compliance_status,
+        "broker-snapshot": cmd_broker_snapshot,
         "auto": lambda: cmd_auto_guarded(force_execute=False),
         "auto-exec": lambda: cmd_auto_guarded(force_execute=True),
         "auto-stats": lambda: (sys.argv.append('--stats'), cmd_auto_execute())[1],
@@ -2153,6 +2172,15 @@ def main():
         "dash": lambda: cmd_dash_dashboard(),
         "journal": lambda: cmd_journal(),
         "reflect": lambda: cmd_reflect(),
+        "strategy-debate": lambda: cmd_strategy_debate(sys.argv[2:]),
+        # v4 Phase 1-3 新命令
+        "kernel-status": lambda: cmd_kernel_status(),
+        "audit-log": lambda: cmd_audit_log(),
+        "factor-audit": lambda: cmd_factor_audit(),
+        "pool-audit": lambda: cmd_pool_audit(),
+        "ablation-report": lambda: cmd_ablation_report(),
+        "frozen-compare": lambda: cmd_frozen_compare(),
+        "correlation-report": lambda: cmd_correlation_report(),
     }
 
     if cmd in commands:
@@ -2194,6 +2222,115 @@ def main():
     else:
         print(f"未知命令或参数不足: {cmd}")
         print(__doc__)
+
+
+# ═══════════════════════════════════════════════════════════════
+# v4 Phase 1-3 新命令处理函数
+# ═══════════════════════════════════════════════════════════════
+
+def cmd_kernel_status():
+    """显示交易内核冻结状态。"""
+    try:
+        from kernel_freeze import frozen_summary, all_frozen_ids
+        print(frozen_summary())
+    except ImportError:
+        print("kernel_freeze 模块不可用")
+
+def cmd_audit_log():
+    """显示审计日志统计。"""
+    try:
+        from audit_logger import get_audit_logger as _gal
+        al = _gal()
+        stats = al.get_stats()
+        pending = al.get_pending_count()
+        print(f"📋 决策审计日志")
+        print(f"  总记录: {stats['total']}")
+        print(f"  已执行: {stats['executed']}")
+        print(f"  被阻止: {stats['blocked']}")
+        print(f"  人工干预: {stats['overridden']}")
+        print(f"  已结算: {stats['settled']}")
+        print(f"  待结算: {pending}")
+        print(f"  执行率: {stats['execution_rate']:.0%}")
+        print(f"  干预率: {stats['override_rate']:.0%}")
+    except ImportError:
+        print("audit_logger 模块不可用")
+
+def cmd_factor_audit():
+    """运行因子审计（去冗余 + ICIR）。"""
+    print("🔬 运行因子审计...")
+    try:
+        from factor_audit import run_audit_and_print
+        run_audit_and_print()
+    except ImportError:
+        print("factor_audit 模块不可用")
+
+def cmd_pool_audit():
+    """运行股票池后见之明审计。"""
+    print("🔍 股票池后见之明审计...")
+    try:
+        from stock_pool_audit import run_audit
+        run_audit()
+    except ImportError:
+        print("stock_pool_audit 模块不可用")
+
+def cmd_ablation_report():
+    """运行消融实验框架。"""
+    print("🧪 消融实验框架")
+    try:
+        from ablation_framework import (
+            AblationFramework, simple_backtest_for_ablation,
+            format_ablation_report, ABLATION_MODULES, BONFERRONI_ALPHA
+        )
+        print(f"  测试模块: {len(ABLATION_MODULES)} 个")
+        print(f"  Bonferroni α: {BONFERRONI_ALPHA:.5f} (0.05/{len(ABLATION_MODULES)})")
+        print()
+        fw = AblationFramework()
+        report = fw.run_all(simple_backtest_for_ablation)
+        print(format_ablation_report(report))
+    except ImportError as e:
+        print(f"ablation_framework 模块不可用: {e}")
+
+def cmd_frozen_compare():
+    """运行 Frozen Baseline vs Adaptive System 对比。"""
+    print("📊 Frozen Baseline 三系统对比")
+    try:
+        from scorer import score_all
+        from frozen_baseline import get_comparator as _gcmp
+        from equal_weight_basket import get_basket as _gb
+    except ImportError as e:
+        print(f"模块不可用: {e}")
+        return
+
+    print("  运行评分...")
+    adaptive = score_all()
+    comp = _gcmp()
+    eq = _gb()
+    snaps = [{"code": r["code"], "close": r.get("close", 0),
+              "change_pct": r.get("change_pct", 0),
+              "volume": r.get("close", 0) * 10000} for r in adaptive]
+    cmp = comp.compare_signals(snaps, adaptive)
+    eq_ret = eq.get_daily_return(snaps)
+
+    print(f"  系统 A (Frozen): {len(cmp['frozen_signals'])} 条信号")
+    print(f"  系统 B (Adaptive): {len(cmp['adaptive_signals'])} 条信号")
+    print(f"  系统 C (Equal Weight): 日收益 {eq_ret:+.2%}")
+    print(f"  分歧数: {cmp['divergence_count']}/{cmp['agreement_matrix']['total']}")
+    print(f"  一致率: {cmp['agreement_matrix']['agreement_rate']:.0%}")
+    if cmp["divergence_details"]:
+        print("  分歧详情:")
+        for d in cmp["divergence_details"]:
+            print(f"    {d['code']}: Frozen={d['frozen']} Adaptive={d['adaptive']}")
+
+def cmd_correlation_report():
+    """显示相关性簇分析报告。"""
+    print("🔗 相关性簇分析")
+    try:
+        from correlation_cluster import get_cluster as _gcc
+        cc = _gcc()
+        cc.identify_clusters()
+        print(cc.summary_report())
+    except ImportError:
+        print("correlation_cluster 模块不可用")
 
 
 if __name__ == "__main__":

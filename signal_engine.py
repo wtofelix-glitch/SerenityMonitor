@@ -38,19 +38,28 @@ def _should_persist_signal(signal_date: date | None = None) -> bool:
 # 缓存避免每次调用从DB读
 _conviction_thresholds_cache = {"regime": None, "thresholds": {}, "date": None}
 
+# v4 Phase 1 内核冻结: Conviction 动态阈值冻结
+_CONVICTION_FROZEN = True
+try:
+    from kernel_freeze import is_frozen as _kf_is_frozen
+    _CONVICTION_FROZEN = _kf_is_frozen("conviction")
+except ImportError:
+    pass
+
+
 def _fetch_conviction_thresholds() -> dict:
     """从 conviction_log 获取最新的辩论结果，返回动态阈值修正量
-    
-    Returns:
-        dict with regime, buy_adjust (买入门槛偏移), sell_adjust (卖出门槛偏移)
+
+    v4 Phase 1 内核冻结: 始终返回默认值 (buy_adjust=0, sell_adjust=0),
+    不做任何动态调整。
     """
     global _conviction_thresholds_cache
     from datetime import date
     today = date.today().isoformat()
-    
-    # 缓存命中（同一天）
-    if _conviction_thresholds_cache.get("date") == today:
-        return _conviction_thresholds_cache["thresholds"]
+
+    # 冻结模式: 直接返回默认
+    if _CONVICTION_FROZEN:
+        return {"regime": "震荡", "buy_adjust": 0, "sell_adjust": 0}
     
     try:
         from db import get_latest_conviction

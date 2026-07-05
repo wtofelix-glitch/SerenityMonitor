@@ -339,6 +339,58 @@ class RiskManager:
                     pass
         return alerts
 
+    # ── v4 Phase 3: 相关性簇集中度 ─────────────────────────
+
+    def _check_cluster_concentration(self, code: str, holdings: list[dict],
+                                      new_amount: float,
+                                      total_value: float) -> Optional[dict]:
+        """使用 correlation_cluster 检查真实的主题集中度。
+
+        替代传统行业分类（SECTOR_MAP），用实际收益相关矩阵衡量
+        标的之间的真实关联度。v4 §11.3 的 5 条风控规则。
+        """
+        try:
+            from correlation_cluster import get_cluster as _get_cc
+            cc = _get_cc()
+
+            # 构建当前持仓的 {code: market_value}
+            positions = {}
+            for h in holdings:
+                c = h.get("code", "")
+                mv = h.get("market_value", 0)
+                if c and mv > 0:
+                    positions[c] = mv
+            # 加上拟买入的金额
+            positions[code] = positions.get(code, 0) + new_amount
+
+            # 主题暴露检查
+            result = cc.check_cluster_concentration(positions, total_value)
+            max_exp = result["max_exposure"]
+            alerts = result["alerts"]
+
+            if alerts:
+                reasons = [a["message"] for a in alerts]
+                return {
+                    "triggered": True,
+                    "reason": " | ".join(reasons),
+                    "max_exposure": max_exp,
+                    "clusters": result["clusters_detail"],
+                }
+
+            # 无告警但暴露 > 40% → 软告警
+            if max_exp > 0.40:
+                return {
+                    "triggered": False,
+                    "reason": f"主题暴露 {max_exp:.0%} > 40%, 接近上限, 注意风险",
+                    "max_exposure": max_exp,
+                }
+
+        except Exception as e:
+            # correlation_cluster 不可用时静默回退
+            pass
+
+        return None
+
     def check_position_limits(self, holdings: list[dict], new_amount: float,
                               total_value: float) -> list[dict]:
         """
@@ -449,6 +501,16 @@ class RiskManager:
                 sector_check = self.check_sector_concentration(code, holdings)
                 if sector_check:
                     reasons.append(sector_check["reason"])
+
+            # v4 Phase 3: 主题/相关性簇集中度 (correlation_cluster)
+            if holdings and current_total_value > 0:
+                try:
+                    cluster_check = self._check_cluster_concentration(
+                        code, holdings, new_amount, current_total_value)
+                    if cluster_check:
+                        reasons.append(cluster_check["reason"])
+                except Exception:
+                    pass  # correlation_cluster 不可用时优雅降级
 
             # 仓位限制
             if holdings is not None and current_total_value > 0:

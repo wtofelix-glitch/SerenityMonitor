@@ -367,7 +367,19 @@ class SentinelEngine:
     # ── 融合引擎 ────────────────────────────────────────
 
     def compute_sentinel_bonus(self, code: str) -> dict:
-        """计算所有活跃信源对某标的的评分加成"""
+        """计算所有活跃信源对某标的的评分加成
+
+        v4 Phase 1 内核冻结: 始终返回 bonus=0, 信源数据仅记录不参与评分。
+        """
+        # v4 内核冻结检查
+        try:
+            from kernel_freeze import is_frozen as _kf_is_frozen
+            if _kf_is_frozen("sentinel_weights"):
+                return {"bonus": 0.0, "signals": [], "source_count": 0,
+                        "frozen": True, "resonance": 0.0}
+        except ImportError:
+            pass
+
         sources = self.get_active_sources()
         bonus = 0.0
         signals = []

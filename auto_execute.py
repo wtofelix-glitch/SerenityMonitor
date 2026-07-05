@@ -35,6 +35,14 @@ log = get_logger(__name__)
 from risk_manager import get_risk_manager
 risk = get_risk_manager()
 
+# v4 Phase 1: A 股微观结构约束检查
+try:
+    from market_microstructure import get_microstructure, MarketMicrostructure
+    from execution_simulator import get_simulator, ExecutionSimulator, build_liquidity_state
+    _MICROSTRUCTURE_AVAILABLE = True
+except ImportError:
+    _MICROSTRUCTURE_AVAILABLE = False
+
 # ── 熔断保护 ──
 CIRCUIT_BREAKER_DD = abs(RISK_CONFIG.get("max_portfolio_drawdown", -0.12))  # 与RISK_CONFIG对齐
 INITIAL_CAPITAL = 50000.0
@@ -324,6 +332,16 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             pass
 
         if should_sell:
+            # v4 Phase 1: 微观结构约束 — 卖单可执行性
+            if _MICROSTRUCTURE_AVAILABLE:
+                try:
+                    ms = get_microstructure()
+                    can_sell = ms.can_sell(code)
+                    if not can_sell.get("executable", True):
+                        log.info("微观结构阻止卖出 %s: %s", code, can_sell.get("reason", "unknown"))
+                        continue
+                except Exception as _me:
+                    log.debug("微观结构检查跳过(卖出 %s): %s", code, _me)
             amt = h.get("trade_amount", 0) or 0
             buy_price = h.get("buy_price", 1)
             shares = int(amt / buy_price / 100) * 100 if buy_price > 0 else 0
@@ -595,6 +613,22 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             log.info("风控拦截买入 %s: %s", code_check, "; ".join(risk_check["reasons"]))
             continue
 
+        # v4 Phase 1: 微观结构约束 — 买单可执行性 + T+1 锁仓
+        if _MICROSTRUCTURE_AVAILABLE:
+            try:
+                ms = get_microstructure()
+                # T+1 锁仓聚合检查：累计不得超过 40%
+                t1 = ms.check_t1_lock_aggregate(code_check)
+                if t1.get("locked_pct", 0) > 0.40:
+                    log.info("T+1 锁仓阻止买入 %s: 累计%.0f%%", code_check, t1.get("locked_pct", 0) * 100)
+                    continue
+                can_result = ms.can_buy(code_check, candidate["price"])
+                if not can_result.get("executable", True):
+                    log.info("微观结构阻止买入 %s: %s", code_check, can_result.get("reason", "unknown"))
+                    continue
+            except Exception as _me:
+                log.debug("微观结构/锁仓检查跳过(买入 %s): %s", code_check, _me)
+
         price = candidate["price"]
         if price <= 0:
             continue
@@ -710,6 +744,50 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         "swaps": swap_candidates,
         "summary": "\n".join(summary_lines),
     }
+
+
+def _check_tradability_for_plan(plan: dict) -> dict:
+    """遍历调仓计划中的买卖指令，执行微观结构可交易性检查。
+
+    返回过滤后的计划，不可执行的指令标记 blocked=True 和 block_reason。
+    v4 Phase 1: 与 market_microstructure 模块集成。
+    """
+    if not _MICROSTRUCTURE_AVAILABLE:
+        return plan
+
+    try:
+        ms = get_microstructure()
+    except Exception as e:
+        log.warning("无法初始化 MarketMicrostructure: %s", e)
+        return plan
+
+    # 检查卖单
+    for s in plan.get("sells", []):
+        if s.get("blocked"):
+            continue
+        try:
+            result = ms.can_sell(s["code"])
+            if not result.get("executable", True):
+                s["blocked"] = True
+                s["block_reason"] = result.get("reason", "microstructure check failed")
+                log.info("tradability blocked SELL %s: %s", s["code"], s["block_reason"])
+        except Exception as e:
+            log.debug("can_sell 检查异常 %s: %s", s["code"], e)
+
+    # 检查买单
+    for b in plan.get("buys", []):
+        if b.get("blocked"):
+            continue
+        try:
+            result = ms.can_buy(b["code"], b.get("price", 0))
+            if not result.get("executable", True):
+                b["blocked"] = True
+                b["block_reason"] = result.get("reason", "microstructure check failed")
+                log.info("tradability blocked BUY %s: %s", b["code"], b["block_reason"])
+        except Exception as e:
+            log.debug("can_buy 检查异常 %s: %s", b["code"], e)
+
+    return plan
 
 
 # ── 强制信号执行 ──────────────────────────────────────
@@ -898,6 +976,13 @@ def cmd_force_execute():
     plan = generate_execution_plan(dry_run=dry_run)
     print(plan["summary"])
     print()
+
+    # v4 Phase 1: 微观结构可交易性过滤
+    if _MICROSTRUCTURE_AVAILABLE:
+        try:
+            plan = _check_tradability_for_plan(plan)
+        except Exception as _me:
+            log.debug("tradability check failed, using unfiltered plan: %s", _me)
 
     # 2. 记录待执行订单
     _record_execution_orders(plan)

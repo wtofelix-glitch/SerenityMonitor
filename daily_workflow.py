@@ -224,6 +224,35 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 评分失败: {e}")
 
+    # ── 1b. Frozen Baseline 对比 (v4 Phase 2) ──────────────
+    step('1b Frozen Baseline 三系统对比')
+    _frozen_cmp = None
+    try:
+        from frozen_baseline import get_comparator as _get_cmp
+        from equal_weight_basket import get_basket as _get_basket
+        _cmp = _get_cmp()
+        _eq = _get_basket()
+
+        # 构建 snapshot 格式
+        _snaps = [{
+            "code": r["code"], "close": r.get("close", 0),
+            "change_pct": r.get("change_pct", 0),
+            "volume": r.get("close", 0) * 10000,  # 粗略估算
+        } for r in _scorer_results] if _scorer_results else []
+
+        if _snaps:
+            _frozen_cmp = _cmp.compare_signals(_snaps, _scorer_results or [])
+            _eq_ret = _eq.get_daily_return(_snaps)
+            _div = _frozen_cmp["divergence_count"]
+            _agree = _frozen_cmp["agreement_matrix"]["agreement_rate"]
+            print(f"  ✅ Frozen vs Adaptive: {_div} 分歧, 一致率 {_agree:.0%}")
+            print(f"  ✅ Equal Weight 日收益: {_eq_ret:+.2%}")
+            if _div > 0:
+                for d in _frozen_cmp["divergence_details"]:
+                    print(f"     ⚠️ {d['code']}: Frozen={d['frozen']} Adaptive={d['adaptive']}")
+    except Exception as e:
+        print(f"  ⚠️ Frozen Baseline 对比失败: {e}")
+
     # ── 2. 信号 ──────────────────────────────────────
     step('2/8 交易信号')
     try:
