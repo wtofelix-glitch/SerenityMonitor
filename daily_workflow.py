@@ -582,54 +582,15 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 信号绩效统计失败: {e}")
 
-    # ── 推送（含净值 + 行业简报 + 绩效摘要）─────────────────
+    # ── 推送 ─────────────────────────────────────
+    # v4: 推送已统一至 push_controller.py (15:30 调度触发)。
+    # daily_workflow.py --push 仅保留兼容旧脚本，去除审计噪声和重复推送。
     if do_push:
         try:
-            if send_real_data_audit_push(real_data_gate_result, today=today):
-                print("\n📡 真实数据审计已推送")
+            from push_controller import push_daily_brief
+            push_daily_brief()
         except Exception as e:
-            print(f"\n⚠️ 真实数据审计推送失败: {e}")
-
-        push_lines = []
-        # 净值概览
-        if nav_summary_lines:
-            push_lines.append("```")
-            push_lines.extend(nav_summary_lines)
-            push_lines.append("```")
-            push_lines.append("")
-        # 调仓计划
-        if plan.get('sells') or plan.get('buys') or plan.get('swaps'):
-            push_lines.append(plan['summary'])
-            push_lines.append("")
-        # 行业简报
-        if sector_brief:
-            push_lines.append(sector_brief)
-            push_lines.append("")
-        # 绩效简报
-        if perf_summary_lines:
-            push_lines.append("\n".join(perf_summary_lines))
-            push_lines.append("")
-
-        if push_lines:
-            push_msg = "\n".join(push_lines)
-            try:
-                from notifier import send_message
-                send_message(
-                    f"📊 Serenity 每日简报 {today}",
-                    push_msg,
-                    content_type="markdown",
-                )
-                print("\n📡 推送成功")
-            except Exception as e:
-                print(f"\n⚠️ 推送失败: {e}")
-
-    # ── Telegram 推送执行计划 ────────────────────────
-    try:
-        from signal_push import push_execution_plan
-        push_execution_plan(plan)
-        print("\n📡 Telegram 已推送")
-    except Exception as e:
-        print(f"\n⚠️ Telegram 推送失败: {e}")
+            print(f"\n⚠️ 推送失败: {e}")
 
     # ── 完整模式：回测快照 + IC ──────────────────────
     if do_full:
