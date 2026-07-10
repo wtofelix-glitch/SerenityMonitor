@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0a0a">
+  <title>Serenity</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v=1.0">
+</head>
+<body>
+  <header class="top-bar">
+    <span class="brand">Serenity</span>
+    <span class="meta">
+      <span id="data-age" class="age-dot fresh"></span>
+      <span id="update-time">--</span>
+    </span>
+  </header>
+
+  <div id="alert-banner" class="alert-banner" hidden></div>
+
+  <main id="tab-content"></main>
+
+  <nav class="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="overview">总览</button>
+    <button class="tab-btn" data-tab="detail">详情</button>
+    <button class="tab-btn" data-tab="oos">OOS</button>
+  </nav>
+
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=1.0"></script>
+</body>
+</html>

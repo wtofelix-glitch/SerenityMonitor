@@ -1050,10 +1050,16 @@ def _get_portfolio_summary():
 
 
 @app.route("/monitor")
-@app.route("/")
-def index():
-    """Serenity 移动端看板"""
+def monitor():
+    """Serenity 旧版看板"""
     return render_template("monitor.html")
+
+
+@app.route("/dashboard")
+@app.route("/")
+def dashboard():
+    """Serenity 精简看板 (v6.0)"""
+    return render_template("dashboard.html")
 
 
 @app.route("/api/quick-snapshot")
@@ -1092,13 +1098,18 @@ _DASHBOARD_FALLBACK = {"schema_version": "1.0", "generated_at": "",
 
 @app.route("/api/dashboard")
 def api_dashboard_compact():
-    now_iso = datetime.now().isoformat()
+    now_iso = datetime.now().astimezone().isoformat()
+
+    _module_status = {}
 
     def _safe(key: str, fn):
         try:
-            return fn()
+            result = fn()
+            _module_status[key] = "fresh" if result is not None else "unavailable"
+            return result
         except Exception as e:
             log.warning("Dashboard %s failed: %s", key, e)
+            _module_status[key] = "unavailable"
             return None
 
     # ── 元数据 ──
@@ -1159,7 +1170,8 @@ def api_dashboard_compact():
         "schema_version": "1.0",
         "generated_at": now_iso,
         "market_status": _market_status,
-        "data_status": _data_status,
+        "data_status": "fresh" if all(v == "fresh" for v in _module_status.values()) else "partial",
+        "module_status": _module_status,
         "portfolio": {
             "nav": round(portfolio["total_value"], 2) if portfolio else None,
             "cash": round(portfolio["cash"], 2) if portfolio else None,
