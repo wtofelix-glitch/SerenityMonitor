@@ -291,27 +291,58 @@ def compute_equal_weight_nav(
     else:
         nav_before = initial_capital
 
+    slippage_rate = cost_model["slippage_bps"] / 10000.0
+    skipped: list[str] = []
+
     if is_start:
         # ── 起始日: 等权分配 ──
+        # 小资金约束：部分标的可能买不起 1 手。买不起的标的其配资留在现金，
+        # 重新分配给买得起的标的，保持可投资范围内的等权。
         active_codes = [c for c in all_codes if c not in suspended]
         if not active_codes:
             conn.close()
             return {"nav": initial_capital, "shares": {}, "cash": initial_capital,
                     "daily_return": 0.0}
 
-        per_stock = initial_capital / len(active_codes)
+        target_per = initial_capital / len(active_codes)
+
+        # 分拣：买得起 vs 买不起
+        buyable = []
+        unallocated = 0.0
         for code in active_codes:
-            px = prices[code]
-            raw_shares = int(per_stock / px / 100) * 100
-            if raw_shares >= 100:
-                shares[code] = raw_shares
-                cash -= raw_shares * px * (1 + cost_model["commission_rate"])
-                # Apply min commission
-                commission = max(cost_model["min_commission"],
-                               raw_shares * px * cost_model["commission_rate"])
-                cash -= commission
+            px = prices.get(code, 0)
+            if px <= 0:
+                unallocated += target_per
+                continue
+            min_lot = px * 100
+            if target_per >= min_lot:
+                buyable.append(code)
             else:
-                cash += per_stock  # can't buy even 1 lot, keep as cash
+                unallocated += target_per
+
+        # 再分配：未投出资金均分给买得起的标的
+        if buyable:
+            extra = unallocated / len(buyable)
+        else:
+            extra = 0.0
+        adjusted = target_per + extra
+
+        for code in buyable:
+            px = prices[code]
+            raw_shares = int(adjusted / px / 100) * 100
+            if raw_shares >= 100:
+                cost = raw_shares * px
+                commission = max(cost_model["min_commission"],
+                               cost * cost_model["commission_rate"])
+                slippage = cost * slippage_rate
+                total_deduct = cost + commission + slippage
+                if total_deduct <= cash:
+                    shares[code] = raw_shares
+                    cash -= total_deduct
+                # else: can't afford → keep in cash, not inflated
+
+        # 记录被跳过的标的（买不起的 + 资金不足跳过的）
+        skipped = [c for c in active_codes if c not in shares]
 
     elif is_first_trading_of_month:
         # ── 月频再平衡 ──
@@ -389,6 +420,9 @@ def compute_equal_weight_nav(
         "daily_return": round(daily_return, 6),
         "rebalanced_today": is_first_trading_of_month,
         "suspended_codes": list(suspended),
+        "n_stocks_invested": len(shares),
+        "n_stocks_total": len(all_codes),
+        "skipped_from_start": list(skipped) if is_start else [],
     }
 
 
@@ -572,9 +606,11 @@ class FreezeExperiment:
             if prev_row:
                 prev_detail = json.loads(prev_row["details_json"])
                 prev_ew_state = prev_detail.get("equal_weight_state")
+                prev_strat_nav = prev_row["strategy_nav"]
                 prev_ew_nav = prev_row["equal_weight_nav"]
                 prev_hs300_nav = prev_row["hs300_nav"] or initial_capital
             else:
+                prev_strat_nav = initial_capital
                 prev_ew_nav = initial_capital
                 prev_hs300_nav = initial_capital
 
@@ -600,7 +636,7 @@ class FreezeExperiment:
             ew_nav = ew_result["nav"]
             hs300_nav = hs300["nav"]
 
-            strat_ret = (strat_nav / prev_ew_nav - 1.0) if prev_ew_nav > 0 else 0.0
+            strat_ret = (strat_nav / prev_strat_nav - 1.0) if prev_strat_nav > 0 else 0.0
             ew_ret = ew_result["daily_return"]
 
             # 最大回撤
