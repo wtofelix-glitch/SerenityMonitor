@@ -1076,6 +1076,204 @@ def api_quick_snapshot():
         return jsonify({"ok": False, "error": str(e)})
 
 
+# ═══════════════════════════════════════════════════════════════
+# v6.0 精简看板接口 — /api/dashboard
+# ═══════════════════════════════════════════════════════════════
+# 与 /api/monitor-data (41KB, 23 个分组) 并行运行。
+# 本接口只返回总览/详情/OOS 三层所需的核心数据。
+# 每个模块独立容错，一个失败不影响其他模块。
+# ═══════════════════════════════════════════════════════════════
+
+_DASHBOARD_FALLBACK = {"schema_version": "1.0", "generated_at": "",
+                       "data_status": "unavailable", "market_status": "unknown",
+                       "portfolio": None, "positions": [], "signals": None,
+                       "risk": None, "oos": None, "scoring": None, "factors": None}
+
+
+@app.route("/api/dashboard")
+def api_dashboard_compact():
+    now_iso = datetime.now().isoformat()
+
+    def _safe(key: str, fn):
+        try:
+            return fn()
+        except Exception as e:
+            log.warning("Dashboard %s failed: %s", key, e)
+            return None
+
+    # ── 元数据 ──
+    try:
+        from check_trading_day import is_trading_day
+        _td = is_trading_day()
+        _hr = datetime.now().hour
+        _market_status = "trading" if (_td and 9 <= _hr <= 15) else "closed"
+    except Exception:
+        _market_status = "unknown"
+
+    _data_status = "fresh"
+
+    # ── 净值 + 持仓 ──
+    portfolio = _safe("portfolio", _get_portfolio_summary)
+
+    positions = []
+    if portfolio and portfolio.get("position_details"):
+        for pd in portfolio["position_details"]:
+            positions.append({
+                "code": pd.get("code", ""),
+                "name": pd.get("name", ""),
+                "shares": pd.get("shares", 0),
+                "price": pd.get("current_price", 0),
+                "value": pd.get("current_value", 0),
+                "profit_pct": pd.get("profit_pct", 0),
+                "weight": pd.get("weight", 0),
+            })
+
+    # ── 评分 (top5 + 持仓标的) ──
+    scoring = _safe("scoring", lambda: {
+        "top5": [
+            {"code": s["code"], "name": s["name"], "score": s["total_score"],
+             "signal": s.get("signal_action", "")}
+            for s in _load_db_scores()[:5]
+        ],
+        "holdings": [
+            {"code": s["code"], "name": s["name"], "score": s["total_score"],
+             "signal": s.get("signal_action", "")}
+            for s in _load_db_scores()
+            if any(p["code"] == s["code"] for p in positions)
+        ],
+    })
+
+    # ── 信号摘要 ──
+    signals = _safe("signals", lambda: _build_signal_summary(_load_db_scores()))
+
+    # ── 风险 ──
+    risk = _safe("risk", lambda: _build_risk_status())
+
+    # ── OOS 进度 ──
+    oos = _safe("oos", lambda: _build_oos_status())
+
+    # ── 因子 IC (top3 + worst2) ──
+    factors = _safe("factors", lambda: _build_factor_summary())
+
+    return jsonify({
+        "schema_version": "1.0",
+        "generated_at": now_iso,
+        "market_status": _market_status,
+        "data_status": _data_status,
+        "portfolio": {
+            "nav": round(portfolio["total_value"], 2) if portfolio else None,
+            "cash": round(portfolio["cash"], 2) if portfolio else None,
+            "holdings_value": round(portfolio["holdings_value"], 2) if portfolio else None,
+            "profit_pct": round(portfolio["total_profit_pct"], 2) if portfolio else None,
+        } if portfolio else None,
+        "positions": positions,
+        "scoring": scoring,
+        "signals": signals,
+        "risk": risk,
+        "oos": oos,
+        "factors": factors,
+    })
+
+
+def _build_signal_summary(scores: list[dict]) -> dict:
+    """从评分列表提取信号分布，不重复计算。"""
+    if not scores:
+        return None
+    counts = {"STRONG_BUY": 0, "BUY": 0, "CAUTION_BUY": 0, "HOLD": 0,
+              "WATCH": 0, "SELL": 0}
+    for s in scores:
+        sig = s.get("signal_action", "?")
+        counts[sig] = counts.get(sig, 0) + 1
+    return {
+        "buy": counts["STRONG_BUY"] + counts["BUY"],
+        "caution_buy": counts["CAUTION_BUY"],
+        "hold": counts["HOLD"],
+        "sell": counts["SELL"],
+        "watch": counts["WATCH"],
+        "top_buy": [s["code"] for s in scores
+                    if s.get("signal_action") in ("STRONG_BUY", "BUY")][:3],
+    }
+
+
+def _build_risk_status() -> dict:
+    """风控状态 — 不静默失败。"""
+    result = {"observation_mode": "unknown", "kill_switch": None,
+              "max_drawdown": None, "daily_loss_locked": None}
+    try:
+        from observation_mode import get_observer
+        obs = get_observer()
+        result["observation_mode"] = obs.get_status().get("mode", "unknown")
+    except Exception:
+        pass
+    try:
+        from kill_switch import get_kill_switch
+        ks = get_kill_switch()
+        ks_status = ks.get_status()
+        result["kill_switch"] = ks_status["triggered"]
+        result["kill_switch_type"] = ks_status["trigger_type"] or None
+        result["daily_loss_locked"] = ks_status["daily_loss_locked"]
+    except Exception:
+        pass
+    try:
+        from portfolio import get_portfolio
+        pm = get_portfolio()
+        pv = pm.get_portfolio_value()
+        result["max_drawdown"] = round(
+            (pv["total_value"] / pm.initial_capital - 1.0) * 100, 1
+        ) if pv["total_value"] > 0 else None
+    except Exception:
+        pass
+    return result
+
+
+def _build_oos_status() -> dict:
+    """OOS 实验进度 — 只显示进度，不显示排名。"""
+    try:
+        conn = get_conn()
+        exp = conn.execute(
+            "SELECT id, started_at, status FROM oos_experiments "
+            "WHERE status='active' ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        if not exp:
+            conn.close()
+            return None
+        day_count = conn.execute(
+            "SELECT COUNT(*) FROM oos_nav_curves WHERE experiment_id=?",
+            (exp["id"],)
+        ).fetchone()[0]
+        conn.close()
+        return {
+            "experiment_id": exp["id"],
+            "started_at": exp["started_at"],
+            "trading_days": day_count,
+            "min_required": 120,
+            "progress_pct": round(day_count / 120 * 100, 1),
+        }
+    except Exception:
+        return None
+
+
+def _build_factor_summary() -> dict:
+    """因子 ICIR 摘要 — top3 + worst2。"""
+    try:
+        from factor_ic import compute_rank_ic
+        result = compute_rank_ic(days=30)
+        if not result:
+            return None
+        rankings = result.get("rankings", {})
+        best = rankings.get("best", [])
+        worst = rankings.get("worst", [])
+        if not best and not worst:
+            return None
+        return {
+            "metric": rankings.get("metric", "icir"),
+            "top3": [{"dim": d[0], "value": round(d[1], 3)} for d in best[:3]],
+            "worst2": [{"dim": d[0], "value": round(d[1], 3)} for d in worst[-2:]],
+        }
+    except Exception:
+        return None
+
+
 @app.route("/api/monitor-data")
 def api_monitor_data():
     API_CALLS.labels(source="dashboard_api").inc()
