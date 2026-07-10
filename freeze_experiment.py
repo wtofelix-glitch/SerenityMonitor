@@ -200,271 +200,107 @@ def capture_config_snapshot() -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 三条净值曲线计算
+# 三条归一化收益率曲线 — 全部从 1.0 启动
 # ═══════════════════════════════════════════════════════════════
+#
+# 设计原则 (方案二 — 归一化到相同起点)：
+#   三条曲线从同一天、同一数值 1.0 出发，之后只记录乘积累积收益率。
+#   等权基准使用理论分数股，不受 A 股 100 股整手限制 — 基准是参照物，
+#   不是可交易方案。与沪深 300 线的哲学一致（指数不可直接交易，但仍然
+#   是最诚实的外部参照）。
+#
+#   月频再平衡成本：用分数股后，再平衡时只需调整权重，无实际交易摩擦。
+#   这一点与策略线的实时交易成本（佣金+印花税+滑点）不对称，已明确标注
+#   在判定标准中 — 等权基准的理论摩擦 ≈ 0，策略线要跑赢的是一个几乎
+#   零成本的被动配置。这是更强的对手，也是更干净的对照。
 
-def compute_equal_weight_nav(
-    experiment_start: str,
-    current_date: str,
-    initial_capital: float,
-    all_codes: list[str],
-    cost_model: dict,
-    prev_state: Optional[dict] = None,
-) -> dict:
-    """计算月频等权基准组合的当日成本后净值。
 
-    规则：
-    - 每月首个交易日再平衡回等权
-    - 再平衡交易全额扣佣金+印花税+滑点(15bp)
-    - 停牌票跳过再平衡，保留停牌前权重，剩余现金在可交易票中分配
+def compute_equal_weight_daily_return(all_codes: list[str],
+                                       current_date: str) -> dict:
+    """计算当日 20 只标的的等权平均日收益率。
+
+    纯理论：所有标的不论价格高低、能否买得起 1 手，权重相等。
+    停牌票按 0% 收益计入（权重保留，不对剩余票做补偿调整）。
 
     Returns:
-        {nav, shares, cash, rebalanced_today, suspended_codes, daily_return}
+        {daily_return, n_stocks, suspended_codes}
     """
     from db import get_conn
 
     conn = get_conn()
-
-    # 如果是起始日或月初首个交易日 → 再平衡
-    start_dt = date.fromisoformat(experiment_start)
-    cur_dt = date.fromisoformat(current_date)
-
-    is_start = (current_date == experiment_start)
-    is_first_trading_of_month = (
-        not is_start
-        and start_dt.month != cur_dt.month
-    )
-    # More precise: check if this is the first trading day of the month in our data
-    if not is_start and not is_first_trading_of_month:
-        # Check if earlier dates this month exist in our nav records
-        nav_check = conn.execute(
-            "SELECT COUNT(*) FROM oos_nav_curves WHERE date < ? AND date >= ?",
-            (current_date, cur_dt.replace(day=1).isoformat())
-        ).fetchone()
-        if nav_check and nav_check[0] == 0:
-            is_first_trading_of_month = True
-
-    n_stocks = len(all_codes)
-
-    # ── 获取当日收盘价 ──
-    placeholders = ",".join("?" * n_stocks)
-    prices = {}
-    changed_pcts = {}
-    suspended = set()
+    placeholders = ",".join("?" * len(all_codes))
     try:
         rows = conn.execute(
-            f"SELECT code, close, change_pct FROM daily_snapshots "
+            f"SELECT code, change_pct FROM daily_snapshots "
             f"WHERE code IN ({placeholders}) AND date = ?",
             (*all_codes, current_date)
         ).fetchall()
-
-        for r in rows:
-            code = r["code"]
-            close = r["close"] or 0
-            if close <= 0:
-                suspended.add(code)
-                continue
-            prices[code] = close
-            changed_pcts[code] = r["change_pct"] or 0
-    except Exception:
-        pass
-
-    if not prices:
+    finally:
         conn.close()
-        return {"nav": initial_capital, "shares": {}, "cash": initial_capital,
-                "daily_return": 0.0, "error": "no_price_data"}
 
-    # ── 初始化或加载前日状态 ──
-    shares = {}
-    cash = initial_capital
+    if not rows:
+        return {"daily_return": 0.0, "n_stocks": 0, "suspended_codes": []}
 
-    if prev_state and prev_state.get("shares"):
-        shares = dict(prev_state["shares"])
-        cash = prev_state.get("cash", 0)
-
-        # Mark-to-market: update NAV from price changes
-        total_value = cash
-        for code in all_codes:
-            if code in shares and code in prices:
-                total_value += shares[code] * prices[code]
-        nav_before = total_value
-    else:
-        nav_before = initial_capital
-
-    slippage_rate = cost_model["slippage_bps"] / 10000.0
-    skipped: list[str] = []
-
-    if is_start:
-        # ── 起始日: 等权分配 ──
-        # 小资金约束：部分标的可能买不起 1 手。买不起的标的其配资留在现金，
-        # 重新分配给买得起的标的，保持可投资范围内的等权。
-        active_codes = [c for c in all_codes if c not in suspended]
-        if not active_codes:
-            conn.close()
-            return {"nav": initial_capital, "shares": {}, "cash": initial_capital,
-                    "daily_return": 0.0}
-
-        target_per = initial_capital / len(active_codes)
-
-        # 分拣：买得起 vs 买不起
-        buyable = []
-        unallocated = 0.0
-        for code in active_codes:
-            px = prices.get(code, 0)
-            if px <= 0:
-                unallocated += target_per
-                continue
-            min_lot = px * 100
-            if target_per >= min_lot:
-                buyable.append(code)
-            else:
-                unallocated += target_per
-
-        # 再分配：未投出资金均分给买得起的标的
-        if buyable:
-            extra = unallocated / len(buyable)
+    returns = []
+    suspended = []
+    for r in rows:
+        chg = r["change_pct"]
+        if chg is None:
+            suspended.append(r["code"])
+            returns.append(0.0)
         else:
-            extra = 0.0
-        adjusted = target_per + extra
+            returns.append(chg / 100.0)
 
-        for code in buyable:
-            px = prices[code]
-            raw_shares = int(adjusted / px / 100) * 100
-            if raw_shares >= 100:
-                cost = raw_shares * px
-                commission = max(cost_model["min_commission"],
-                               cost * cost_model["commission_rate"])
-                slippage = cost * slippage_rate
-                total_deduct = cost + commission + slippage
-                if total_deduct <= cash:
-                    shares[code] = raw_shares
-                    cash -= total_deduct
-                # else: can't afford → keep in cash, not inflated
-
-        # 记录被跳过的标的（买不起的 + 资金不足跳过的）
-        skipped = [c for c in active_codes if c not in shares]
-
-    elif is_first_trading_of_month:
-        # ── 月频再平衡 ──
-        # 1. 计算当前总 NAV
-        current_value = 0.0
-        for code in all_codes:
-            if code in shares and code in prices:
-                current_value += shares[code] * prices[code]
-        total_nav = cash + current_value
-
-        # 2. 目标: 等权（停牌票保持现有权重，其余等权）
-        active_codes = [c for c in all_codes if c not in suspended]
-        suspended_codes = [c for c in all_codes if c in suspended]
-
-        # 停牌票的当前价值
-        suspended_value = sum(
-            shares.get(c, 0) * prices.get(c, 0)
-            for c in suspended_codes
-        )
-
-        target_nav_per_active = (total_nav - suspended_value) / len(active_codes) if active_codes else 0
-
-        # 3. 模拟买卖
-        slippage_rate = cost_model["slippage_bps"] / 10000.0
-        for code in active_codes:
-            px = prices[code]
-            current_val = shares.get(code, 0) * px
-            delta_val = target_nav_per_active - current_val
-
-            if abs(delta_val) < px * 100:  # < 1 lot → skip
-                continue
-
-            delta_shares = int(abs(delta_val) / px / 100) * 100
-            if delta_shares < 100:
-                continue
-
-            if delta_val > 0:
-                # 买入
-                buy_cost = delta_shares * px
-                commission = max(cost_model["min_commission"],
-                               buy_cost * cost_model["commission_rate"])
-                slippage = buy_cost * slippage_rate
-                total_cost = buy_cost + commission + slippage
-                if total_cost <= cash:
-                    shares[code] = shares.get(code, 0) + delta_shares
-                    cash -= total_cost
-            else:
-                # 卖出
-                current_shares = shares.get(code, 0)
-                sell_shares = min(delta_shares, current_shares)
-                if sell_shares < 100:
-                    continue
-                sell_value = sell_shares * px
-                commission = max(cost_model["min_commission"],
-                               sell_value * cost_model["commission_rate"])
-                stamp_tax = sell_value * cost_model["stamp_tax_rate"]
-                slippage = sell_value * slippage_rate
-                net_cash = sell_value - commission - stamp_tax - slippage
-                shares[code] = current_shares - sell_shares
-                cash += net_cash
-
-    # ── 计算当日 NAV ──
-    nav = cash
-    for code in all_codes:
-        if code in shares and code in prices:
-            nav += shares[code] * prices[code]
-
-    daily_return = (nav / nav_before - 1.0) if nav_before > 0 else 0.0
-
-    conn.close()
+    avg = sum(returns) / len(returns) if returns else 0.0
     return {
-        "nav": round(nav, 2),
-        "shares": shares,
-        "cash": round(cash, 2),
-        "daily_return": round(daily_return, 6),
-        "rebalanced_today": is_first_trading_of_month,
-        "suspended_codes": list(suspended),
-        "n_stocks_invested": len(shares),
-        "n_stocks_total": len(all_codes),
-        "skipped_from_start": list(skipped) if is_start else [],
+        "daily_return": round(avg, 8),
+        "n_stocks": len(returns),
+        "suspended_codes": suspended,
     }
 
 
-def compute_hs300_nav(experiment_start: str, current_date: str,
-                       initial_nav: float, prev_nav: float) -> dict:
-    """获取沪深300全收益指数的当日净值变化。"""
+def compute_hs300_daily_return(current_date: str) -> dict:
+    """获取沪深 300 全收益指数的当日涨跌幅。"""
     from db import get_conn
     conn = get_conn()
-
     try:
         row = conn.execute(
             "SELECT change_pct FROM daily_snapshots "
             "WHERE code = '000300' AND date = ?",
             (current_date,)
         ).fetchone()
-        conn.close()
-
         if row and row["change_pct"] is not None:
-            daily_ret = row["change_pct"] / 100.0
-            nav = prev_nav * (1.0 + daily_ret)
-            return {"nav": round(nav, 2), "daily_return": round(daily_ret, 6)}
-    except Exception:
-        pass
-
-    conn.close()
-    return {"nav": prev_nav, "daily_return": 0.0, "warning": "hs300_data_unavailable"}
+            return {"daily_return": round(row["change_pct"] / 100.0, 8)}
+    finally:
+        conn.close()
+    return {"daily_return": 0.0, "warning": "hs300_data_unavailable"}
 
 
-def get_strategy_nav() -> dict:
-    """获取当前策略组合的净值（成本后）。"""
+def get_strategy_daily_return(prev_nav: float) -> dict:
+    """获取当日策略组合相对于前一记录日的收益率。
+
+    使用 portfolio.get_portfolio_value() 的当前净值，
+    除以 prev_nav 计算日收益率。成本已在 portfolio 中扣除。
+    """
     try:
         from portfolio import get_portfolio
         pm = get_portfolio()
         pv = pm.get_portfolio_value()
+        current_nav = pv["total_value"]
+        if prev_nav > 0:
+            daily_ret = current_nav / prev_nav - 1.0
+        else:
+            daily_ret = 0.0
         return {
-            "nav": round(pv["total_value"], 2),
+            "daily_return": round(daily_ret, 8),
+            "nav": round(current_nav, 2),
             "cash": round(pv["cash"], 2),
             "holdings_value": round(pv["holdings_value"], 2),
             "profit_pct": pv["total_profit_pct"],
         }
     except Exception as e:
-        return {"nav": CAPITAL_CONFIG["initial_capital"], "error": str(e)}
+        return {"daily_return": 0.0, "nav": prev_nav, "error": str(e)}
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -590,66 +426,53 @@ class FreezeExperiment:
                 conn.close()
                 return {"success": True, "skipped": True, "reason": f"{today} 已记录"}
 
-            # ── 三条净值 ──
+            # ── 三条归一化收益率 — 全部从 1.0 出发 ──
 
-            # 1. 策略净值
-            strat = get_strategy_nav()
-
-            # 2. 等权基准净值
+            # 读取前日累计乘数（第一日默认为 1.0）
             prev_row = conn.execute(
                 "SELECT * FROM oos_nav_curves WHERE experiment_id=? "
                 "ORDER BY date DESC LIMIT 1",
                 (exp_id,)
             ).fetchone()
 
-            prev_ew_state = None
             if prev_row:
-                prev_detail = json.loads(prev_row["details_json"])
-                prev_ew_state = prev_detail.get("equal_weight_state")
-                prev_strat_nav = prev_row["strategy_nav"]
-                prev_ew_nav = prev_row["equal_weight_nav"]
-                prev_hs300_nav = prev_row["hs300_nav"] or initial_capital
+                prev_strat_mult = prev_row["strategy_nav"]
+                prev_ew_mult = prev_row["equal_weight_nav"]
+                prev_hs300_mult = prev_row["hs300_nav"] or 1.0
+                prev_strat_real_nav = json.loads(prev_row["details_json"]).get(
+                    "strategy_real_nav", initial_capital)
             else:
-                prev_strat_nav = initial_capital
-                prev_ew_nav = initial_capital
-                prev_hs300_nav = initial_capital
+                prev_strat_mult = 1.0
+                prev_ew_mult = 1.0
+                prev_hs300_mult = 1.0
+                prev_strat_real_nav = initial_capital
 
-            ew_result = compute_equal_weight_nav(
-                experiment_start=started,
-                current_date=today,
-                initial_capital=initial_capital,
-                all_codes=all_codes,
-                cost_model=cost_model,
-                prev_state=prev_ew_state,
-            )
+            # 1. 策略日收益率 (基于真实净值变动)
+            strat = get_strategy_daily_return(prev_strat_real_nav)
+            strat_ret = strat["daily_return"]
+            strat_mult = prev_strat_mult * (1.0 + strat_ret)
 
-            # 3. 沪深300净值
-            hs300 = compute_hs300_nav(
-                experiment_start=started,
-                current_date=today,
-                initial_nav=initial_capital,
-                prev_nav=prev_hs300_nav,
-            )
+            # 2. 等权基准日收益率 (20 只理论等权, 分数股)
+            ew = compute_equal_weight_daily_return(all_codes, today)
+            ew_ret = ew["daily_return"]
+            ew_mult = prev_ew_mult * (1.0 + ew_ret)
 
-            # ── 写库 ──
-            strat_nav = strat.get("nav", initial_capital)
-            ew_nav = ew_result["nav"]
-            hs300_nav = hs300["nav"]
+            # 3. 沪深 300 日收益率
+            hs300 = compute_hs300_daily_return(today)
+            hs300_ret = hs300["daily_return"]
+            hs300_mult = prev_hs300_mult * (1.0 + hs300_ret)
 
-            strat_ret = (strat_nav / prev_strat_nav - 1.0) if prev_strat_nav > 0 else 0.0
-            ew_ret = ew_result["daily_return"]
-
-            # 最大回撤
+            # ── 最大回撤 (从各自曲线的历史峰值计算) ──
             prev_peaks = conn.execute(
                 "SELECT MAX(strategy_nav) as sp, MAX(equal_weight_nav) as ep "
                 "FROM oos_nav_curves WHERE experiment_id=?",
                 (exp_id,)
             ).fetchone()
 
-            strat_peak = max(prev_peaks["sp"] or strat_nav, strat_nav)
-            ew_peak = max(prev_peaks["ep"] or ew_nav, ew_nav)
-            strat_dd = (strat_nav - strat_peak) / strat_peak if strat_peak > 0 else 0.0
-            ew_dd = (ew_nav - ew_peak) / ew_peak if ew_peak > 0 else 0.0
+            strat_peak = max(prev_peaks["sp"] or strat_mult, strat_mult)
+            ew_peak = max(prev_peaks["ep"] or ew_mult, ew_mult)
+            strat_dd = (strat_mult - strat_peak) / strat_peak if strat_peak > 0 else 0.0
+            ew_dd = (ew_mult - ew_peak) / ew_peak if ew_peak > 0 else 0.0
 
             conn.execute(
                 "INSERT INTO oos_nav_curves "
@@ -658,23 +481,26 @@ class FreezeExperiment:
                 " strategy_drawdown, equal_weight_drawdown, details_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (exp_id, today,
-                 round(strat_nav, 2), round(ew_nav, 2), round(hs300_nav, 2),
-                 round(strat_ret, 6), round(ew_ret, 6), round(hs300["daily_return"], 6),
-                 round(strat_dd, 6), round(ew_dd, 6),
+                 round(strat_mult, 8), round(ew_mult, 8), round(hs300_mult, 8),
+                 round(strat_ret, 8), round(ew_ret, 8), round(hs300_ret, 8),
+                 round(strat_dd, 8), round(ew_dd, 8),
                  json.dumps({
+                     "all_start_from": 1.0,
+                     "strategy_real_nav": strat.get("nav"),
                      "strategy_cash": strat.get("cash"),
-                     "equal_weight_state": {
-                         "shares": ew_result.get("shares"),
-                         "cash": ew_result.get("cash"),
-                     },
-                     "equal_weight_rebalanced": ew_result.get("rebalanced_today"),
-                     "equal_weight_suspended": ew_result.get("suspended_codes", []),
+                     "equal_weight_theoretical": True,
+                     "equal_weight_n_stocks": ew["n_stocks"],
+                     "equal_weight_suspended": ew.get("suspended_codes", []),
                      "hs300_warning": hs300.get("warning"),
+                     "note": "三条线从 2026-07-10 归一化到 1.0 出发。"
+                             "等权基准使用理论分数股(不受A股100股整手限制),"
+                             "是纯理论参照物而非可交易组合。"
+                             "策略线包含真实交易成本(佣金+印花税+滑点)。"
+                             "沪深300全收益线不扣成本(代表买指数基金)。",
                  }, ensure_ascii=False))
             )
             conn.commit()
 
-            # 计数
             day_count = conn.execute(
                 "SELECT COUNT(*) FROM oos_nav_curves WHERE experiment_id=?",
                 (exp_id,)
@@ -688,10 +514,9 @@ class FreezeExperiment:
             "experiment_id": exp_id,
             "date": today,
             "day": day_count,
-            "strategy_nav": round(strat_nav, 2),
-            "equal_weight_nav": round(ew_nav, 2),
-            "hs300_nav": round(hs300_nav, 2),
-            "equal_weight_rebalanced": ew_result.get("rebalanced_today", False),
+            "strategy_mult": round(strat_mult, 4),
+            "equal_weight_mult": round(ew_mult, 4),
+            "hs300_mult": round(hs300_mult, 4),
         }
 
     # ── Status ─────────────────────────────────────────────
@@ -746,8 +571,10 @@ class FreezeExperiment:
 
         if latest:
             result["latest_date"] = latest["date"]
-            # 不展示相对排名，只展示最新净值
-            result["latest_strategy_nav"] = latest["strategy_nav"]
+            # 乘数 (1.0 = 起始), 不展示排名
+            result["latest_strategy_compound"] = round(latest["strategy_nav"], 4)
+            result["latest_equal_weight_compound"] = round(latest["equal_weight_nav"], 4)
+            result["latest_hs300_compound"] = round(latest["hs300_nav"] or 1.0, 4)
 
         return result
 
@@ -802,9 +629,10 @@ class FreezeExperiment:
         first = rows[0]
         last = rows[-1]
 
-        strategy_ret = (last["strategy_nav"] / first["strategy_nav"] - 1.0)
-        ew_ret = (last["equal_weight_nav"] / first["equal_weight_nav"] - 1.0)
-        hs300_ret = ((last["hs300_nav"] or first["strategy_nav"]) / first["strategy_nav"] - 1.0)
+        # 所有乘数从 1.0 出发, 末尾乘数 - 1.0 = 累计收益率
+        strategy_ret = last["strategy_nav"] - 1.0
+        ew_ret = last["equal_weight_nav"] - 1.0
+        hs300_ret = (last["hs300_nav"] or 1.0) - 1.0
 
         # Sharpe (daily returns annualized)
         risk_free_daily = 0.02 / 252
@@ -1014,12 +842,10 @@ def main():
             if result.get("skipped"):
                 print(f"⏭  {result['date']} 已记录")
             else:
-                print(f"📊 Day {result['day']} 已记录")
-                print(f"   策略: ¥{result['strategy_nav']:,.0f}")
-                print(f"   等权: ¥{result['equal_weight_nav']:,.0f}")
-                print(f"   HS300: ¥{result['hs300_nav']:,.0f}")
-                if result.get("equal_weight_rebalanced"):
-                    print(f"   🔄 等权基准本月再平衡")
+                print(f"📊 Day {result['day']} 已记录 (三线从 1.0000 出发)")
+                print(f"   策略:    {result['strategy_mult']:.4f}x ({result['strategy_mult']-1:+.2%})")
+                print(f"   等权:    {result['equal_weight_mult']:.4f}x ({result['equal_weight_mult']-1:+.2%})")
+                print(f"   沪深300: {result['hs300_mult']:.4f}x ({result['hs300_mult']-1:+.2%})")
         else:
             print(f"⚠️  {result.get('error', 'record failed')}")
 
