@@ -7,27 +7,32 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0a0a0a">
   <title>Serenity</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v=1.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v=1.1">
 </head>
 <body>
   <header class="top-bar">
     <span class="brand">Serenity</span>
     <span class="meta">
-      <span id="data-age" class="age-dot fresh"></span>
-      <span id="update-time">--</span>
+      <span id="data-age" class="age-dot fresh" role="status" aria-label="数据状态: 新鲜"></span>
+      <span id="update-time" aria-live="polite">--</span>
     </span>
   </header>
 
-  <div id="alert-banner" class="alert-banner" hidden></div>
+  <div id="alert-banner" class="alert-banner" role="alert" hidden></div>
 
-  <main id="tab-content"></main>
+  <div id="tab-overview" role="tabpanel" aria-labelledby="tab-btn-overview">
+    <div id="tab-content"></div>
+  </div>
 
-  <nav class="tab-bar" role="tablist">
-    <button class="tab-btn active" data-tab="overview">总览</button>
-    <button class="tab-btn" data-tab="detail">详情</button>
-    <button class="tab-btn" data-tab="oos">OOS</button>
+  <nav class="tab-bar" role="tablist" aria-label="主导航">
+    <button id="tab-btn-overview" class="tab-btn active" role="tab" data-tab="overview"
+            aria-selected="true" aria-controls="tab-overview" tabindex="0">总览</button>
+    <button id="tab-btn-detail" class="tab-btn" role="tab" data-tab="detail"
+            aria-selected="false" aria-controls="tab-overview" tabindex="-1">详情</button>
+    <button id="tab-btn-oos" class="tab-btn" role="tab" data-tab="oos"
+            aria-selected="false" aria-controls="tab-overview" tabindex="-1">OOS</button>
   </nav>
 
-  <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=1.0"></script>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}?v=1.1"></script>
 </body>
 </html>

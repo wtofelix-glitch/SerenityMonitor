@@ -1,4 +1,4 @@
-/* Serenity Dashboard v6.0 — lightweight, mobile-first */
+/* Serenity Dashboard v6.1 — lightweight, mobile-first, accessible */
 
 const D = {
   data: null, tab: "overview", timer: null, staleSec: 0,
@@ -9,8 +9,15 @@ const $ = (id) => document.getElementById(id);
 
 /* ── Bootstrap ───────────────────────────────── */
 document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  const buttons = document.querySelectorAll(".tab-btn");
+  buttons.forEach((btn, idx) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab, idx));
+    btn.addEventListener("keydown", (e) => {
+      const all = [...document.querySelectorAll(".tab-btn")];
+      const i = all.indexOf(btn);
+      if (e.key === "ArrowRight") { e.preventDefault(); switchTab(all[(i + 1) % all.length].dataset.tab, (i + 1) % all.length); }
+      if (e.key === "ArrowLeft")  { e.preventDefault(); switchTab(all[(i - 1 + all.length) % all.length].dataset.tab, (i - 1 + all.length) % all.length); }
+    });
   });
   fetchData().then(() => renderTab(D.tab));
   startRefresh();
@@ -86,11 +93,18 @@ function updateAlerts() {
 }
 
 /* ── Tab switching ───────────────────────────── */
-function switchTab(id) {
+function switchTab(id, idx) {
   D.tab = id;
-  document.querySelectorAll(".tab-btn").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === id);
+  document.querySelectorAll(".tab-btn").forEach((b, i) => {
+    const active = b.dataset.tab === id;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+    b.setAttribute("tabindex", active ? "0" : "-1");
   });
+  if (idx !== undefined) {
+    const btns = document.querySelectorAll(".tab-btn");
+    if (btns[idx]) btns[idx].focus();
+  }
   renderTab(id);
 }
 
@@ -115,9 +129,11 @@ function renderOverview() {
   const pf = d.portfolio || {};
   const nav = pf.nav ?? "--";
   const profit = pf.profit_pct ?? 0;
+  const profitSign = profit > 0 ? "+" : "";
+  const profitSymbol = profit > 0 ? "▲" : profit < 0 ? "▼" : "—";
   const profitClass = profit > 0 ? "text-green" : profit < 0 ? "text-red" : "";
   h += `<div class="card nav-card">
-    <div class="nav-primary">¥${num(nav)}<span class="profit ${profitClass}">${profit > 0 ? "+" : ""}${profit.toFixed(1)}%</span></div>
+    <div class="nav-primary">¥${num(nav)}<span class="profit ${profitClass}">${profitSymbol} ${profitSign}${profit.toFixed(1)}%</span></div>
     <div class="nav-secondary">
       <span>💰 现金 <strong>¥${num(pf.cash)}</strong></span>
       <span>📈 市值 <strong>¥${num(pf.holdings_value)}</strong></span>
@@ -130,6 +146,7 @@ function renderOverview() {
     h += `<div class="pos-row">`;
     for (const p of pos) {
       const pnlClass = p.profit_pct >= 0 ? "text-green" : "text-red";
+      const pnlSymbol = p.profit_pct > 0 ? "▲" : p.profit_pct < 0 ? "▼" : "—";
       h += `<div class="pos-card">
         <div class="pos-left">
           <span class="pos-name">${esc(p.name)} <span class="text-dim">${p.code}</span></span>
@@ -137,7 +154,7 @@ function renderOverview() {
         </div>
         <div class="pos-right">
           <span class="pos-value">¥${num(p.value)}</span>
-          <span class="pos-pnl ${pnlClass}">${p.profit_pct >= 0 ? "+" : ""}${p.profit_pct.toFixed(1)}%</span>
+          <span class="pos-pnl ${pnlClass}" aria-label="盈亏 ${p.profit_pct >= 0 ? '正' : '负'} ${p.profit_pct.toFixed(1)}%">${pnlSymbol} ${p.profit_pct >= 0 ? "+" : ""}${p.profit_pct.toFixed(1)}%</span>
         </div>
       </div>`;
     }

@@ -36,13 +36,20 @@ python3 cli.py workflow        # 一站式日终工作流
 
 ## 监控看板
 
-### 移动端看板 (端口 8401)
+### 精简看板 v6.0 (端口 8401，默认)
 
 ```bash
 python3 monitoring_dashboard.py
 ```
 
-功能：评分排行、净值走势、因子IC、信号绩效、维度预测力、行业轮动
+访问 `http://localhost:8401` — 3 Tab 移动优先看板：
+- **总览**：净值卡 + 持仓卡 + 信号摘要 + OOS 进度
+- **详情**：评分 Top5 + 因子 ICIR + 风控状态
+- **OOS**：冻结实验进度 + 模块状态
+
+### 旧版看板
+
+访问 `http://localhost:8401/monitor` — 7 Tab 传统看板 (Legacy)
 
 ### Dash 图表 (端口 8050)
 

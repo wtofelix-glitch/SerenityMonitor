@@ -1100,6 +1100,8 @@ _DASHBOARD_FALLBACK = {"schema_version": "1.0", "generated_at": "",
 def api_dashboard_compact():
     now_iso = datetime.now().astimezone().isoformat()
 
+    _KEY_MODULES = {"portfolio", "positions", "risk"}  # 任一不可用 → data_status=unavailable
+
     _module_status = {}
 
     def _safe(key: str, fn):
@@ -1166,11 +1168,21 @@ def api_dashboard_compact():
     # ── 因子 IC (top3 + worst2) ──
     factors = _safe("factors", lambda: _build_factor_summary())
 
-    return jsonify({
+    # data_status: fresh → partial → unavailable (based on key modules)
+    all_fresh = all(v == "fresh" for v in _module_status.values())
+    key_failed = any(_module_status.get(m) != "fresh" for m in _KEY_MODULES)
+    if all_fresh:
+        ds = "fresh"
+    elif key_failed:
+        ds = "unavailable"
+    else:
+        ds = "partial"
+
+    resp = jsonify({
         "schema_version": "1.0",
         "generated_at": now_iso,
         "market_status": _market_status,
-        "data_status": "fresh" if all(v == "fresh" for v in _module_status.values()) else "partial",
+        "data_status": ds,
         "module_status": _module_status,
         "portfolio": {
             "nav": round(portfolio["total_value"], 2) if portfolio else None,
@@ -1185,6 +1197,8 @@ def api_dashboard_compact():
         "oos": oos,
         "factors": factors,
     })
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 def _build_signal_summary(scores: list[dict]) -> dict:
