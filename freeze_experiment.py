@@ -17,7 +17,7 @@ Usage:
 
 from __future__ import annotations
 
-import json, os, subprocess, math
+import json, os, subprocess, math, hashlib
 from datetime import date, datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -125,10 +125,114 @@ JUDGMENT_CRITERIA = {
 
     "anti_cheat": [
         "判定标准在 freeze 时写入数据库，之后不可修改",
+        "criteria_hash (SHA-256) 在 freeze 时计算并存库，每次 judge 校验",
         "每周记录'想改什么、为什么忍住、净值多少'",
         "默认只看进度不看相对排名，每周/两周一次汇总",
     ],
 }
+"""JUDGMENT_CRITERIA dict ends here."""
+
+
+def compute_criteria_hash(criteria: dict) -> str:
+    """计算判定标准的 SHA-256 哈希。"""
+    serialized = json.dumps(criteria, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 除权除息事件日志 (B-7)
+# ═══════════════════════════════════════════════════════════════
+
+_DIVIDEND_CACHE: dict = {"date": "", "events": {}}
+
+def _fetch_dividend_events(today: str) -> dict[str, dict]:
+    """获取当日发生的除权除息事件。
+
+    从 akshare stock_history_dividend_detail 获取每只标的的分红历史，
+    筛选除权除息日 == today 且进度='实施' 的事件。
+
+    Returns:
+        {code: {cash_dividend_per_share, bonus_ratio, rights_ratio}}
+    """
+    global _DIVIDEND_CACHE
+    if _DIVIDEND_CACHE["date"] == today:
+        return _DIVIDEND_CACHE["events"]
+
+    try:
+        import akshare as ak
+        from config import ALL_CODES
+    except ImportError:
+        return {}
+
+    today_dt = date.fromisoformat(today)
+    events = {}
+
+    for code in ALL_CODES:
+        try:
+            df = ak.stock_history_dividend_detail(symbol=code)
+            for _, row in df.iterrows():
+                ex_date = row.get("除权除息日")
+                if ex_date is None or str(ex_date) == "NaT":
+                    continue
+                ex_str = (ex_date.isoformat() if hasattr(ex_date, 'isoformat')
+                          else str(ex_date)[:10])
+                if ex_str != today:
+                    continue
+                if str(row.get("进度", "")) != "实施":
+                    continue
+
+                # 派息: 每10股派X元 → 每股 = X/10
+                cash_per_share = float(row.get("派息", 0) or 0) / 10.0
+                # 送股+转增: 每10股送X股 → 每股送 X/10
+                bonus_raw = float(row.get("送股", 0) or 0) + float(row.get("转增", 0) or 0)
+                bonus_ratio = bonus_raw / 10.0
+
+                events[code] = {
+                    "cash_dividend_per_share": cash_per_share,
+                    "bonus_ratio": bonus_ratio,
+                    "rights_ratio": 0.0,
+                }
+                log.info(f"除息事件: {code} 派{cash_per_share:.2f}元/股"
+                         f"{' 送'+str(bonus_ratio) if bonus_ratio > 0 else ''}")
+        except Exception:
+            pass
+
+    _DIVIDEND_CACHE = {"date": today, "events": events}
+    return events
+
+
+def cross_check_dividend_anomaly(all_codes: list[str], today: str) -> list[dict]:
+    """交叉验证: 检测股价异常跳空但无除息记录的情况。
+
+    对当日跌幅 > 8% 的非跌停标的，检查是否有除息事件。
+    如果无记录 → 可能是数据源漏报除息，告警。
+    """
+    from db import get_conn
+    anomalies = []
+    conn = get_conn()
+    try:
+        placeholders = ",".join("?" * len(all_codes))
+        rows = conn.execute(
+            f"SELECT code, change_pct FROM daily_snapshots "
+            f"WHERE code IN ({placeholders}) AND date = ?",
+            (*all_codes, today)
+        ).fetchall()
+
+        dividend_events = _fetch_dividend_events(today)
+
+        for r in rows:
+            chg = r["change_pct"] or 0
+            if chg <= -8.0 and chg > -10.0:
+                if r["code"] not in dividend_events:
+                    anomalies.append({
+                        "code": r["code"],
+                        "change_pct": chg,
+                        "warning": (f"{r['code']} 今日跌幅 {chg:.1f}%，"
+                                   f"无除息记录 — 可能是漏报除息事件"),
+                    })
+    finally:
+        conn.close()
+    return anomalies
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -342,12 +446,15 @@ class FreezeExperiment:
 
         conn = get_conn()
         try:
+            h = compute_criteria_hash(criteria)
             conn.execute(
                 "INSERT INTO oos_experiments (name, started_at, commit_hash, "
-                "config_snapshot, judgment_criteria, status) VALUES (?, ?, ?, ?, ?, 'active')",
+                "config_snapshot, judgment_criteria, criteria_hash, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'active')",
                 ("oos-freeze", date.today().isoformat(), snapshot["commit_hash"],
                  json.dumps(snapshot, ensure_ascii=False, indent=2),
-                 json.dumps(criteria, ensure_ascii=False, indent=2))
+                 json.dumps(criteria, ensure_ascii=False, indent=2),
+                 h)
             )
             conn.commit()
             exp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -489,6 +596,10 @@ class FreezeExperiment:
             # Day 2+ — 正常记录
             # ═════════════════════════════════════════════
 
+            # ── 除权除息检查 (B-7) ──
+            dividend_events = _fetch_dividend_events(today)
+            dividend_anomalies = cross_check_dividend_anomaly(all_codes, today)
+
             prev_detail = json.loads(prev_row["details_json"])
             prev_strat_real_nav = prev_detail.get("anchor_strategy_nav", 0)
 
@@ -544,6 +655,8 @@ class FreezeExperiment:
                      "equal_weight_n_stocks": ew["n_stocks"],
                      "equal_weight_suspended": ew.get("suspended_codes", []),
                      "hs300_warning": hs300.get("warning"),
+                     "dividend_events": dividend_events,
+                     "dividend_anomalies": dividend_anomalies,
                  }, ensure_ascii=False))
             )
             conn.commit()
@@ -646,6 +759,19 @@ class FreezeExperiment:
 
             exp_id = exp["id"]
             criteria = json.loads(exp["judgment_criteria"])
+
+            # ── D-12: 判定标准完整性校验 ──
+            stored_hash = exp["criteria_hash"] if "criteria_hash" in exp.keys() else ""
+            current_hash = compute_criteria_hash(criteria)
+            if stored_hash and current_hash != stored_hash:
+                return {
+                    "error": "CRITERIA_TAMPERED",
+                    "stored_hash": stored_hash[:16],
+                    "current_hash": current_hash[:16],
+                    "detail": ("判定标准已被修改! 冻结时的 hash 与当前 DB 中的不一致。"
+                              "拒绝判定。请用 git checkout 恢复原始 freeze_experiment.py。"),
+                }
+
             min_days = criteria["min_trading_days"]
             checkpoint_days = criteria["checkpoint_days"]
 

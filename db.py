@@ -854,6 +854,7 @@ def init_db():
             commit_hash     TEXT NOT NULL,
             config_snapshot TEXT NOT NULL,
             judgment_criteria TEXT NOT NULL,
+            criteria_hash   TEXT NOT NULL DEFAULT '',
             status          TEXT NOT NULL DEFAULT 'active',
             completed_at    TEXT,
             verdict         TEXT,
