@@ -982,6 +982,110 @@ class FreezeExperiment:
 
         return {"success": updated > 0, "aborted_experiments": updated}
 
+    # ── Candidate Strategy Shadow Recording ──────────────────
+
+    def record_candidates(self, as_of: Optional[str] = None) -> dict:
+        """记录当前所有活跃候选策略的趋势质量快照。
+
+        将 trend_quality 数据写入最近一条 OOS 记录的 details_json 中。
+        候选策略不改变策略线净值，只记录"候选策略会怎么看当前市场"，
+        供 120 天后与冻结基线对比。
+
+        Returns:
+            {candidates_recorded: int, details: [...]}
+        """
+        today = as_of or date.today().isoformat()
+        conn = get_conn()
+        try:
+            exp = conn.execute(
+                "SELECT id FROM oos_experiments WHERE status = 'active' "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+
+            if not exp:
+                conn.close()
+                return {"success": False, "error": "没有活跃的 OOS 实验"}
+
+            exp_id = exp["id"]
+
+            latest = conn.execute(
+                "SELECT id, date, details_json FROM oos_nav_curves "
+                "WHERE experiment_id=? ORDER BY date DESC LIMIT 1",
+                (exp_id,)
+            ).fetchone()
+
+            if not latest or latest["date"] != today:
+                conn.close()
+                return {"success": False, "error": f"{today} 尚无 OOS 记录, 请先运行 oos-record"}
+
+            detail = json.loads(latest["details_json"])
+
+            # ── 计算五福趋势质量 ──
+            try:
+                from trend_quality import TrendQuality
+                tq = TrendQuality()
+                snapshot = tq.compute_batch(as_of=today)
+            except ImportError:
+                conn.close()
+                return {"success": False, "error": "trend_quality 模块不可用"}
+
+            detail["candidates"] = {
+                "wufu_momentum": {
+                    "computed_at": today,
+                    "summary": {
+                        "avg_quality": round(
+                            sum(s["quality_score"] for s in snapshot) / max(len(snapshot), 1), 1
+                        ),
+                        "n_strong_trend": sum(1 for s in snapshot if s["quality_score"] >= 60),
+                        "n_weak_trend": sum(1 for s in snapshot if s["quality_score"] < 30),
+                        "top3": [
+                            {"code": s["code"], "name": s["name"],
+                             "r_squared": s["r_squared"],
+                             "quality_score": s["quality_score"],
+                             "trend_label": s["trend_label"]}
+                            for s in snapshot[:3]
+                        ],
+                    },
+                    "per_stock": {
+                        s["code"]: {
+                            "r_squared": s["r_squared"],
+                            "quality_score": s["quality_score"],
+                            "trend_label": s["trend_label"],
+                            "annualized_slope": s["annualized_slope"],
+                        }
+                        for s in snapshot
+                    },
+                    "note": "五福动量候选策略。高R²+正斜率 → 趋势可靠, 可追。"
+                            "低R²+正斜率 → 波动大, 需谨慎。"
+                            "高R²+负斜率 → 下降趋势, 应回避。"
+                            "解冻后若样本外验证通过, 可将R²校准注入动量评分。",
+                },
+            }
+
+            conn.execute(
+                "UPDATE oos_nav_curves SET details_json=? WHERE id=?",
+                (json.dumps(detail, ensure_ascii=False), latest["id"])
+            )
+            conn.commit()
+
+            summary = detail["candidates"]["wufu_momentum"]["summary"]
+            n_total = len(snapshot)
+            return {
+                "success": True,
+                "date": today,
+                "candidates_recorded": 1,
+                "details": [{
+                    "name": "wufu_momentum",
+                    "avg_quality": summary["avg_quality"],
+                    "n_strong": summary["n_strong_trend"],
+                    "n_weak": summary["n_weak_trend"],
+                    "n_total": n_total,
+                    "top3": summary["top3"],
+                }],
+            }
+        finally:
+            conn.close()
+
 
 # ═══════════════════════════════════════════════════════════════
 # CLI
@@ -993,7 +1097,7 @@ def main():
     exp = FreezeExperiment()
 
     if len(sys.argv) < 2:
-        print("Usage: python3 freeze_experiment.py {freeze|record|status|judge|weekly-log|abort}")
+        print("Usage: python3 freeze_experiment.py {freeze|record|status|judge|candidate|weekly-log|abort}")
         return
 
     cmd = sys.argv[1]
@@ -1081,6 +1185,56 @@ def main():
             note = input("这周想改什么、为什么忍住了？ ")
         result = exp.weekly_log(note)
         print(f"✅ 已记录" if result.get("success") else f"❌ {result.get('error')}")
+
+    elif cmd == "candidate":
+        sub = sys.argv[2] if len(sys.argv) > 2 else "record"
+        if sub == "record":
+            result = exp.record_candidates()
+            if result.get("success"):
+                for d in result["details"]:
+                    print(f"\n🔬 候选策略: {d['name']}")
+                    print(f"   avg_quality={d['avg_quality']:.0f} "
+                          f"strong={d['n_strong']} weak={d['n_weak']} "
+                          f"total={d['n_total']}")
+                    for t in d["top3"]:
+                        print(f"   {'🥇' if t['quality_score']>=80 else '🥈' if t['quality_score']>=60 else '📊'}"
+                              f" {t['name']}({t['code']})"
+                              f" R²={t['r_squared']:.2f}"
+                              f" quality={t['quality_score']:.0f}"
+                              f" [{t['trend_label']}]")
+            else:
+                print(f"⚠️  {result.get('error', 'record failed')}")
+        elif sub == "status":
+            conn = get_conn()
+            try:
+                latest = conn.execute(
+                    "SELECT date, details_json FROM oos_nav_curves "
+                    "WHERE experiment_id=(SELECT id FROM oos_experiments "
+                    "WHERE status='active' ORDER BY started_at DESC LIMIT 1) "
+                    "ORDER BY date DESC LIMIT 1"
+                ).fetchone()
+                if latest:
+                    d = json.loads(latest["details_json"])
+                    cands = d.get("candidates", {})
+                    if cands:
+                        for name, cdata in cands.items():
+                            s = cdata["summary"]
+                            days_with = conn.execute(
+                                "SELECT COUNT(*) FROM oos_nav_curves "
+                                "WHERE json_extract(details_json, '$.candidates') IS NOT NULL"
+                            ).fetchone()[0]
+                            print(f"\n🔬 候选策略: {name}")
+                            print(f"   最新数据: {latest['date']}")
+                            print(f"   累计记录: {days_with} 天")
+                            print(f"   avg_quality={s['avg_quality']:.0f} "
+                                  f"strong={s['n_strong_trend']} "
+                                  f"weak={s['n_weak_trend']}")
+                    else:
+                        print("尚无候选策略数据。运行 python3 cli.py oos-candidate record 开始记录。")
+            finally:
+                conn.close()
+        else:
+            print(f"用法: python3 cli.py oos-candidate {{record|status}}")
 
     elif cmd == "abort":
         reason = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""

@@ -2337,6 +2337,8 @@ def main():
         "oos-record": lambda: __import__('freeze_experiment').main_after(['record']),
         "oos-judge": lambda: __import__('freeze_experiment').main_after(['judge']),
         "oos-weekly-log": lambda: __import__('freeze_experiment').main_after(['weekly-log'] + sys.argv[2:]),
+        "oos-candidate": lambda: __import__('freeze_experiment').main_after(['candidate'] + sys.argv[2:]),
+        "trend-quality": lambda: __import__('trend_quality').main_with_args(sys.argv[2:]),
     }
 
     if cmd in commands:
