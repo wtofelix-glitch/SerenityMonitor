@@ -2,7 +2,7 @@
 OOS 冻结实验 — freeze_experiment.py
 
 成本后面外样本 alpha 验证。冻结全部策略参数，每日记录三条成本后
-净值曲线（策略 / 月频等权 / 沪深300），在预先锁定的判定标准下检验
+净值曲线（策略 / 日频等权 / 沪深300），在预先锁定的判定标准下检验
 评分引擎是否有超越被动基准的加值。
 
 判定标准在 freeze 时写入数据库，之后不可修改。任何冻结项的修改都会
@@ -48,13 +48,16 @@ COST_MODEL = {
 }
 
 EQUAL_WEIGHT_REBALANCE = {
-    "frequency": "monthly",       # 每月首个交易日
-    "method": "equal_weight",     # 20 只等权
-    "cost_model": "same_as_strategy",
-    "suspended_handling": "skip_rebalance_keep_weight",
-    "note": "月频等权再平衡基准。这是比 buy-and-hold 更强的对手——"
-            "月频再平衡的等权组合长期常跑赢很多主动策略。"
-            "跑不输它 → alpha 成立；跑输它 → 不丢人，但评分引擎没加值。",
+    "frequency": "daily",           # 每日算术平均 (等价日频再平衡)
+    "method": "equal_weight",       # 20 只等权 change_pct 的简单平均 → 叠乘
+    "cost_model": "zero",           # 理论基准线, 不扣再平衡成本
+    "suspended_handling": "treat_as_zero_return",
+    "note": "日频等权再平衡基准 — 比月频更强的对手。"
+            "每日取 20 只标的 change_pct 的简单平均后叠乘,"
+            "等价于每天收盘后拉回等权、且不扣任何交易成本。"
+            "这是故意设高的及格线: 策略不但要跑赢闭眼平均分配,"
+            "还要覆盖自己的真实交易摩擦。"
+            "跑不输它 → alpha 成立; 跑输它 → 不丢人, 但评分引擎没加值。",
 }
 
 JUDGMENT_CRITERIA = {
@@ -93,7 +96,7 @@ JUDGMENT_CRITERIA = {
                 "metric": "cumulative_return_net",
                 "operator": "lte",
                 "reference": "equal_weight",
-                "verdict": "FAIL — 评分引擎在样本外没有提供超越月频等权再平衡的加值",
+                "verdict": "FAIL — 评分引擎在样本外没有提供超越日频等权基准的加值",
             },
             {
                 "id": "sharpe_lte_equal_weight",
@@ -115,7 +118,7 @@ JUDGMENT_CRITERIA = {
     "boundary_case": {
         "condition": "strategy_beats_hs300_but_not_equal_weight",
         "verdict": "NOT_PASS — 主题选择有效（pool 有 beta），但评分引擎未提供"
-                   "超越月频等权再平衡的加值",
+                   "超越日频等权基准的加值",
     },
 
     "reset_rule": (
@@ -313,10 +316,10 @@ def capture_config_snapshot() -> dict:
 #   不是可交易方案。与沪深 300 线的哲学一致（指数不可直接交易，但仍然
 #   是最诚实的外部参照）。
 #
-#   月频再平衡成本：用分数股后，再平衡时只需调整权重，无实际交易摩擦。
-#   这一点与策略线的实时交易成本（佣金+印花税+滑点）不对称，已明确标注
-#   在判定标准中 — 等权基准的理论摩擦 ≈ 0，策略线要跑赢的是一个几乎
-#   零成本的被动配置。这是更强的对手，也是更干净的对照。
+#   日频等权基准：每日取 20 只标的 change_pct 的算术平均后叠乘，等价于
+#   每天收盘后拉回等权。这是比月频再平衡更强的对手 — 故意设高的及格线，
+#   策略不但要跑赢闭眼平均分配，还要覆盖自己的真实交易摩擦（佣金+印花税
+#   +滑点）。基准零成本、策略有成本，不对称但有意为之：这是更干净的对照。
 
 
 def compute_equal_weight_daily_return(all_codes: list[str],
