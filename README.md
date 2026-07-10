@@ -153,6 +153,18 @@ export SERENITY_LLM_MODEL="deepseek-chat"
 
 设置后 `sentiment_engine.py` 自动启用 LLM 情绪分析。
 
+## Phase Status — All 5 Phases Complete
+
+| Phase | Deliverables |
+|-------|--------------|
+| **1** | market_microstructure (T+1/limit/suspended), execution_simulator (cost model), fill_model, audit_logger (1,356 records) |
+| **2** | frozen_baseline v2 (clock reset on de-redundancy), equal_weight_basket (event-ledger benchmark) |
+| **3** | correlation_cluster (replacing SECTOR_MAP for concentration risk), factor_audit (7 scoring dims -> 2 independent), kernel_freeze (9 modules), ablation_framework |
+| **4** | phase4_checklist (16/19 PASS, 3 clock-dependent PENDING), stock_pool_audit |
+| **5** | trade_gateway (Paper/THS/QMT backends), kill_switch (circuit breaker / daily loss lock / drawdown warning), observation_mode, promotion_ceremony, sim_verification, weekly_comparison_report (Sat 07:30) |
+
+**Key Metrics:** 751 tests passing, 29 skipped | 9 modules frozen in kernel_freeze.py | Factor de-redundancy: 7 dimensions -> 2 independent | T4 defensive floor at 20% (auto_execute + risk_manager) | Frozen Baseline v2 with clock reset on de-redundancy update
+
 ## 详细文档
 
 - [架构文档](docs/architecture.md) — 完整模块说明、数据库表结构、API 端点

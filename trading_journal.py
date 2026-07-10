@@ -15,8 +15,7 @@ import os
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from db import get_conn
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 
 TABLE_SQL = """
@@ -102,7 +101,7 @@ def log_trade(code: str, action: str, date_str: str = None, price: float = 0,
     """
     init_journal_table()
     date_str = date_str or date.today().isoformat()
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
 
     conn = get_conn()
     conn.execute("""
@@ -193,7 +192,7 @@ def format_journal(entries: list[dict]) -> str:
 
     lines = [f"{'':=^60}", "  📝 交易日志", f"{'':=^60}", ""]
     for e in entries:
-        name = STOCK_MAP.get(e["code"], {}).get("name", e["code"])
+        name = get_stock_name(e["code"])
         action_icon = "🟢" if e["action"] == "buy" else "🔴"
         date_str = e["date"][:10]
         lines.append(f"  [{e['id']}] {action_icon} {name}({e['code']}) | {date_str}")
@@ -227,7 +226,7 @@ def format_stats(stats: dict) -> str:
     if stats["by_code"]:
         lines.append(f"\n  按标的:")
         for r in stats["by_code"]:
-            name = STOCK_MAP.get(r["code"], {}).get("name", r["code"])
+            name = get_stock_name(r["code"])
             lines.append(f"    {name:<8}({r['code']}) {r['c']}次  "
                          f"平均盈亏{r['avg_profit']:+.2f}%")
 

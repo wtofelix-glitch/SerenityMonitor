@@ -1,4 +1,5 @@
 """
+from typing import Optional
 Monte Carlo 压力测试 v3.1
 用实盘组合日收益率分布，模拟 1000 条 60 天路径，
 回答：翻倍概率多大？最差回撤多少？
@@ -73,7 +74,7 @@ def run_monte_carlo(
     n_sims: int = 1000,
     n_days: int = 60,
     initial_capital: float = 51066,
-    seed: int | None = None,
+    seed: Optional[int] = None,
 ) -> dict:
     """执行 Monte Carlo 压力测试。
 

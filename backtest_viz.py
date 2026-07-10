@@ -16,8 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from backtest_engine import MultiFactorWithSignalsStrategy, BacktestTrade
-from db import get_price_history
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 from factor_metadata import FACTOR_KEYS, FACTOR_LABELS
 
@@ -443,7 +442,7 @@ def _calc_metrics(data: dict) -> dict:
 def generate_report_html(code: str, data: dict) -> str:
     """生成完整Plotly HTML报告"""
     m = _calc_metrics(data)
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     eq_chart = build_equity_curve_chart(data)

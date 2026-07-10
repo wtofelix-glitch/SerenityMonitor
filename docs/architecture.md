@@ -1,6 +1,6 @@
 # SerenityMonitor 架构文档
 
-> 最后更新: 2026-06-25 (v3.0)
+> 最后更新: 2026-07-09 (v4.0)
 
 ## 系统概述
 
@@ -62,6 +62,7 @@ SerenityMonitor 是一个 A 股 7 维评分与半自动交易辅助系统，覆�
 | `scorer.py` | **v3.0 7 维评分引擎** (zone/momentum/volume/serenity/factor/technical/moat) |
 | `factor_engine.py` | 14 Alpha 因子 + 三周期融合 |
 | `factor_ic.py` | Rank IC 分析 + 维度自动淘汰建议 |
+| `factor_audit.py` | **因子去冗余审计** — 量化维度相关性，7 维→2 独立因子 |
 | `signal_engine.py` | 统一信号生成 (BUY/SELL/HOLD 等) + SELL 缓冲确认 + 超卖保护 |
 | `sentiment_engine.py` | 新闻情绪评分（新浪财经 + 可选 LLM），合并入 technical |
 | `data_engine.py` | 新浪行情抓取 + 重试装饰器 |
@@ -76,6 +77,7 @@ SerenityMonitor 是一个 A 股 7 维评分与半自动交易辅助系统，覆�
 | `signal_performance.py` | **信号绩效分析** — 按信号类型统计胜率/平均收益、维度预测有效性、数据完整性检查 |
 | `factor_ic.py` | Rank IC 归因分析 |
 | `sector_rotation.py` | 行业轮动扫描 |
+| `correlation_cluster.py` | **相关性簇分析** — 替代 SECTOR_MAP，用价格行为聚类 |
 | `weight_adjuster.py` | 动态权重调整（基于 IC） |
 | `market_timing.py` | 大盘择时信号 |
 
@@ -84,16 +86,23 @@ SerenityMonitor 是一个 A 股 7 维评分与半自动交易辅助系统，覆�
 | 模块 | 功能 |
 |------|------|
 | `portfolio.py` | 组合管理（现金计算、仓位管理、止盈止损） |
-| `auto_execute.py` | 自动调仓计划生成 |
+| `auto_execute.py` | 自动调仓计划生成（含 T4 20% 底仓保护） |
 | `tier1_reentry.py` | T1 标的回补检查 |
+| `market_microstructure.py` | **A 股微观结构** — T+1 锁定、涨跌停、停牌检测 |
+| `execution_simulator.py` | **成交模拟器** — 佣金+印花税+滑点计算 |
+| `fill_model.py` | **成交填充模型** — 部分成交/延迟成交模拟 |
+| `trade_gateway.py` | **统一交易网关** — Paper/THS 半自动/QMT/Passthrough 四后端 |
+| `kill_switch.py` | **统一熔断器** — 回撤 12% 强制清仓 / 日亏 2% 锁仓 / 回撤 8% 降仓 |
+| `observation_mode.py` | **观察模式状态机** — 自动进入只减仓/紧急停机模式 |
 
 ### 工作流与调度
 
 | 模块 | 功能 |
 |------|------|
 | `daily_workflow.py` | 日终工作流（8 步：评分→信号→绩效→反思→调仓→简报→推送） |
-| `run_scheduled.sh` | launchd 调度脚本（07:30 盘前 / 15:05 收盘 / 22:00 复核） |
+| `run_scheduled.sh` | launchd 调度脚本（07:30 盘前 / 15:05 收盘 / 22:00 复核; 周六 07:30 周度对比） |
 | `com.serenity.scheduler.plist` | launchd 配置文件 |
+| `weekly_comparison_report.py` | **周度三系统对比报告** — Adaptive vs Frozen vs EqualWeight, 周六 07:30 |
 
 ### 监控与仪表盘
 
@@ -118,6 +127,35 @@ SerenityMonitor 是一个 A 股 7 维评分与半自动交易辅助系统，覆�
 | `cli.py` | 命令行入口（20+ 命令） |
 | `health_check.py` | 系统健康诊断 |
 | `serenity_logger.py` | 日志配置 |
+
+### 审计链
+
+| 模块 | 功能 |
+|------|------|
+| `audit_logger.py` | **决策审计链** — 从行情→因子→评分→信号→执行→收益的完整追溯（1,356 条记录） |
+
+### 验证与基线
+
+| 模块 | 功能 |
+|------|------|
+| `frozen_baseline.py` | **冻结基线 v2** — 评分权重/信号阈值冻结，时钟随去冗余更新重置 |
+| `equal_weight_basket.py` | **等权基准** — 14 只标的等权组合逐日账本 |
+| `ablation_framework.py` | **消融实验框架** — 量化各情报模块的增量贡献 |
+| `sim_verification.py` | **模拟盘验证框架** — ≥4 周模拟盘 + 信号质量检核 |
+
+### 内核管理
+
+| 模块 | 功能 |
+|------|------|
+| `kernel_freeze.py` | **内核冻结开关** — 统一管理 9 个模块的冻结/解冻状态（default-deny） |
+| `promotion_ceremony.py` | **模块晋级仪式** — 管理冻结模块的解冻晋级流程 |
+
+### 上线检查
+
+| 模块 | 功能 |
+|------|------|
+| `phase4_checklist.py` | **上线自检清单** — 19 项门槛（16/19 PASS，3 项时钟依赖） |
+| `stock_pool_audit.py` | **标的安全审计** — 定期自检和健康检查 |
 
 ---
 
@@ -172,7 +210,7 @@ launchctl unload ~/Library/LaunchAgents/com.serenity.scheduler.plist
 ### 调度时间
 | 时间 | 任务 | 说明 |
 |------|------|------|
-| 07:30 | 盘前简报 | `auto_execute.py --premarket` |
+| 07:30 | 盘前简报 (工作日) / 周度三系统对比 (周六) | `auto_execute.py --premarket` / `weekly_comparison_report.py --push` |
 | 15:05 | 收盘工作流 | `daily_workflow.py --push` |
 | 22:00 | 晚间复核 | `daily_workflow.py --push`（保险重跑） |
 
@@ -212,3 +250,34 @@ python3 cli.py monitor             # 批量评分监控
 
 ### Dash 图表 (端口 8050)
 - K 线图、散点图、雷达图、柱状图
+
+---
+
+## Phase 4 上线自检 (phase4_checklist.py)
+
+**日期:** 2026-07-09
+**进度:** 16/19 PASS, 0 FAIL, 3 PENDING (时钟依赖)
+
+| ID | 检查项 | 状态 |
+|----|--------|------|
+| backtest_t1 | 回测引擎支持 T+1 锁定 | PASS |
+| backtest_limit_up_down | 回测引擎支持涨跌停 | PASS |
+| backtest_suspended | 回测引擎支持停牌 | PASS |
+| backtest_costs | 回测引擎扣除佣金+印花税+滑点 | PASS |
+| signal_net_returns | 信号绩效全部按净收益统计 | PASS |
+| audit_log_per_signal | 每条信号有完整 decision_audit_log | PASS |
+| frozen_baseline_8weeks | Frozen Baseline ≥8 周 | PENDING |
+| adaptive_vs_frozen | Adaptive 未显著跑输 Frozen | PENDING |
+| equal_weight_benchmark | Equal Weight 基准已接入 | PASS |
+| ablation_done | 情报层消融已完成 | PENDING |
+| single_position_cap | 单票上限 ≤35% | PASS |
+| theme_concentration | 相关性簇风控已上线 | PASS |
+| t4_defensive_floor | T4 防御底仓 20% | PASS |
+| test_microstructure | test_market_microstructure.py 通过 | PASS |
+| test_execution_sim | test_execution_simulator.py 通过 | PASS |
+| test_t1_lock | test_t1_lock.py 通过 | PASS |
+| test_limit_up_down | test_limit_up_down.py 通过 | PASS |
+| test_no_lookahead | test_no_lookahead.py 通过 | PASS |
+| test_audit_replay | test_audit_replay.py 通过 | PASS |
+
+**3 项 PENDING** 均为时间/数据积累依赖（Frozen Baseline 需要 ≥8 周运行 -> 预计 2026-09 满足）。

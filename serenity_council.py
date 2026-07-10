@@ -29,7 +29,7 @@ from typing import Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS, SERENITY_WEIGHTS
+from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS, SERENITY_WEIGHTS, get_stock_name
 from db import (
     get_price_history, get_avg_volume, get_latest_scores, get_signal_performance,
     get_reflection_dimension_ic,
@@ -542,7 +542,7 @@ class InvestmentCommittee:
 
     def review(self, code: str) -> CouncilDecision:
         """开全体委员会，投票决策"""
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         today = date.today().isoformat()
 
         # 1. 收集所有Agent投票

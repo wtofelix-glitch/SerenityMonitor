@@ -12,8 +12,7 @@ from typing import Optional
 # _AKSHARE_OK 在 _get_ak() 首次调用时设置
 _AKSHARE_OK = None  # None=未检查, True=可用, False=未安装
 import pandas as pd
-
-from config import STOCK_MAP, ALL_CODES
+from config import STOCK_MAP, ALL_CODES, get_stock_name
 from data_engine import fetch_single
 
 logger = logging.getLogger(__name__)
@@ -191,7 +190,7 @@ class FundamentalEngine:
             if roe is None:
                 roe = _parse_pct(latest.get('净资产收益率-摊薄'))
 
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
 
             return {
                 "code": code,

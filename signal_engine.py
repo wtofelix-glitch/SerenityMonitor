@@ -7,7 +7,7 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from config import (
-    SIGNAL_CONFIG, STOCK_MAP, STOCK_DETAILS, ALL_CODES,
+    SIGNAL_CONFIG, STOCK_MAP, STOCK_DETAILS, ALL_CODES, get_stock_name,
     compute_serenity_score, CAPITAL_CONFIG, RISK_CONFIG, STRATEGY_CONFIG,
 )
 from data_engine import fetch_realtime, fetch_single
@@ -26,7 +26,7 @@ from serenity_logger import get_logger
 log = get_logger(__name__)
 
 
-def _should_persist_signal(signal_date: date | None = None) -> bool:
+def _should_persist_signal(signal_date: Optional[date] = None) -> bool:
     """Only trading-session signals belong in the real validation ledger."""
     from check_trading_day import is_trading_day
 
@@ -948,7 +948,7 @@ def generate_signals(codes: list[str] = None, portfolio: "PortfolioManager" = No
             log.warning(f"[signal] {code}: 信号生成异常: {e}")
             signals.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "action": "ERROR",
                 "total_score": 0,
                 "error": str(e),
@@ -991,7 +991,7 @@ def _generate_single_signal(code: str, realtime_data: dict,
                              position_codes: set, portfolio: "PortfolioManager",
                              scorer_total_scores: dict = None) -> Optional[dict]:
     """单个标的的信号生成"""
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     price = realtime_data.get("price", 0)
     if price <= 0:
         rows = get_price_history(code, 1)

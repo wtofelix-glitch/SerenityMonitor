@@ -67,7 +67,7 @@ class FactorAudit:
 
     # ── 数据加载 ──────────────────────────────────────────
 
-    def load_data(self, codes: list[str] | None = None) -> None:
+    def load_data(self, codes: Optional[list[str]] = None) -> None:
         """从 scoring_history 和 daily_snapshots 加载因子值和收益率数据。"""
         if codes is None:
             codes = list(ALL_CODES)
@@ -314,7 +314,7 @@ class FactorAudit:
 
     # ── 完整审计 ──────────────────────────────────────────
 
-    def run_full_audit(self, codes: list[str] | None = None) -> dict:
+    def run_full_audit(self, codes: Optional[list[str]] = None) -> dict:
         """运行完整因子审计。"""
         self.load_data(codes)
 
@@ -414,6 +414,47 @@ class FactorAudit:
             lines.append(f"  {rec}")
 
         return "\n".join(lines)
+
+    def save_de_redundancy_config(self, filepath: str = "") -> str:
+        """保存去冗余后的独立因子集到配置文件，供 Frozen Baseline v2 使用。
+
+        Returns:
+            保存的文件路径
+        """
+        import os
+        if not filepath:
+            filepath = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                ".de_redundancy_config.json"
+            )
+
+        if not self._audit_results:
+            self.run_full_audit()
+
+        r = self._audit_results
+        config = {
+            "generated_at": date.today().isoformat(),
+            "lookback_days": self.lookback_days,
+            "n_observations": len(self._dates),
+            "n_stocks": len(self._factor_history.get("factor_score", {})),
+            "warning": (
+                "ICIR estimates unstable with < 60 observations. "
+                "Re-run when data accumulates."
+            ) if len(self._dates) < 60 else "",
+            "original_factors": r["redundancy"]["n_original"],
+            "independent_factors": r["redundancy"]["independent_factors"],
+            "n_independent": r["redundancy"]["n_independent"],
+            "merged_groups": r["redundancy"]["merged_groups"],
+            "dropped_factors": r["redundancy"]["dropped"],
+            "icir_ranking": r["ranked_factors"],
+            "noise_factors": r["noise_factors"],
+            "recommendations": r["recommendations"],
+        }
+
+        with open(filepath, "w") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        log.info(f"去冗余配置已保存: {filepath}")
+        return filepath
 
 
 # ═══════════════════════════════════════════════════════════════

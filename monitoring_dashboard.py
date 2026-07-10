@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional
 """
 Serenity Monitor — 移动端监控看板
 极简 Flask web 看板，手机一屏看完所
@@ -98,7 +99,7 @@ from db import get_conn
 log = get_logger(__name__)
 
 # --- 项目模块 ---
-from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG
+from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG, get_stock_name
 from data_engine import fetch_realtime, sina_fetch_raw
 import concurrent.futures
 from scorer import score_all
@@ -177,7 +178,12 @@ def require_write_auth(func):
     return wrapper
 
 # 模块级缓存（避免每30秒重复跑引擎）
-_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None, "factor_ic": None}
+_cache = {
+    "etf": None, "dividend": None, "pf": None, "scores": None,
+    "sectors": None, "qd": None, "factor_ic": None, "factors": None,
+    "market": None, "operational_mode": None, "ratings": None,
+    "uzi": None, "targets": None, "advice": None, "stops": None,
+}
 _cache_time = {key: None for key in _cache}
 _cache_lock = threading.RLock()
 _cache_key_locks = {key: threading.Lock() for key in _cache}
@@ -191,6 +197,14 @@ CACHE_TTL = {
     "sectors": timedelta(minutes=5),
     "qd": timedelta(minutes=2),
     "factor_ic": timedelta(minutes=10),
+    "factors": timedelta(minutes=2),
+    "market": timedelta(minutes=2),
+    "operational_mode": timedelta(minutes=2),
+    "ratings": timedelta(minutes=5),
+    "uzi": timedelta(minutes=5),
+    "targets": timedelta(seconds=30),
+    "advice": timedelta(seconds=30),
+    "stops": timedelta(seconds=30),
 }
 
 _CACHE_MISS = object()
@@ -231,14 +245,18 @@ def _cache_load(key: str, loader, fallback):
         return value
 
 
-def _cache_invalidate(key: str | None = None) -> None:
+def _cache_invalidate(key: Optional[str] = None) -> None:
     """Atomically invalidate one cache key or the complete dashboard cache."""
+    global _preheat_cache, _preheat_ts
     with _cache_lock:
         keys = [key] if key else list(_cache)
         for item in keys:
             if item in _cache:
                 _cache[item] = None
                 _cache_time[item] = None
+        if key is None:
+            _preheat_cache = {}
+            _preheat_ts = 0
 
 # =============================================================
 # API 数据组装
@@ -346,7 +364,7 @@ def _load_db_scores():
         scores = []
         for i, row in enumerate(rows, 1):
             code, score, action = row["code"], row["total_score"], row["action"]
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             scores.append({
                 "code": code,
                 "name": name,
@@ -360,7 +378,7 @@ def _load_db_scores():
     for i, row in enumerate(rows, 1):
         code = row["code"]
         score = row["total_score"]
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         try:
             details = json.loads(row["details"] or "{}")
         except (TypeError, json.JSONDecodeError) as exc:
@@ -415,6 +433,7 @@ def _persist_nav_snapshot(snapshot_date: str, portfolio: dict) -> None:
 # v5.6 性能: 预热缓存
 _preheat_cache = {}
 _preheat_ts = 0
+_preheat_lock = threading.RLock()
 
 @app.route("/api/preheat")
 def api_preheat():
@@ -434,17 +453,51 @@ def gather_monitor_data():
     today = now.strftime("%Y-%m-%d")
 
     # 30秒内预热缓存可用
-    if _preheat_cache and time.time() - _preheat_ts < 30:
-        _preheat_cache["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        _preheat_cache["ui_metadata"] = {"version": "5.6.0", "last_refresh": now.strftime("%H:%M:%S"), "alert_count": 0, "uptime_hours": round((now - app_started).total_seconds() / 3600, 1), "cached": True}
-        return _preheat_cache
+    with _preheat_lock:
+        if _preheat_cache and time.time() - _preheat_ts < 30:
+            cached = dict(_preheat_cache)
+            cached["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            cached["ui_metadata"] = {**cached.get("ui_metadata", {}), "version": "6.0.0", "last_refresh": now.strftime("%H:%M:%S"), "uptime_hours": round((now - app_started).total_seconds() / 3600, 1), "cached": True}
+            return cached
 
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
-    scores = _load_db_scores()
+    scores = _cache_load("scores", _load_db_scores, [])
+    prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    prefetch = {
+        "factors": prefetch_executor.submit(
+            _cache_load, "factors", get_current_signals, []
+        ),
+        "market": prefetch_executor.submit(
+            _cache_load, "market", get_market_signal, {}
+        ),
+        "operational_mode": prefetch_executor.submit(
+            _cache_load, "operational_mode", lambda: MarketSense().get_operational_mode(), {}
+        ),
+        "sectors": prefetch_executor.submit(
+            _cache_load, "sectors", lambda: SectorRotationEngine().get_sector_rank(), []
+        ),
+        "etf": prefetch_executor.submit(_get_etf_top5),
+        "dividend": prefetch_executor.submit(_get_dividend_top5),
+        "portfolio": prefetch_executor.submit(_get_portfolio_summary),
+        "targets": prefetch_executor.submit(
+            _cache_load, "targets", _get_target_tracker, []
+        ),
+        "stops": prefetch_executor.submit(
+            _cache_load, "stops", _get_stop_conditions, []
+        ),
+    }
+
+    def _prefetched(name, fallback):
+        try:
+            return prefetch[name].result()
+        except Exception as exc:
+            log.warning("Dashboard prefetch failed for %s: %s", name, exc)
+            return fallback
+
     try:
-        factor_raw = get_current_signals()
+        factor_raw = _prefetched("factors", [])
     except Exception as e:
         log.warning("Factor signals unavailable: %s", e)
         factor_raw = []
@@ -457,12 +510,12 @@ def gather_monitor_data():
         factors.append(item)
 
     try:
-        market = get_market_signal()
+        market = _prefetched("market", {})
     except Exception as e:
         log.warning("Market signal unavailable: %s", e)
         market = {}
     try:
-        operational_mode = MarketSense().get_operational_mode()
+        operational_mode = _prefetched("operational_mode", {})
     except Exception as e:
         log.warning("Market sense unavailable: %s", e)
         operational_mode = {"mode": "neutral", "factor_invert": False,
@@ -470,39 +523,42 @@ def gather_monitor_data():
                            "regime_label": "震荡市", "avg_20d_return": 0}
 
     try:
-        sector_engine = SectorRotationEngine()
-        sectors = sector_engine.get_sector_rank()
+        sectors = _prefetched("sectors", [])
     except Exception as e:
         log.warning("Sector rotation unavailable: %s", e)
         sectors = []
 
-    ratings = []
-    for code in ALL_CODES:
-        name = STOCK_MAP.get(code, {}).get("name", code)
-        try:
-            r = get_rating(code)
-            ratings.append({"code": code, "name": name,
-                            "rating": r.get("rating", "N/A"),
-                            "rating_emoji": r.get("rating_emoji", "❓"),
-                            "score": r.get("score", 0),
-                            "signal_label": r.get("signal_label", "N/A"),
-                            "signal_emoji": r.get("signal_emoji", "⚪")})
-        except Exception as exc:
-            log.debug("Rating unavailable for %s: %s", code, exc)
-            ratings.append({"code": code, "name": name, "rating": "N/A",
-                            "rating_emoji": "❓", "score": 0,
-                            "signal_label": "N/A", "signal_emoji": "⚪"})
+    def _load_ratings():
+        result = []
+        for code in ALL_CODES:
+            name = get_stock_name(code)
+            try:
+                rating = get_rating(code)
+                result.append({"code": code, "name": name,
+                               "rating": rating.get("rating", "N/A"),
+                               "rating_emoji": rating.get("rating_emoji", "❓"),
+                               "score": rating.get("score", 0),
+                               "signal_label": rating.get("signal_label", "N/A"),
+                               "signal_emoji": rating.get("signal_emoji", "⚪")})
+            except Exception as exc:
+                log.debug("Rating unavailable for %s: %s", code, exc)
+                result.append({"code": code, "name": name, "rating": "N/A",
+                               "rating_emoji": "❓", "score": 0,
+                               "signal_label": "N/A", "signal_emoji": "⚪"})
+        return result
+
+    ratings = _cache_load("ratings", _load_ratings, [])
 
     # 每日净值快照（后台保存，不影响响应）
     try:
-        _persist_nav_snapshot(today, _get_portfolio_summary())
+        _persist_nav_snapshot(today, _prefetched("portfolio", {}))
     except Exception as exc:
         log.warning("NAV snapshot persistence failed: %s", exc, exc_info=True)
 
     # 🆕 v3.0 UZI AI产业链卡位面板
     try:
         from uzi_insight import get_chain_summary_table
-        uzi_chain = get_chain_summary_table()
+        uzi_chain = _cache_load("uzi", get_chain_summary_table, [])
     except Exception as e:
         log.warning("UZI chain unavailable: %s", e)
         uzi_chain = []
@@ -539,7 +595,9 @@ def gather_monitor_data():
     except Exception:
         pass
 
-    return {
+    pf_summary = _prefetched("portfolio", {})
+    signal_brief = _build_signal_brief(scores, pf_summary)
+    result = {
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": today,
         "scores": scores,
@@ -550,13 +608,13 @@ def gather_monitor_data():
         "ratings": ratings,
         "signal_factors": SIGNAL_FACTORS,
         "factor_labels": FACTOR_LABELS,
-        "etf_top5": _get_etf_top5(),
-        "dividend_top5": _get_dividend_top5(),
-        "portfolio_summary": _get_portfolio_summary(),
-        "signal_brief": _build_signal_brief(scores, _get_portfolio_summary()),
-        "target_tracker": _get_target_tracker(),
-        "position_advice": _get_position_advice(scores),
-        "stop_conditions": _get_stop_conditions(),
+        "etf_top5": _prefetched("etf", []),
+        "dividend_top5": _prefetched("dividend", []),
+        "portfolio_summary": pf_summary,
+        "signal_brief": signal_brief,
+        "target_tracker": _prefetched("targets", []),
+        "position_advice": _get_position_advice_fast(scores, pf_summary),
+        "stop_conditions": _prefetched("stops", []),
         "auto_gate": _get_auto_gate_card(),
         "operational_mode": operational_mode,
         "quantdinger_consensus": _get_quantdinger_consensus(),
@@ -570,13 +628,18 @@ def gather_monitor_data():
         },
         # v5.0 ui_metadata
         "ui_metadata": {
-            "version": "5.1.0",
+            "version": "6.0.0",
             "action_bar": ["refresh", "copy", "status"],
             "last_refresh": now.strftime("%H:%M:%S"),
-            "alert_count": len(_build_signal_brief(scores, _get_portfolio_summary()).get("risk_alerts", [])),
+            "alert_count": len(signal_brief.get("risk_alerts", [])),
             "uptime_hours": round((now - app_started).total_seconds() / 3600, 1),
         },
     }
+    with _preheat_lock:
+        _preheat_cache = result
+        _preheat_ts = time.time()
+    prefetch_executor.shutdown(wait=False)
+    return result
 
 
 def _get_position_advice(scores):
@@ -882,6 +945,61 @@ def _build_signal_brief(scores, pf_summary):
     }
 
 
+def _get_position_advice_fast(scores: list[dict], pf_summary: dict) -> dict:
+    """用已加载快照生成展示建议，不在请求内重复运行仓位引擎。"""
+    score_map = {item["code"]: item for item in scores}
+    positions = pf_summary.get("position_details") or []
+    holdings_advice = []
+    for position in positions:
+        item = score_map.get(position.get("code"), {})
+        score = float(item.get("total_score") or 50)
+        action = item.get("signal_action", "HOLD")
+        profit = float(position.get("profit_pct") or 0)
+        if action in ("SELL", "STOP_LOSS") or score < 48:
+            suggestion, reason = "EXIT", f"信号转弱，评分 {score:.0f}"
+        elif profit >= 15:
+            suggestion, reason = "TAKE_PARTIAL", f"浮盈 {profit:.1f}%，复核止盈"
+        elif action in ("WATCH", "WEAK_HOLD"):
+            suggestion, reason = "WATCH", "信号转弱，保持观察"
+        else:
+            suggestion, reason = "HOLD", f"评分 {score:.0f}，继续持有"
+        holdings_advice.append({
+            "code": position.get("code"),
+            "name": position.get("name", position.get("code")),
+            "score": score,
+            "action": action,
+            "suggest": suggestion,
+            "reason": reason,
+            "profit_pct": round(profit, 2),
+            "kelly_max_shares": 0,
+            "kelly_max_amount": 0,
+            "kelly_cash_pct": 0,
+        })
+
+    held_codes = {item.get("code") for item in positions}
+    buy_candidates = [
+        {
+            "code": item["code"],
+            "name": item.get("name", item["code"]),
+            "score": item.get("total_score", 0),
+            "action": item.get("signal_action", "HOLD"),
+            "suggested_shares": 0,
+            "suggested_amount": 0,
+        }
+        for item in scores
+        if item["code"] not in held_codes
+        and item.get("signal_action") in ("BUY", "STRONG_BUY", "CAUTION_BUY")
+    ]
+    buy_candidates.sort(key=lambda item: item["score"], reverse=True)
+    return {
+        "holdings_advice": holdings_advice,
+        "buy_candidates": buy_candidates[:3],
+        "cash": pf_summary.get("cash", 0),
+        "max_positions": CAPITAL_CONFIG.get("max_positions", 0),
+        "sizing_deferred": True,
+    }
+
+
 def _get_etf_top5():
     """ETF 动量轮动 Top 5（30分钟缓存）"""
     def load():
@@ -1016,7 +1134,7 @@ def _db_only_portfolio_summary():
         holdings_value = 0.0
         for s in stocks:
             code = s["code"]
-            name = s["name"] or STOCK_MAP.get(code, {}).get("name", code)
+            name = s["name"] or get_stock_name(code)
             buy_price = s["buy_price"] or 0
 
             # 净持股 (从 trades 表计算)
@@ -1138,7 +1256,7 @@ def api_signal_history():
     for r in rows:
         result.append({
             "code": r["code"],
-            "name": STOCK_MAP.get(r["code"], {}).get("name", r["code"]),
+            "name": get_stock_name(r["code"]),
             "date": r["date"],
             "time": r["time"],
             "action": r["action"],
@@ -1624,7 +1742,7 @@ def api_get_config(code):
         "ok": True,
         "data": {
             "code": code,
-            "name": stock.get("name", ""),
+            "name": stock.get("name") or get_stock_name(code),
             "stop_loss": stock.get("stop_loss", 0),
             "target_high": stock.get("target_high", 0),
             "target_low": stock.get("target_low", 0),
@@ -1669,7 +1787,7 @@ def api_journal():
         stats = get_stats()
         # Attach name to each entry
         for e in entries:
-            e["name"] = STOCK_MAP.get(e["code"], {}).get("name", e["code"])
+            e["name"] = get_stock_name(e["code"])
         result = {"ok": True, "entries": entries, "stats": stats}
         if synced > 0:
             result["synced"] = synced
@@ -1859,7 +1977,7 @@ def api_anomalies():
             anomalies.append({
                 "id": row["id"],
                 "code": row["code"],
-                "name": row.get("name") or STOCK_MAP.get(row["code"], {}).get("name", row["code"]),
+                "name": row.get("name") or get_stock_name(row["code"]),
                 "level": row["level"],
                 "type": row["alert_type"],
                 "price": row["price"],
@@ -1930,7 +2048,7 @@ def api_nl_query():
                             "sells": sells})
         if intent == "alert":
             raw = [dict(item) for item in get_unacknowledged_anomalies(limit=10)]
-            alerts = [{"code": item["code"], "level": item["level"], "msg": item["message"][:120]}
+            alerts = [{"code": item["code"], "name": get_stock_name(item["code"]), "level": item["level"], "msg": item["message"][:120]}
                       for item in raw]
             emergency = sum(item["level"] == "A" for item in raw)
             return jsonify({"ok": True, "intent": intent, "emergency": emergency,
@@ -2428,20 +2546,29 @@ def api_v4_governance():
     # ── 1. 内核冻结状态 ──
     freeze_data = {"frozen": True, "modules": [], "total_frozen": 0, "total_managed": 0}
     try:
-        from kernel_freeze import frozen_summary
-        fs = frozen_summary()
+        from kernel_freeze import FROZEN_MANIFEST, all_frozen_ids
+        frozen_ids = set(all_frozen_ids())
         freeze_data = {
-            "frozen": True,
-            "modules": fs.get("modules", []),
-            "total_frozen": fs.get("total_frozen", 0),
-            "total_managed": fs.get("total_managed", 0),
-            "last_freeze": fs.get("last_freeze", ""),
-            "freeze_reason": fs.get("freeze_reason", ""),
+            "frozen": bool(frozen_ids),
+            "modules": [
+                {
+                    "id": module_id,
+                    "frozen": module_id in frozen_ids,
+                    "description": config.get("description", ""),
+                    "frozen_since": config.get("frozen_since", ""),
+                }
+                for module_id, config in FROZEN_MANIFEST.items()
+            ],
+            "total_frozen": len(frozen_ids),
+            "total_managed": len(FROZEN_MANIFEST),
+            "last_freeze": max(
+                (item.get("frozen_since", "") for item in FROZEN_MANIFEST.values()),
+                default="",
+            ),
+            "freeze_reason": "交易内核冻结期",
         }
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取冻结状态失败: %s", exc)
 
     # ── 2. 三系统对比 ──
     comparison = {
@@ -2458,10 +2585,8 @@ def api_v4_governance():
         a_signals = bc.get_signals_today() if hasattr(bc, "get_signals_today") else []
         comparison["system_a"]["total_signals"] = len(a_signals)
         comparison["system_a"]["top3"] = a_signals[:3]
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取 Frozen Baseline 失败: %s", exc)
 
     try:
         from frozen_baseline import BaselineComparator
@@ -2470,21 +2595,17 @@ def api_v4_governance():
         b_signals = bc.get_adaptive_signals() if hasattr(bc, "get_adaptive_signals") else []
         comparison["system_b"]["total_signals"] = len(b_signals)
         comparison["system_b"]["top3"] = b_signals[:3]
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取 Adaptive 信号失败: %s", exc)
 
     try:
         from equal_weight_basket import EqualWeightBasket
         eb = EqualWeightBasket()
-        comparison["system_c"]["daily_return"] = eb.get_daily_return() if hasattr(eb, "get_daily_return") else 0
-        comparison["system_c"]["weekly_return"] = eb.get_weekly_return() if hasattr(eb, "get_weekly_return") else 0
+        comparison["system_c"]["daily_return"] = eb.get_daily_return() * 100 if hasattr(eb, "get_daily_return") else 0
+        comparison["system_c"]["weekly_return"] = eb.get_weekly_return() * 100 if hasattr(eb, "get_weekly_return") else 0
         comparison["system_c"]["nav"] = eb.get_nav() if hasattr(eb, "get_nav") else 0
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取等权组合失败: %s", exc)
 
     # 分歧计算
     try:
@@ -2504,13 +2625,14 @@ def api_v4_governance():
                     "in_system_a": a_hit is not None,
                     "in_system_b": b_hit is not None,
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板计算系统分歧失败: %s", exc)
 
     # ── 3. 审计日志统计 ──
     audit_stats = {
         "total": 0, "executed": 0, "blocked": 0, "overridden": 0, "settled": 0,
         "execution_rate": 0, "override_rate": 0, "pending_settlements": 0,
+        "replay_ready": 0, "legacy_incomplete": 0,
     }
     try:
         from audit_logger import get_audit_logger
@@ -2523,32 +2645,30 @@ def api_v4_governance():
             "overridden": raw.get("overridden", 0),
             "settled": raw.get("settled", 0),
             "pending_settlements": raw.get("pending_settlements", 0),
+            "replay_ready": raw.get("replay_ready", 0),
+            "legacy_incomplete": raw.get("legacy_incomplete", 0),
         })
         total_decisions = audit_stats["total"] or 1
         audit_stats["execution_rate"] = round(audit_stats["executed"] / total_decisions * 100, 1)
         audit_stats["override_rate"] = round(audit_stats["overridden"] / total_decisions * 100, 1)
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取审计统计失败: %s", exc)
 
     # ── 4. 观察模式状态 ──
     obs_status = {"mode": "NORMAL", "trigger_reason": "", "time_entered": "", "days_remaining": 0, "liquidation_status": ""}
     try:
-        from observation_mode import get_status
-        obs = get_status() if callable(get_status) else {}
+        from observation_mode import get_observer
+        obs = get_observer().get_status()
         if obs:
             obs_status.update({
                 "mode": obs.get("mode", "NORMAL"),
                 "trigger_reason": obs.get("trigger_reason", ""),
-                "time_entered": obs.get("time_entered", ""),
+                "time_entered": obs.get("entered_at", ""),
                 "days_remaining": obs.get("days_remaining", 0),
                 "liquidation_status": obs.get("liquidation_status", ""),
             })
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取观察模式失败: %s", exc)
 
     return jsonify({
         "ok": True,
@@ -2751,7 +2871,7 @@ def _quick_position_pnl(conn) -> dict:
         total_cost += cost
         positions.append({
             "code": row["code"],
-            "name": row["name"],
+            "name": row["name"] or get_stock_name(row["code"]),
             "shares": shares,
             "buy_price": round(float(row["buy_price"] or 0), 3),
             "current_price": round(float(row["current_price"] or 0), 3),
@@ -2815,7 +2935,7 @@ def api_quick():
         raw = get_unacknowledged_anomalies(limit=5)
         alerts = [{
             "code": a["code"],
-            "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+            "name": get_stock_name(a["code"]),
             "level": a["level"],
             "msg": a["message"][:100],
         } for a in raw]
@@ -2870,7 +2990,7 @@ def api_quick_alerts():
         for a in raw:
             items.append({
                 "code": a["code"],
-                "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+                "name": get_stock_name(a["code"]),
                 "level": a["level"],
                 "type": a["alert_type"],
                 "msg": a["message"][:150],

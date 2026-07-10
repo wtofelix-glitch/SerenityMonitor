@@ -9,9 +9,9 @@ from __future__ import annotations
 import math
 import sqlite3
 from datetime import datetime
-from typing import Any
+from typing import Optional, Any
 
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 from db import get_conn
 
 
@@ -117,7 +117,7 @@ def _is_mainboard(code: str) -> bool:
 
 
 def _stock_name(code: str) -> str:
-    return STOCK_MAP.get(str(code), {}).get("name", str(code))
+    return get_stock_name(str(code))
 
 
 def _status(score: float) -> str:
@@ -144,7 +144,7 @@ def get_method_sources() -> list[dict[str, str]]:
     return [dict(item) for item in METHOD_SOURCES]
 
 
-def _normalize_ic_payload(ic_data: dict[str, Any] | None) -> dict[str, Any]:
+def _normalize_ic_payload(ic_data: Optional[dict[str, Any]]) -> dict[str, Any]:
     if ic_data is not None:
         return ic_data
     try:
@@ -155,7 +155,7 @@ def _normalize_ic_payload(ic_data: dict[str, Any] | None) -> dict[str, Any]:
         return {"error": f"Rank IC 计算失败: {exc}"}
 
 
-def build_factor_health(ic_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def build_factor_health(ic_data: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """把 Rank IC 压缩为一个可用于候选闸门的因子健康分。"""
     payload = _normalize_ic_payload(ic_data)
     if payload.get("error"):
@@ -461,7 +461,7 @@ def _build_perf_index(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"exact": exact, "action": _aggregate_action_rows(rows)}
 
 
-def _load_perf_from_signal_log(conn: sqlite3.Connection) -> dict[str, Any] | None:
+def _load_perf_from_signal_log(conn: sqlite3.Connection) -> Optional[dict[str, Any]]:
     if not _table_exists(conn, "signal_log"):
         return None
     columns = _columns(conn, "signal_log")
@@ -795,9 +795,9 @@ def _build_recommendations(report: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def build_alpha_gate_report(
-    conn: sqlite3.Connection | None = None,
+    conn: sqlite3.Optional[Connection] = None,
     limit: int = 10,
-    ic_data: dict[str, Any] | None = None,
+    ic_data: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """构建 Alpha Gate 报告。conn 传入时由调用方负责关闭。"""
     should_close = conn is None
@@ -838,7 +838,7 @@ def build_alpha_gate_report(
             conn.close()
 
 
-def format_alpha_gate_report(report: dict[str, Any] | None = None) -> str:
+def format_alpha_gate_report(report: Optional[dict[str, Any]] = None) -> str:
     """格式化 CLI 输出。"""
     report = report or build_alpha_gate_report()
     factor_health = report["factor_health"]

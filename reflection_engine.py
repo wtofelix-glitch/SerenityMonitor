@@ -27,7 +27,7 @@ from db import (
     get_reflections, get_unfilled_reflections, get_reflection_dimension_ic,
     get_price_history, get_signal_performance,
 )
-from config import STOCK_MAP, ALL_CODES
+from config import STOCK_MAP, ALL_CODES, get_stock_name
 
 # 从 scoring_history 获取最新评分数据
 def _get_latest_scores() -> list[dict]:
@@ -185,7 +185,7 @@ def generate_reflection(code: str) -> dict:
 
     # 生成反思文本
     lines = []
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     lines.append(f"📊 {name}({code}) 反思报告")
 
     total = latest.get("total_score", 0)

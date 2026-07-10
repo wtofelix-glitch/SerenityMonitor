@@ -1,0 +1,27 @@
+{
+  "snapshot_at": "2026-07-09 08:19:04",
+  "source": "broker_manual",
+  "total_assets": null,
+  "holdings_value": null,
+  "cash": null,
+  "daily_profit": 0,
+  "daily_profit_pct": 0,
+  "positions": [
+    {
+      "code": "000988",
+      "name": "华工科技",
+      "shares": 200,
+      "market_value": null,
+      "profit_pct": null
+    },
+    {
+      "code": "600036",
+      "name": "招商银行",
+      "shares": 700,
+      "market_value": null,
+      "profit_pct": null
+    }
+  ],
+  "evidence_path": "",
+  "notes": "Fill from broker account screenshot/export. Do not use internal NAV as broker evidence."
+}

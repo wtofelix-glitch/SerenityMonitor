@@ -26,7 +26,8 @@ from datetime import date
 from serenity_logger import get_logger
 from db import get_conn, load_all_stocks
 from config import (
-    STOCK_MAP, STOCK_DETAILS, ALL_CODES, TIER_1_CODES,
+    TIER_4_CODES,
+    STOCK_MAP, STOCK_DETAILS, ALL_CODES, TIER_1_CODES, get_stock_name,
     SIGNAL_CONFIG, CAPITAL_CONFIG, RISK_CONFIG,
 )
 
@@ -192,6 +193,16 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
 
     total_value = compute_total_portfolio_value(holdings, cash)
 
+    try:
+        from observation_mode import get_observer
+        observer = get_observer()
+        observation_status = observer.get_status()
+        allow_new_positions = observer.is_trading_allowed()
+    except Exception as exc:
+        log.error("观察模式状态不可用，按 fail-closed 禁止新开仓: %s", exc)
+        observation_status = {"mode": "UNKNOWN", "trigger_reason": str(exc)}
+        allow_new_positions = False
+
     # ── 风险检查（熔断 + 最大回撤 + 日亏损） ──
     risk_check = risk.is_trade_allowed(
         code="", action="SELL",
@@ -207,7 +218,12 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
     # ── 熔断保护：总回撤 > 12% → 强制清仓 ──
     # 基准为nav_history峰值（非初始资金），避免误触发
     try:
-        _peak_row = conn.execute("SELECT COALESCE(MAX(total_value), ?) as peak FROM nav_history", (total_value,)).fetchone()
+        _conn = get_conn()
+        _peak_row = _conn.execute(
+            "SELECT COALESCE(MAX(total_value), ?) as peak FROM nav_history",
+            (total_value,),
+        ).fetchone()
+        _conn.close()
         _peak_nav = _peak_row["peak"] if _peak_row else total_value
     except Exception:
         _peak_nav = total_value
@@ -216,7 +232,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         sells = []
         for h in holdings:
             code = h["code"]
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             amt = h.get("trade_amount", 0) or 0
             buy_price = h.get("buy_price", 1)
             shares = int(amt / buy_price / 100) * 100 if buy_price > 0 else 0
@@ -274,7 +290,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
     # ── Phase 1: 检查持仓是否需要卖出 ──────────────────────
     for h in holdings:
         code = h["code"]
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         s = scores.get(code, {})
         score = s.get("total_score", 50)
 
@@ -316,10 +332,12 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         # 条件4: 评分连续衰减 — 3天连降且无反弹迹象 → 建议减仓/换仓
         # 不强卖（留决策空间），但加警告标记
         try:
-            _score_rows = conn.execute(
+            _conn = get_conn()
+            _score_rows = _conn.execute(
                 "SELECT total_score FROM scoring_history WHERE code=? ORDER BY date DESC LIMIT 4",
                 (code,)
             ).fetchall()
+            _conn.close()
             if len(_score_rows) >= 3:
                 _scores = [r[0] for r in _score_rows if r[0] is not None]
                 if len(_scores) >= 3 and _scores[0] < _scores[1] < _scores[2]:
@@ -332,19 +350,50 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             pass
 
         if should_sell:
-            # v4 Phase 1: 微观结构约束 — 卖单可执行性
-            if _MICROSTRUCTURE_AVAILABLE:
-                try:
-                    ms = get_microstructure()
-                    can_sell = ms.can_sell(code)
-                    if not can_sell.get("executable", True):
-                        log.info("微观结构阻止卖出 %s: %s", code, can_sell.get("reason", "unknown"))
-                        continue
-                except Exception as _me:
-                    log.debug("微观结构检查跳过(卖出 %s): %s", code, _me)
             amt = h.get("trade_amount", 0) or 0
             buy_price = h.get("buy_price", 1)
             shares = int(amt / buy_price / 100) * 100 if buy_price > 0 else 0
+
+            # ── v4 §10.2 T4 防御底仓强制执行 ──────────────────
+            if code in TIER_4_CODES:
+                _t4_floor = _eff_cap.get("t4_defensive_floor_pct", 0.20)
+                _sell_value = shares * close
+                _t4_current = sum(
+                    (_h.get("trade_amount", 0) or 0)
+                    for _h in holdings if _h["code"] in TIER_4_CODES
+                )
+                _t4_after_sell = _t4_current - _sell_value
+                if total_value > 0 and (_t4_after_sell / total_value) < _t4_floor:
+                    # 计算最多能卖多少而不跌破底仓线
+                    _max_sellable = max(0, _t4_current - total_value * _t4_floor)
+                    if _max_sellable <= 0:
+                        log.info("T4 防御底仓保护: 阻止卖出 %s (T4=%.1f%%, 卖出后=%.1f%%, 下限=%.0f%%)",
+                                 code, _t4_current/total_value*100, _t4_after_sell/total_value*100, _t4_floor*100)
+                        continue
+                    else:
+                        # 部分卖出：只卖到不跌破底仓线的量
+                        _max_shares = int(_max_sellable / close / 100) * 100
+                        if _max_shares < 100:
+                            log.info("T4 防御底仓保护: 可卖量不足 1 手, 阻止卖出 %s", code)
+                            continue
+                        else:
+                            shares = min(shares, _max_shares)
+                            log.info("T4 防御底仓: %s 减至 %d 股 (部分卖出, 维持≥%.0f%%)",
+                                     code, shares, _t4_floor*100)
+                            reasons.append(f"T4底仓: 部分卖出至{shares}股, 维持≥{_t4_floor*100:.0f}%")
+            # ── end T4 floor ──────────────────────────────
+
+            if _MICROSTRUCTURE_AVAILABLE:
+                try:
+                    can_sell = get_microstructure().can_sell(
+                        code, shares, date.today(), close, shares, details
+                    )
+                    if not can_sell.executable:
+                        log.info("微观结构阻止卖出 %s: %s", code, can_sell.block_reason)
+                        continue
+                except Exception as exc:
+                    log.error("微观结构卖出检查失败，阻止 %s: %s", code, exc)
+                    continue
             estimated_proceeds = shares * close
             profit_pct = ((close - buy_price) / buy_price * 100) if buy_price > 0 else 0
 
@@ -380,7 +429,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                     _est = _sell_shares * _sa.get("price", _bp)
                     sells.append({
                         "code": _sa["code"],
-                        "name": STOCK_MAP.get(_sa["code"], {}).get("name", _sa["code"]),
+                        "name": get_stock_name(_sa["code"]),
                         "action": "SELL_PARTIAL",
                         "score": scores.get(_sa["code"], {}).get("total_score", 0),
                         "shares": _sell_shares,
@@ -436,10 +485,10 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                     if score >= worst_held_score + _swap_gap:
                         swap_candidates.append({
                             "code": code,
-                            "name": STOCK_MAP.get(code, {}).get("name", code),
+                            "name": get_stock_name(code),
                             "score": score,
                             "swap_out_code": worst_held,
-                            "swap_out_name": STOCK_MAP.get(worst_held, {}).get("name", worst_held),
+                            "swap_out_name": get_stock_name(worst_held),
                             "swap_out_score": worst_held_score,
                             "score_gap": round(score - worst_held_score, 1),
                         })
@@ -529,7 +578,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             add_amount = add_shares * price
             buys.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "action": "TOPUP",
                 "score": score,
                 "signal": signal,
@@ -580,7 +629,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
 
         buy_candidates.append({
             "code": code,
-            "name": STOCK_MAP.get(code, {}).get("name", code),
+            "name": get_stock_name(code),
             "score": score,
             "signal": signal,
             "price": close,
@@ -589,6 +638,7 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             "zone_label": zone_label,
             "effective_score": score + tier_bonus,
             "reason": STOCK_DETAILS.get(code, {}).get("reason", ""),
+            "snapshot": details,
         })
 
     # 按有效评分排序
@@ -601,6 +651,14 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
 
         code_check = candidate["code"]
 
+        if not allow_new_positions:
+            log.info(
+                "观察模式 %s 阻止新开仓 %s",
+                observation_status.get("mode", "UNKNOWN"),
+                code_check,
+            )
+            continue
+
         # 风控检查：黑名单 + 冷却 + 行业集中度
         risk_check = risk.is_trade_allowed(
             code=code_check, action="BUY",
@@ -612,22 +670,6 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         if not risk_check["allowed"]:
             log.info("风控拦截买入 %s: %s", code_check, "; ".join(risk_check["reasons"]))
             continue
-
-        # v4 Phase 1: 微观结构约束 — 买单可执行性 + T+1 锁仓
-        if _MICROSTRUCTURE_AVAILABLE:
-            try:
-                ms = get_microstructure()
-                # T+1 锁仓聚合检查：累计不得超过 40%
-                t1 = ms.check_t1_lock_aggregate(code_check)
-                if t1.get("locked_pct", 0) > 0.40:
-                    log.info("T+1 锁仓阻止买入 %s: 累计%.0f%%", code_check, t1.get("locked_pct", 0) * 100)
-                    continue
-                can_result = ms.can_buy(code_check, candidate["price"])
-                if not can_result.get("executable", True):
-                    log.info("微观结构阻止买入 %s: %s", code_check, can_result.get("reason", "unknown"))
-                    continue
-            except Exception as _me:
-                log.debug("微观结构/锁仓检查跳过(买入 %s): %s", code_check, _me)
 
         price = candidate["price"]
         if price <= 0:
@@ -645,6 +687,32 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         amount = shares * price
         if amount < _eff_cap.get("min_single_weight", CAPITAL_CONFIG.get("min_single_weight", 0.25)) * total_value:
             continue
+
+        if _MICROSTRUCTURE_AVAILABLE:
+            try:
+                ms = get_microstructure()
+                price_map = {
+                    h["code"]: float(
+                        _parse_details(scores.get(h["code"], {}).get("details", "{}"))
+                        .get("price", h.get("buy_price", 0))
+                    )
+                    for h in holdings
+                }
+                t1 = ms.check_t1_lock_aggregate(
+                    code_check, amount, total_value, price_map
+                )
+                if not t1.executable:
+                    log.info("T+1 锁仓阻止买入 %s: %s", code_check, t1.block_reason)
+                    continue
+                can_result = ms.can_buy(
+                    code_check, date.today(), price, shares, candidate.get("snapshot")
+                )
+                if not can_result.executable:
+                    log.info("微观结构阻止买入 %s: %s", code_check, can_result.block_reason)
+                    continue
+            except Exception as exc:
+                log.error("微观结构买入检查失败，阻止 %s: %s", code_check, exc)
+                continue
 
         buys.append({
             "code": candidate["code"],
@@ -664,6 +732,13 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         open_slots -= 1
 
     # ── Phase 3: 生成摘要 ──────────────────────────────────
+    from auto_gate import estimate_net_expected_return
+    for buy in buys:
+        edge = estimate_net_expected_return(
+            buy["code"], buy.get("signal", "BUY")
+        )
+        buy["net_edge"] = edge
+
     summary_lines = []
     summary_lines.append(f"📊 Serenity 自动执行计划 | {today}  大盘: {market['trend']}")
     summary_lines.append(f"{'='*60}")
@@ -690,6 +765,13 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
                 f"≈{b['amount']:.0f}元 评分{b['score']:.0f} {b['signal']}"
             )
             summary_lines.append(f"     └ {b['reason'][:60]}")
+            edge = b.get("net_edge") or {}
+            if edge.get("net_pct") is None:
+                summary_lines.append("     └ 净期望: 样本不足，仅供 MANUAL 复核")
+            else:
+                summary_lines.append(
+                    f"     └ 净期望: {edge['net_pct']:+.2f}% / {edge['samples']} 样本"
+                )
 
     if not sells and not buys and not swap_candidates:
         summary_lines.append("\n✅ 无需操作：持仓评分均在持有区间，无可买入信号")
@@ -733,7 +815,43 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
             summary_lines.append(f"  python3 cli.py trade {b['code']} buy {b['amount']:.0f}")
     
     summary_lines.append(f"{'='*60}")
-    
+
+    # ── v4 Phase 4: 人机交互审计标记 ──
+    _override_decision_ids = []
+    for _s in sells:
+        try:
+            from audit_logger import get_audit_logger as _gal
+            _d = _gal()
+            _did = _d.log_signal(
+                code=_s["code"],
+                signal_type="SELL",
+                total_score=_s.get("score", 0),
+                score_components={"profit_pct": _s.get("profit_pct", 0)},
+                can_execute=True,
+                baseline_signal="", adaptive_signal="",
+                risk_checks={"plan_generated": True, "sell_reasons": _s.get("reasons", [])},
+            )
+            _override_decision_ids.append(_did)
+        except Exception:
+            pass
+    for _b in buys:
+        try:
+            from audit_logger import get_audit_logger as _gal
+            _d = _gal()
+            _did = _d.log_signal(
+                code=_b["code"],
+                signal_type=_b.get("signal", "BUY"),
+                total_score=_b.get("score", 0),
+                score_components={"price": _b.get("price", 0), "amount": _b.get("amount", 0)},
+                can_execute=True,
+                baseline_signal="", adaptive_signal="",
+                risk_checks={"plan_generated": True},
+                suggested_position=_b.get("amount", 0),
+            )
+            _override_decision_ids.append(_did)
+        except Exception:
+            pass
+
     return {
         "date": today,
         "cash": cash,
@@ -743,6 +861,8 @@ def generate_execution_plan(dry_run: bool = False) -> dict:
         "buys": buys,
         "swaps": swap_candidates,
         "summary": "\n".join(summary_lines),
+        "observation": observation_status,
+        "pending_review_decision_ids": _override_decision_ids,
     }
 
 
@@ -759,6 +879,9 @@ def _check_tradability_for_plan(plan: dict) -> dict:
         ms = get_microstructure()
     except Exception as e:
         log.warning("无法初始化 MarketMicrostructure: %s", e)
+        for order in plan.get("sells", []) + plan.get("buys", []):
+            order["blocked"] = True
+            order["block_reason"] = f"微观结构不可用: {e}"
         return plan
 
     # 检查卖单
@@ -766,31 +889,65 @@ def _check_tradability_for_plan(plan: dict) -> dict:
         if s.get("blocked"):
             continue
         try:
-            result = ms.can_sell(s["code"])
-            if not result.get("executable", True):
+            shares = int(s.get("shares", 0))
+            price = float(s.get("price") or (
+                s.get("estimated_proceeds", 0) / shares if shares else 0
+            ))
+            result = ms.can_sell(
+                s["code"], shares, date.today(), price, shares, s.get("snapshot")
+            )
+            if not result.executable:
                 s["blocked"] = True
-                s["block_reason"] = result.get("reason", "microstructure check failed")
+                s["block_reason"] = result.block_reason
                 log.info("tradability blocked SELL %s: %s", s["code"], s["block_reason"])
         except Exception as e:
-            log.debug("can_sell 检查异常 %s: %s", s["code"], e)
+            s["blocked"] = True
+            s["block_reason"] = f"微观结构检查异常: {e}"
+            log.error("can_sell 检查异常，已阻止 %s: %s", s["code"], e)
 
     # 检查买单
     for b in plan.get("buys", []):
         if b.get("blocked"):
             continue
         try:
-            result = ms.can_buy(b["code"], b.get("price", 0))
-            if not result.get("executable", True):
+            result = ms.can_buy(
+                b["code"], date.today(), float(b.get("price", 0)),
+                int(b.get("shares", 0)), b.get("snapshot"),
+            )
+            if not result.executable:
                 b["blocked"] = True
-                b["block_reason"] = result.get("reason", "microstructure check failed")
+                b["block_reason"] = result.block_reason
                 log.info("tradability blocked BUY %s: %s", b["code"], b["block_reason"])
         except Exception as e:
-            log.debug("can_buy 检查异常 %s: %s", b["code"], e)
+            b["blocked"] = True
+            b["block_reason"] = f"微观结构检查异常: {e}"
+            log.error("can_buy 检查异常，已阻止 %s: %s", b["code"], e)
 
     return plan
 
 
 # ── 强制信号执行 ──────────────────────────────────────
+
+def _require_mutating_execution_gate(label: str) -> dict:
+    """Return the current gate and whether this path may mutate execution state."""
+    from auto_gate import evaluate_auto_gate, format_gate_report
+
+    try:
+        gate = evaluate_auto_gate(explain=False)
+    except Exception as exc:
+        print(f"🔒 {label} blocked: gate evaluation failed: {exc}")
+        return {
+            "allowed": False,
+            "state": "LOCKED",
+            "reason": f"gate_unavailable: {exc}",
+        }
+
+    print(format_gate_report(gate))
+    if gate.get("state") != "SEMI_AUTO":
+        print(f"🔒 {label} blocked: SEMI_AUTO requires passing gate + compliance_status=approved")
+        return {"allowed": False, **gate}
+    return {"allowed": True, **gate}
+
 
 def _record_execution_orders(plan: dict):
     """将调仓计划中的订单写入执行日志"""
@@ -800,6 +957,8 @@ def _record_execution_orders(plan: dict):
     conn = get_conn()
     # 先清理当日旧记录，避免重复
     for s in plan["sells"]:
+        if s.get("blocked"):
+            continue
         existing = conn.execute(
             "SELECT COUNT(*) FROM execution_log"
             " WHERE date = ? AND code = ? AND action = ? AND status = ?",
@@ -817,6 +976,19 @@ def _record_execution_orders(plan: dict):
         """, (today, s["code"], "SELL", s["shares"], s["estimated_proceeds"],
               "; ".join(s.get("reasons", []))[:200]))
     for b in plan["buys"]:
+        if b.get("blocked"):
+            continue
+        edge = b.get("net_edge")
+        if not isinstance(edge, dict):
+            from auto_gate import estimate_net_expected_return
+            edge = estimate_net_expected_return(b["code"], b.get("signal", "BUY"))
+            b["net_edge"] = edge
+        if not edge.get("ready"):
+            log.info(
+                "跳过买入 %s: 净期望证据不足 samples=%s net=%s",
+                b["code"], edge.get("samples", 0), edge.get("net_pct"),
+            )
+            continue
         existing = conn.execute(
             "SELECT COUNT(*) FROM execution_log"
             " WHERE date = ? AND code = ? AND action = ? AND status = ?",
@@ -837,12 +1009,17 @@ def _record_execution_orders(plan: dict):
     conn.close()
 
 
-def _retry_pending_executions(dry_run: bool = False) -> int:
+def _retry_pending_executions(dry_run: bool = False, gate_checked: bool = False) -> int:
     """重试当天待执行的订单（最多 3 次）"""
     from db import get_conn, clear_active, set_active, add_trade, init_db
     init_db()
     from data_engine import fetch_single
     from config import STOCK_DETAILS
+
+    if not dry_run and not gate_checked:
+        gate = _require_mutating_execution_gate("retry-pending")
+        if not gate.get("allowed"):
+            return 0
 
     today = date.today().isoformat()
     conn = get_conn()
@@ -859,6 +1036,22 @@ def _retry_pending_executions(dry_run: bool = False) -> int:
         code = r["code"]
         action = r["action"]
         attempt = r["attempt"] + 1
+
+        if action == "BUY":
+            try:
+                from observation_mode import get_observer
+                if not get_observer().is_trading_allowed():
+                    _update_execution(
+                        code, today, "failed", attempt=attempt,
+                        error_msg="观察模式禁止新开仓", action=action,
+                    )
+                    continue
+            except Exception as exc:
+                _update_execution(
+                    code, today, "failed", attempt=attempt,
+                    error_msg=f"观察模式状态不可用: {exc}", action=action,
+                )
+                continue
 
         # 获取实时价格
         try:
@@ -896,6 +1089,7 @@ def _retry_pending_executions(dry_run: bool = False) -> int:
                     "SELECT COUNT(*) FROM trades WHERE code=? AND action='sell' AND date=?",
                     (code, today)
                 ).fetchone()[0]
+                _conn3.close()
                 if _already_sold > 0:
                     log.warning("跳过重复卖出 %s: 今日已记录 %d 笔", code, _already_sold)
                     _update_execution(code, today, "executed", attempt=attempt, price=price,
@@ -912,6 +1106,7 @@ def _retry_pending_executions(dry_run: bool = False) -> int:
                     "SELECT COUNT(*) FROM trades WHERE code=? AND action='buy' AND date=?",
                     (code, today)
                 ).fetchone()[0]
+                _conn3.close()
                 if _already_bought > 0:
                     log.warning("跳过重复买入 %s: 今日已记录 %d 笔", code, _already_bought)
                     _update_execution(code, today, "executed", attempt=attempt, price=price,
@@ -929,6 +1124,8 @@ def _retry_pending_executions(dry_run: bool = False) -> int:
                 conn2.close()
                 add_trade(code, "buy", price, shares, today,
                           f"force-execute (重试#{attempt-1})", trade_amount=shares*price)
+                if _MICROSTRUCTURE_AVAILABLE:
+                    get_microstructure().add_t1_lock(code, date.today(), price, shares)
 
             _update_execution(code, today, "executed", attempt=attempt, price=price, shares=shares, action=action)
             executed += 1
@@ -972,6 +1169,11 @@ def cmd_force_execute():
     print(f"🚀 强制信号执行 | {today}")
     print("=" * 50)
 
+    if not dry_run:
+        gate = _require_mutating_execution_gate("force-execute")
+        if not gate.get("allowed"):
+            return {"blocked": True, "gate": gate, "date": today}
+
     # 1. 生成最新调仓计划
     plan = generate_execution_plan(dry_run=dry_run)
     print(plan["summary"])
@@ -984,6 +1186,10 @@ def cmd_force_execute():
         except Exception as _me:
             log.debug("tradability check failed, using unfiltered plan: %s", _me)
 
+    if dry_run:
+        print("DRY-RUN: no execution orders recorded or retried")
+        return plan
+
     # 2. 记录待执行订单
     _record_execution_orders(plan)
     total_orders = len(plan["sells"]) + len(plan["buys"])
@@ -995,7 +1201,7 @@ def cmd_force_execute():
     # 3. 执行（含重试）
     if total_orders > 0 or _pending_count() > 0:
         print("\n🔄 执行中...")
-        executed = _retry_pending_executions(dry_run=dry_run)
+        executed = _retry_pending_executions(dry_run=dry_run, gate_checked=True)
         print(f"\n✅ 本次执行 {executed} 笔")
 
     # 4. 推送
@@ -1116,7 +1322,7 @@ def cmd_premarket_push():
             stops = []
             for h in holdings:
                 code = h["code"]
-                name = STOCK_MAP.get(code, {}).get("name", code)
+                name = get_stock_name(code)
                 buy_price = h.get("buy_price", 0)
                 ds = get_dynamic_stop_loss(code, buy_price)
                 amt = h.get("trade_amount", 0) or 0
@@ -1150,7 +1356,7 @@ def cmd_premarket_push():
                 details = _parse_details(s.get("details", "{}"))
                 candidates.append({
                     "code": code,
-                    "name": STOCK_MAP.get(code, {}).get("name", code),
+                    "name": get_stock_name(code),
                     "score": score,
                     "signal": details.get("signal_action", "HOLD"),
                 })
@@ -1231,14 +1437,26 @@ def auto_execute_if_gate_allows(plan: dict) -> dict:
     - PAPER → 纸面交易自动执行(paper_trader)
     - SEMI_AUTO → 生成 pending_confirm 订单
     """
-    from auto_gate import get_latest_gate_result
+    from auto_gate import create_order_state, evaluate_auto_gate, format_gate_report
     from paper_trader import PaperTrader
     from db import get_conn
     from config import STOCK_MAP
 
-    gate = get_latest_gate_result()
+    try:
+        gate = evaluate_auto_gate(explain=False)
+    except Exception as exc:
+        print(f"\n  🤖 自动执行决策: 闸门状态=LOCKED")
+        print(f"  🔒 闸门评估失败 — 跳过执行: {exc}")
+        return {
+            "state": "LOCKED",
+            "executed": False,
+            "paper_trades": 0,
+            "reason": f"gate_unavailable: {exc}",
+        }
+
     state = gate.get("state", "LOCKED") if gate else "LOCKED"
     print(f"\n  🤖 自动执行决策: 闸门状态={state}")
+    print("  " + format_gate_report(gate).replace("\n", "\n  "))
 
     if state == "LOCKED":
         print(f"  🔒 闸门锁定 — 跳过执行，仅分析")
@@ -1263,27 +1481,52 @@ def auto_execute_if_gate_allows(plan: dict) -> dict:
         return {"state": "PAPER", "executed": False, "paper_trades": len(paper_results)}
 
     elif state == "SEMI_AUTO":
-        # 半自动: 生成 pending_confirm 订单，等待用户确认
-        staged = 0
-        conn = get_conn()
-        for entry in plan.get("buys", [])[:3]:
-            conn.execute(
-                "INSERT INTO execution_log (code, action, status, price, shares, amount, reason, created_at) VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))",
-                (entry.get("code"), "buy", "pending_confirm", entry.get("price", 0),
-                 entry.get("shares", 0), entry.get("amount", 0),
-                 f"SEMI_AUTO: {entry.get('reasons', ['自动信号'])[0] if entry.get('reasons') else '自动信号'}"))
-        conn.commit()
-        staged += len(plan.get("buys", [])[:3])
+        from db import get_compliance_status
+        compliance = get_compliance_status()
+        if compliance.get("status") != "approved":
+            print("  🔒 合规核查未通过 — 状态上限回退至 MANUAL")
+            return {
+                "state": "MANUAL", "executed": False,
+                "reason": f"compliance={compliance.get('status', 'not_reported')}",
+            }
 
-        for entry in plan.get("sells", []):
-            conn.execute(
-                "INSERT INTO execution_log (code, action, status, price, shares, amount, reason, created_at) VALUES (?,?,?,?,?,?,?,datetime('now','localtime'))",
-                (entry.get("code"), "sell", "pending_confirm", entry.get("estimated_proceeds", 0) / max(entry.get("shares", 1), 1),
-                 entry.get("shares", 0), entry.get("estimated_proceeds", 0),
-                 f"SEMI_AUTO: {entry.get('reasons', ['自动信号'])[0] if entry.get('reasons') else '自动信号'}"))
-        conn.commit()
-        staged += len(plan.get("sells", []))
-        conn.close()
+        try:
+            from observation_mode import get_observer
+            allow_buys = get_observer().is_trading_allowed()
+        except Exception as exc:
+            log.error("观察模式状态不可用，禁止半自动买入: %s", exc)
+            allow_buys = False
+
+        # 半自动: 使用统一状态机排队，v1 绝不提交券商。
+        staged = 0
+        buys = [
+            item for item in plan.get("buys", [])
+            if not item.get("blocked") and (item.get("net_edge") or {}).get("ready")
+        ]
+        if allow_buys:
+            buys = buys[:1]
+        else:
+            buys = []
+        sells = [item for item in plan.get("sells", []) if not item.get("blocked")]
+
+        for action, entries in (("buy", buys), ("sell", sells)):
+            for entry in entries:
+                shares = int(entry.get("shares", 0))
+                amount = float(entry.get("amount") or entry.get("estimated_proceeds") or 0)
+                price = float(entry.get("price") or (amount / shares if shares else 0))
+                reason = "; ".join(entry.get("reasons") or [entry.get("reason", "自动信号")])
+                key = f"{date.today().isoformat()}:{entry.get('code')}:{action}:{price}:{shares}"
+                create_order_state(
+                    entry.get("code", ""), action, "generated", price=price,
+                    shares=shares, amount=amount, reason=reason,
+                    idempotency_key=key,
+                )
+                create_order_state(
+                    entry.get("code", ""), action, "pending_confirm", price=price,
+                    shares=shares, amount=amount, reason=reason,
+                    idempotency_key=key,
+                )
+                staged += 1
 
         print(f"  ✅ SEMI_AUTO: {staged} 笔已排队 pending_confirm")
         return {"state": "SEMI_AUTO", "executed": False, "staged": staged}
@@ -1314,70 +1557,14 @@ def main():
     plan = generate_execution_plan(dry_run=dry_run)
     print(plan["summary"])
 
-    # ── v5.0 自动执行: 根据闸门状态自动决策 ──
-    if do_auto:
-        result = auto_execute_if_gate_allows(plan)
-
-    # ── 自动执行 ──
-    if do_execute and (plan["sells"] or plan["buys"]):
-        from db import set_active, clear_active, add_trade
-        from config import STOCK_DETAILS
-        from backtest_engine import recommend_atr_params
-        today = plan["date"]
-        executed = []
-
-        for s in plan["sells"]:
-            existing = conn.execute(
-                "SELECT COUNT(*) FROM execution_log"
-                " WHERE date = ? AND code = ? AND action = ? AND status = ?",
-                (today, s["code"], "SELL", "executed")).fetchone()[0]
-            if existing > 0:
-                continue  # 今日已执行，跳过重复
-            price = s["estimated_proceeds"] / max(s["shares"], 1)
-            clear_active(s["code"])
-            add_trade(s["code"], "sell", price, s["shares"], today,
-                      f'auto: {" ".join(s.get("reasons",[]))}'[:200])
-            executed.append(f'  ✅ 卖出 {s["name"]}({s["code"]}) {s["shares"]}股 @{price:.2f}')
-
-        for b in plan["buys"]:
-            existing = conn.execute(
-                "SELECT COUNT(*) FROM execution_log"
-                " WHERE date = ? AND code = ? AND action = ? AND status = ?",
-                (today, b["code"], "BUY", "executed")).fetchone()[0]
-            if existing > 0:
-                continue
-            price = b["price"]
-            # 计算并设置止损
-            try:
-                atr_rec = recommend_atr_params(b["code"])
-                stop_pct = atr_rec.get("suggested_stop_pct", 8.0)
-            except Exception:
-                stop_pct = 8.0
-            stop_price = round(price * (1 - stop_pct / 100), 2)
-            
-            target = STOCK_DETAILS.get(b["code"], {})
-            target_high = target.get("target_sell", 0)
-            target_low = target.get("buy_zone_low", 0)
-
-            set_active(b["code"], price, today, target_high, target_low)
-            # 手动更新止损（set_active 不设止损）
-            try:
-                conn = get_conn()
-                conn.execute('UPDATE stocks SET stop_loss = ?, trade_amount = ?, notes = ? WHERE code = ?',
-                           (stop_price, b["amount"], f'auto买入{b["shares"]}股', b["code"]))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-
-            add_trade(b["code"], "buy", price, b["shares"], today,
-                      f'auto: score={b.get("score",0):.0f} {b.get("signal","")}', trade_amount=b["amount"])
-            executed.append(f'  ✅ 买入 {b["name"]}({b["code"]}) {b["shares"]}股 @{price:.2f} 止损{stop_price}')
-
-        if executed:
-            print("\\n🚀 自动执行完成:")
-            for line in executed:
-                print(line)
+    # ── v5.0 自动执行: 根据当前 P0-aware 闸门状态自动决策 ──
+    if do_execute:
+        if plan["sells"] or plan["buys"]:
+            auto_execute_if_gate_allows(plan)
+        else:
+            print("\n✅ 无需执行：计划中无订单")
+    elif do_auto:
+        auto_execute_if_gate_allows(plan)
 
     if do_push and (plan["sells"] or plan["buys"]):
         try:

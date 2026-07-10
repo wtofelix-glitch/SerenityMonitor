@@ -12,8 +12,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from factor_engine import get_current_signals
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 logger = logging.getLogger("Serenity.FactorMonitor")
 
@@ -130,7 +129,7 @@ def check_factor_changes() -> list[str]:
             if not old_factors:
                 continue  # 新标的，跳过（首次出现不算偏移）
 
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             for fname, new_val in factors.items():
                 old_val = old_factors.get(fname)
                 if old_val is None:

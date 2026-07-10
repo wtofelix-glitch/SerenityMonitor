@@ -3,9 +3,10 @@
 v3.0: 自动从哨兵观察中提取AI产业链相关证据，写入 uzi_evidence 表。
 替代之前仅通过 CLI 手动录入的方式，让 UZI 卡位面板有真实数据可展示。
 """
+from typing import Optional
 from datetime import date, timedelta
 from db import get_conn, add_uzi_evidence, get_uzi_evidence_summary
-from config import STOCK_MAP, ALL_CODES
+from config import STOCK_MAP, ALL_CODES, get_stock_name
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -28,7 +29,7 @@ EVIDENCE_KEYWORDS = {
 }
 
 
-def _match_evidence_strength(text: str) -> str | None:
+def _match_evidence_strength(text: str) -> Optional[str]:
     """从文本中匹配证据强度，返回 'strong'/'medium'/'weak'/None"""
     for strength in ("strong", "medium"):
         for kw in EVIDENCE_KEYWORDS[strength]:
@@ -53,7 +54,7 @@ def collect_evidence_for_code(code: str, days_back: int = 7) -> dict:
     conn = get_conn()
     added = 0
     skipped = 0
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
 
     try:
         # 获取已有证据去重
@@ -172,7 +173,7 @@ def seed_evidence_from_config():
         try:
             add_uzi_evidence(
                 code=code,
-                title=f"Serenity框架评级: {tag}" if tag else f"{STOCK_MAP.get(code, {}).get('name', code)} 投资逻辑",
+                title=f"Serenity框架评级: {tag}" if tag else f"{get_stock_name(code)} 投资逻辑",
                 strength=strength,
                 source_type="config/STOCK_DETAILS",
                 summary=reason[:500],

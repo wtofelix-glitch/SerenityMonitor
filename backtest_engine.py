@@ -19,7 +19,7 @@ import json
 import urllib.request
 import numpy as np
 from db import get_price_history
-from config import STOCK_MAP
+from config import STOCK_MAP, BENCHMARK_UNIVERSE_SIZE
 
 # ── 事件驱动回测可选依赖 ──────────────────────────────
 try:
@@ -850,7 +850,7 @@ class EventDrivenBacktest:
         stamp_tax: float = 0.001,
         position_pct: float = 0.30,
         enable_microstructure: bool = True,
-        max_benchmark_stocks: int = 15,
+        max_benchmark_stocks: int = BENCHMARK_UNIVERSE_SIZE,
     ):
         self.code = code
         self.strategy = strategy
@@ -888,7 +888,9 @@ class EventDrivenBacktest:
         self.equity_curve: list[tuple[str, float]] = []
         self.cost_breakdown: dict = {
             "total_commission": 0.0, "total_stamp_tax": 0.0,
-            "total_slippage": 0.0, "total_cost": 0.0,
+            "total_transfer_fee": 0.0,
+            "total_slippage": 0.0, "total_impact_cost": 0.0,
+            "total_cost": 0.0,
         }
 
     # ── 微观结构模块懒加载 ──────────────────────────────
@@ -899,7 +901,8 @@ class EventDrivenBacktest:
             return
         if self.enable_microstructure:
             try:
-                self._micro = get_microstructure()
+                # 历史回测必须与本机今日实盘锁仓状态隔离。
+                self._micro = MarketMicrostructure(load_existing_locks=False)
                 self._simulator = get_simulator(
                     commission_rate=self.commission_rate,
                     stamp_tax_rate=self.stamp_tax,
@@ -948,11 +951,20 @@ class EventDrivenBacktest:
 
     # ── T+1 锁仓管理 ────────────────────────────────────
 
-    def _lock_position(self, code: str, buy_date: str, shares: int):
+    def _lock_position(self, code: str, buy_date: str, shares: int,
+                       unlock_date: Optional[str] = None):
         """记录 T+1 锁定的仓位"""
         if code not in self._t1_locks:
             self._t1_locks[code] = []
-        # 解锁日 = 买入日的下一个自然日（简化，实际应为下一个交易日）
+        if unlock_date:
+            self._t1_locks[code].append({
+                "shares": shares,
+                "buy_date": buy_date,
+                "unlock_date": unlock_date,
+            })
+            return
+
+        # 兼容直接调用；事件循环会传入真实行情序列的下一交易日。
         buy_dt = datetime.strptime(buy_date, "%Y-%m-%d")
         # 跳过周末：若买入日是周五，解锁日是下周一
         unlock_dt = buy_dt + timedelta(days=1)
@@ -1028,6 +1040,7 @@ class EventDrivenBacktest:
             return {"error": f"数据不足: {self.code} 仅 {len(rows)} 天"}
 
         rows.sort(key=lambda r: r["date"])
+        opens = np.array([r.get("open", r["close"]) for r in rows], dtype=float)
         closes = np.array([r["close"] for r in rows], dtype=float)
         highs = np.array([r["high"] for r in rows], dtype=float)
         lows = np.array([r["low"] for r in rows], dtype=float)
@@ -1046,6 +1059,7 @@ class EventDrivenBacktest:
         # 3. 每日事件循环
         for i in range(len(dates)):
             date_str = dates[i]
+            open_price = opens[i]
             close = closes[i]
             high = highs[i]
             low = lows[i]
@@ -1053,11 +1067,13 @@ class EventDrivenBacktest:
             prev_close = closes[i - 1] if i > 0 else close
 
             # ── Pre-Market ──
-            pre_market = self._pre_market(i, date_str, close, high, low,
-                                          volume, prev_close, closes, dates)
+            pre_market = self._pre_market(
+                i, date_str, close, high, low, volume, prev_close, closes, dates,
+                open_price=open_price,
+            )
 
             # ── Intraday ──
-            fills = self._intraday(i, date_str, close, high, low,
+            fills = self._intraday(i, date_str, open_price, close, high, low,
                                    volume, pre_market)
 
             # ── Post-Market ──
@@ -1120,7 +1136,7 @@ class EventDrivenBacktest:
     def _pre_market(self, idx: int, date_str: str, close: float,
                     high: float, low: float, volume: float,
                     prev_close: float, closes: np.ndarray,
-                    dates: list[str]) -> dict:
+                    dates: list[str], open_price: Optional[float] = None) -> dict:
         """盘前阶段：加载数据、生成信号、检查约束"""
         result = {
             "date": date_str,
@@ -1134,9 +1150,11 @@ class EventDrivenBacktest:
             "t1_locked_shares": 0,
         }
 
-        # 防前视：使用前一日收盘价生成信号（不能用当日）
-        # 策略内部会用到 closes[:idx+1]，但我们标记 data_available_at
-        signal, reason = self.strategy.generate_signals(idx)
+        # 盘前只能使用前一交易日及更早的数据。
+        if idx == 0:
+            signal, reason = 0.0, "首个交易日无前序数据"
+        else:
+            signal, reason = self.strategy.generate_signals(idx - 1)
         result["signal"] = signal
         result["signal_reason"] = reason
 
@@ -1144,7 +1162,10 @@ class EventDrivenBacktest:
         self._expire_locks(date_str)
 
         # 检测涨跌停
-        limit_info = self._check_limit_status(self.code, date_str, close, prev_close)
+        executable_price = float(open_price if open_price is not None else close)
+        limit_info = self._check_limit_status(
+            self.code, date_str, executable_price, prev_close
+        )
         result["limit_status"] = limit_info["status"]
 
         # T+1 锁定检查
@@ -1157,11 +1178,11 @@ class EventDrivenBacktest:
             # 买入约束
             if not self.in_position and signal >= 0.35:
                 cost_est = self.capital * self.position_pct * min(1.0, signal)
-                est_shares = int(cost_est / close / 100) * 100
+                est_shares = int(cost_est / executable_price / 100) * 100
                 if est_shares >= 100:
                     try:
                         trade_result = self._micro.can_buy(
-                            self.code, check_date, close, est_shares
+                            self.code, check_date, executable_price, est_shares
                         )
                         result["can_buy"] = trade_result.executable
                         if not trade_result.executable:
@@ -1178,7 +1199,7 @@ class EventDrivenBacktest:
                 elif self.enable_microstructure and self._micro is not None:
                     try:
                         trade_result = self._micro.can_sell(
-                            self.code, self.position, check_date, close, unlocked
+                            self.code, self.position, check_date, executable_price, unlocked
                         )
                         result["can_sell"] = trade_result.executable
                         if not trade_result.executable:
@@ -1200,7 +1221,7 @@ class EventDrivenBacktest:
 
     # ── Intraday Phase ─────────────────────────────────
 
-    def _intraday(self, idx: int, date_str: str, close: float,
+    def _intraday(self, idx: int, date_str: str, open_price: float, close: float,
                   high: float, low: float, volume: float,
                   pre_market: dict) -> list[dict]:
         """盘中阶段：模拟成交（含滑点和成本）"""
@@ -1233,16 +1254,19 @@ class EventDrivenBacktest:
 
             cost = self.capital * self.position_pct * min(1.0, signal)
             fee = cost * self.commission_rate
-            shares = int((cost - fee) / close / 100) * 100
-            if shares < 100 and self.capital >= 100 * close * (1 + self.commission_rate):
+            shares = int((cost - fee) / open_price / 100) * 100
+            if shares < 100 and self.capital >= 100 * open_price * (1 + self.commission_rate):
                 shares = 100
 
             if shares >= 100:
                 # 模拟成交
-                fill_price = close
+                fill_price = open_price
                 slippage_pct = 0.0
+                slippage_amount = 0.0
+                impact_cost = 0.0
                 commission = shares * fill_price * self.commission_rate
                 tax = 0.0  # 买入不收印花税
+                transfer_fee = 0.0
 
                 if self._simulator is not None:
                     try:
@@ -1251,23 +1275,28 @@ class EventDrivenBacktest:
                         check_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                         order = Order(
                             code=self.code, action="buy",
-                            price=close, quantity=shares,
+                            price=open_price, quantity=shares,
                             order_date=check_date,
                         )
                         bar = Bar(
                             code=self.code, date=date_str,
-                            open=float(high) if idx > 0 else close,
+                            open=open_price,
                             close=close, high=high, low=low,
                             volume=float(volume),
                             amount=float(volume) * close,
                         )
                         liquidity = build_liquidity_state(self.code)
-                        fill_result = self._simulator.simulate_fill(order, bar, liquidity)
+                        fill_result = self._simulator.simulate_fill(
+                            order, bar, liquidity, execution_price=open_price
+                        )
                         if fill_result.filled:
                             fill_price = fill_result.fill_price
                             slippage_pct = fill_result.slippage_pct
+                            slippage_amount = fill_result.slippage_amount
+                            impact_cost = fill_result.impact_cost
                             commission = fill_result.commission
                             tax = fill_result.stamp_tax
+                            transfer_fee = fill_result.transfer_fee
                             if fill_result.unfilled_quantity > 0:
                                 shares = fill_result.fill_quantity
                         else:
@@ -1282,7 +1311,7 @@ class EventDrivenBacktest:
                         pass
 
                 # 执行买入
-                actual_cost = shares * fill_price + commission + tax
+                actual_cost = shares * fill_price + commission + tax + transfer_fee
                 if actual_cost <= self.capital:
                     self.capital -= actual_cost
                     self.position = shares
@@ -1291,12 +1320,21 @@ class EventDrivenBacktest:
                     self.in_position = True
 
                     # T+1 锁定
-                    self._lock_position(self.code, date_str, shares)
+                    next_trading_date = (
+                        self.strategy.dates[idx + 1]
+                        if idx + 1 < len(self.strategy.dates)
+                        else None
+                    )
+                    self._lock_position(
+                        self.code, date_str, shares, unlock_date=next_trading_date
+                    )
 
                     # 累积成本
                     self.cost_breakdown["total_commission"] += commission
                     self.cost_breakdown["total_stamp_tax"] += tax
-                    self.cost_breakdown["total_slippage"] += abs(slippage_pct)
+                    self.cost_breakdown["total_transfer_fee"] += transfer_fee
+                    self.cost_breakdown["total_slippage"] += slippage_amount
+                    self.cost_breakdown["total_impact_cost"] += impact_cost
 
                     fills.append({
                         "action": "buy", "date": date_str,
@@ -1344,10 +1382,13 @@ class EventDrivenBacktest:
                     pass
 
             # 模拟成交
-            fill_price = close
+            fill_price = open_price
             slippage_pct = 0.0
+            slippage_amount = 0.0
+            impact_cost = 0.0
             commission = sell_shares * fill_price * self.commission_rate
             tax = sell_shares * fill_price * self.stamp_tax
+            transfer_fee = 0.0
 
             if self._simulator is not None:
                 try:
@@ -1356,23 +1397,28 @@ class EventDrivenBacktest:
                     check_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                     order = Order(
                         code=self.code, action="sell",
-                        price=close, quantity=sell_shares,
+                        price=open_price, quantity=sell_shares,
                         order_date=check_date,
                     )
                     bar = Bar(
                         code=self.code, date=date_str,
-                        open=float(high) if idx > 0 else close,
+                        open=open_price,
                         close=close, high=high, low=low,
                         volume=float(volume),
                         amount=float(volume) * close,
                     )
                     liquidity = build_liquidity_state(self.code)
-                    fill_result = self._simulator.simulate_fill(order, bar, liquidity)
+                    fill_result = self._simulator.simulate_fill(
+                        order, bar, liquidity, execution_price=open_price
+                    )
                     if fill_result.filled:
                         fill_price = fill_result.fill_price
                         slippage_pct = fill_result.slippage_pct
+                        slippage_amount = fill_result.slippage_amount
+                        impact_cost = fill_result.impact_cost
                         commission = fill_result.commission
                         tax = fill_result.stamp_tax
+                        transfer_fee = fill_result.transfer_fee
                         if fill_result.unfilled_quantity > 0:
                             sell_shares = fill_result.fill_quantity
                     else:
@@ -1387,7 +1433,7 @@ class EventDrivenBacktest:
                     pass
 
             # 执行卖出
-            sell_value = sell_shares * fill_price - commission - tax
+            sell_value = sell_shares * fill_price - commission - tax - transfer_fee
             self.capital += sell_value
             profit_pct = round((fill_price - self.entry_price) / self.entry_price * 100, 2)
             hold_days = (
@@ -1412,7 +1458,9 @@ class EventDrivenBacktest:
 
             self.cost_breakdown["total_commission"] += commission
             self.cost_breakdown["total_stamp_tax"] += tax
-            self.cost_breakdown["total_slippage"] += abs(slippage_pct)
+            self.cost_breakdown["total_transfer_fee"] += transfer_fee
+            self.cost_breakdown["total_slippage"] += slippage_amount
+            self.cost_breakdown["total_impact_cost"] += impact_cost
 
             # 从 T+1 锁仓中移除已卖出的部分
             remaining = sell_shares
@@ -1607,7 +1655,9 @@ class EventDrivenBacktest:
         self.cost_breakdown["total_cost"] = (
             self.cost_breakdown["total_commission"]
             + self.cost_breakdown["total_stamp_tax"]
+            + self.cost_breakdown["total_transfer_fee"]
             + self.cost_breakdown["total_slippage"]
+            + self.cost_breakdown["total_impact_cost"]
         )
         self.cost_breakdown["cost_pct_of_capital"] = round(
             self.cost_breakdown["total_cost"] / self.initial_capital * 100, 3
@@ -1775,7 +1825,7 @@ class EventDrivenBacktest:
             "equity_curve": equity,
         }
 
-    def _fetch_hs300_kline(self, dates: list[str]) -> list[tuple[str, float]] | None:
+    def _fetch_hs300_kline(self, dates: list[str]) -> Optional[list[tuple[str, float]]]:
         """从 Sina API 获取 HS300 日线数据"""
         if len(dates) < 2:
             return None
@@ -1915,6 +1965,7 @@ def run_event_driven_backtest(
     stamp_tax: float = 0.001,
     position_pct: float = 0.30,
     enable_microstructure: bool = True,
+    max_benchmark_stocks: int = BENCHMARK_UNIVERSE_SIZE,
 ) -> dict:
     """运行事件驱动回测。
 
@@ -1950,5 +2001,6 @@ def run_event_driven_backtest(
         stamp_tax=stamp_tax,
         position_pct=position_pct,
         enable_microstructure=enable_microstructure,
+        max_benchmark_stocks=max_benchmark_stocks,
     )
     return engine.run()

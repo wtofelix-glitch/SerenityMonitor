@@ -10,8 +10,7 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from data_engine import sina_fetch_raw, parse_sina_line
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 # ============================================================
 # 行业分类
@@ -132,7 +131,7 @@ class SectorRotationEngine:
 
                 stock_items[code] = {
                     "code": code,
-                    "name": STOCK_MAP.get(code, {}).get("name", code),
+                    "name": get_stock_name(code),
                     "price": price_now,
                     "close_before": price_before,
                     "change": change_pct,

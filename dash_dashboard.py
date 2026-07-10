@@ -32,7 +32,7 @@ log = get_logger(__name__)
 
 # ── 数据源 ────────────────────────────────────────────────────
 from db import get_conn
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 from factor_ic import compute_rank_ic, DIMENSION_LABELS
 from weight_adjuster import load_adjusted_weights, DEFAULT_WEIGHTS
 
@@ -240,7 +240,7 @@ def fetch_trade_history(days=30):
     conn.close()
     trades = [dict(r) for r in rows]
     for t in trades:
-        t["name"] = STOCK_MAP.get(t["code"], {}).get("name", t["code"])
+        t["name"] = get_stock_name(t["code"])
     return trades
 
 
@@ -257,7 +257,7 @@ def fetch_signal_performance():
     conn.close()
     result = [dict(r) for r in rows]
     for r in result:
-        r["name"] = STOCK_MAP.get(r["code"], {}).get("name", r["code"])
+        r["name"] = get_stock_name(r["code"])
         r["win_rate_1d"] = round(r["wins_1d"] / max(r["total_signals"], 1) * 100, 1)
         r["win_rate_3d"] = round(r["wins_3d"] / max(r["total_signals"], 1) * 100, 1)
     return result
@@ -289,7 +289,7 @@ def fetch_execution_log(days=7):
     conn.close()
     result = [dict(r) for r in rows]
     for r in result:
-        r["name"] = STOCK_MAP.get(r["code"], {}).get("name", r["code"])
+        r["name"] = get_stock_name(r["code"])
     return result
 
 
@@ -826,7 +826,7 @@ def _render_exec_tab():
 
     # ── 最近执行日志 ──
     exec_rows = []
-    for e in exec_log[:15]:
+    for e in exec_log:
         status_icon = "✅" if e["status"] == "success" else ("❌" if e["status"] == "failed" else "⏳")
         exec_rows.append(html.Tr([
             html.Td(e["date"], style={"padding": "3px 8px", "fontSize": "11px"}),
@@ -1015,7 +1015,7 @@ def _render_risk_tab():
     # ── 黑名单详情 ──
     blacklist_rows = []
     for code, expiry in sorted(blacklist.items()):
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         blacklist_rows.append(html.Tr([
             html.Td(name, style={"padding": "4px 8px", "fontWeight": "600"}),
             html.Td(code, style={"padding": "4px 8px", "color": "rgba(255,255,255,0.5)"}),

@@ -147,10 +147,10 @@ class ObservationMode:
             "days_active": self._state.days_active,
         }
 
-    def check(self, portfolio_return_weekly: float | None = None,
-              max_drawdown: float | None = None,
-              equal_weight_return_weekly: float | None = None,
-              audit_stats: dict | None = None,
+    def check(self, portfolio_return_weekly: Optional[float] = None,
+              max_drawdown: Optional[float] = None,
+              equal_weight_return_weekly: Optional[float] = None,
+              audit_stats: Optional[dict] = None,
               consecutive_stops: int = 0,
               data_anomalies: int = 0) -> dict:
         """运行所有停机条件检查。
@@ -225,7 +225,7 @@ class ObservationMode:
 
     # ── 内部逻辑 ──────────────────────────────────────────
 
-    def _check_emergency(self, max_drawdown: float | None) -> dict:
+    def _check_emergency(self, max_drawdown: Optional[float]) -> dict:
         """检查紧急停机条件。"""
         # 条件 1: 组合回撤超过 -20%
         if max_drawdown is not None and max_drawdown <= EMERGENCY_TRIGGERS["drawdown_20pct"]["threshold"]:
@@ -239,12 +239,12 @@ class ObservationMode:
 
         return {"triggered": False, "condition": "", "reason": ""}
 
-    def _check_observation(self, weekly_ret: float | None,
-                           eq_weekly_ret: float | None,
-                           audit_stats: dict | None,
+    def _check_observation(self, weekly_ret: Optional[float],
+                           eq_weekly_ret: Optional[float],
+                           audit_stats: Optional[dict],
                            consecutive_stops: int,
                            data_anomalies: int,
-                           max_drawdown: float | None) -> dict:
+                           max_drawdown: Optional[float]) -> dict:
         """检查观察模式条件。"""
         today = date.today().isoformat()
 
@@ -386,3 +386,113 @@ def get_observer() -> ObservationMode:
     if _observer is None:
         _observer = ObservationMode()
     return _observer
+
+
+# ═══════════════════════════════════════════════════════════════
+# 市场事件检测 (v4 Phase 4: 验证期至少覆盖 1 次 ≥3% 大盘单日波动)
+# ═══════════════════════════════════════════════════════════════
+
+MARKET_SWING_THRESHOLD = 3.0  # 3% 单日波动
+MARKET_EVENT_LOG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".market_events.json"
+)
+
+
+def detect_market_event(as_of: Optional[str] = None) -> dict:
+    """检测当日是否发生 ≥3% 的大盘单日波动。
+
+    检查沪深300 (000300) 和上证指数 (000001) 的日涨跌幅。
+    如果超过阈值，记录为市场事件。
+
+    Phase 4 要求：验证期至少覆盖 1 次 ≥3% 的大盘单日波动。
+    """
+    try:
+        from db import get_conn
+        conn = get_conn()
+        today = as_of or date.today().isoformat()
+        rows = conn.execute(
+            "SELECT code, change_pct FROM daily_snapshots "
+            "WHERE code IN ('000300', '000001') AND date = ?"
+            "ORDER BY code",
+            (today,)
+        ).fetchall()
+        conn.close()
+
+        events = []
+        for row in rows:
+            chg = row["change_pct"] or 0
+            if abs(chg) >= MARKET_SWING_THRESHOLD:
+                events.append({
+                    "code": row["code"],
+                    "name": "沪深300" if row["code"] == "000300" else "上证指数",
+                    "change_pct": round(chg, 2),
+                    "direction": "UP" if chg > 0 else "DOWN",
+                    "date": today,
+                })
+
+        if events:
+            _save_market_events(events)
+            return {
+                "detected": True,
+                "events": events,
+                "description": "; ".join(
+                    f"{e['name']} {e['change_pct']:+.1f}%" for e in events
+                ),
+            }
+
+        return {"detected": False, "events": []}
+    except Exception as e:
+        log.debug(f"市场事件检测失败: {e}")
+        return {"detected": False, "events": [], "error": str(e)}
+
+
+def get_market_event_history() -> list[dict]:
+    """获取历史市场事件列表（用于验证 Phase 4 市场状态覆盖要求）。"""
+    if os.path.exists(MARKET_EVENT_LOG):
+        try:
+            with open(MARKET_EVENT_LOG) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_market_events(new_events: list[dict]) -> None:
+    """保存市场事件到持久化日志。"""
+    existing = get_market_event_history()
+    seen = {(e["date"], e["code"]) for e in existing}
+    for evt in new_events:
+        if (evt["date"], evt["code"]) not in seen:
+            existing.append(evt)
+    existing.sort(key=lambda x: x["date"], reverse=True)
+    existing = existing[-50:]  # 保留最近 50 条
+    try:
+        with open(MARKET_EVENT_LOG, "w") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def market_coverage_ok() -> dict:
+    """检查 Phase 4 的市场状态覆盖要求。
+
+    Returns:
+        {ok: bool, events_found: int, first_event: str, verdict: str}
+    """
+    events = get_market_event_history()
+    if not events:
+        return {
+            "ok": False,
+            "events_found": 0,
+            "first_event": "",
+            "verdict": "未检测到 ≥3% 大盘波动。验证期尚未覆盖极端行情。"
+        }
+    return {
+        "ok": True,
+        "events_found": len(events),
+        "first_event": events[-1]["date"] if events else "",
+        "verdict": (
+            f"已检测到 {len(events)} 次 ≥3% 大盘波动事件，"
+            f"最早 {events[-1]['date']}。验证期市场状态覆盖满足最低要求。"
+        ),
+    }

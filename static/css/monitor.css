@@ -227,7 +227,7 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .session-badge.down  { background: rgba(52,199,89,0.12); color: var(--down); }
 .session-badge.gold  { background: rgba(255,214,10,0.12); color: var(--gold); animation: pulse 2s ease-in-out infinite; }
 .refresh-btn {
-  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
   background: var(--bg-card); border: 0.5px solid var(--border-color);
   color: var(--text-secondary); font-size: 15px; border-radius: 8px;
   cursor: pointer; transition: all 0.2s;
@@ -1400,7 +1400,7 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   background: var(--bg-card); color: var(--text-secondary);
   font-size: 12px; font-weight: 500; font-family: var(--font);
   cursor: pointer; transition: all var(--transition-fast);
-  white-space: nowrap; min-height: 36px;
+  white-space: nowrap; min-height: 44px;
 }
 .action-btn:active { background: var(--bg-card-hover); transform: scale(0.96); }
 .action-btn.primary { background: var(--gold-bg); border-color: var(--gold-border); color: var(--gold); }
@@ -1412,6 +1412,29 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .delta.pos { color: var(--up); }
 .delta.neg { color: var(--down); }
 .delta.flat { color: var(--text-tertiary); }
+.governance-note { font-size: var(--text-caption2); line-height: 1.4; }
+
+/* Compact financial metadata remains readable without changing data density. */
+.qd-code, .qd-row-meta, .pq-code, .pq-signal, .position-table .pos-code,
+.sc-rank, .sc-uzi, .sc-meta, .rg-label, .rg-limit, .anom-badge,
+.anom-time, .tc-footer, .advice-kelly, .nav-stat-label, .sfi-code,
+.sfi-sources, .sfi-quotes, .ssm-count, .rt-sector, .ssig-head,
+.ssig-tk, .nl-item-code, .nl-item-reason, .sig-code, .sig-meta-badge,
+.sig-label-pill, .sig-target, .compact-signal-code {
+  font-size: var(--text-caption2);
+}
+
+@media (max-width: 768px) {
+  .action-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--bottom-nav-h) + 20px + env(safe-area-inset-bottom, 0px));
+  }
+  .tab-content {
+    padding-bottom: calc(var(--bottom-nav-h) + 92px + env(safe-area-inset-bottom, 0px));
+  }
+}
 
 /* ═══════════════════════════════════════════════════════
    v5.1 通知横幅

@@ -1,0 +1,68 @@
+{
+  "generated_at": "2026-07-09",
+  "lookback_days": 120,
+  "n_observations": 46,
+  "n_stocks": 20,
+  "warning": "ICIR estimates unstable with < 60 observations. Re-run when data accumulates.",
+  "original_factors": 7,
+  "independent_factors": [
+    "factor_score",
+    "momentum_score"
+  ],
+  "n_independent": 2,
+  "merged_groups": {
+    "group_0": [
+      "factor_score",
+      "serenity_score",
+      "moat_score",
+      "technical_score"
+    ],
+    "group_1": [
+      "momentum_score",
+      "volume_score",
+      "zone_score"
+    ]
+  },
+  "dropped_factors": [
+    "serenity_score",
+    "moat_score",
+    "technical_score",
+    "volume_score",
+    "zone_score"
+  ],
+  "icir_ranking": [
+    {
+      "dimension": "factor_score",
+      "mean_ic": 0,
+      "std_ic": 0,
+      "icir": 0,
+      "t_stat": 0,
+      "n_obs": 0,
+      "ci_lower": 0,
+      "ci_upper": 0,
+      "significant": false
+    },
+    {
+      "dimension": "momentum_score",
+      "mean_ic": 0,
+      "std_ic": 0,
+      "icir": 0,
+      "t_stat": 0,
+      "n_obs": 0,
+      "ci_lower": 0,
+      "ci_upper": 0,
+      "significant": false
+    }
+  ],
+  "noise_factors": [
+    "factor_score",
+    "momentum_score"
+  ],
+  "recommendations": [
+    "[去冗余] group_0: factor_score, serenity_score, moat_score, technical_score → 合并为一个独立因子",
+    "[去冗余] group_1: momentum_score, volume_score, zone_score → 合并为一个独立因子",
+    "[降噪] factor_score: ICIR=0.000 < 0.3 → 标记为噪声因子，从评分中移除",
+    "[降噪] momentum_score: ICIR=0.000 < 0.3 → 标记为噪声因子，从评分中移除",
+    "[保留] 独立因子集 (2 个): factor_score, momentum_score"
+  ]
+}

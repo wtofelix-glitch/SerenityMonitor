@@ -1,0 +1,13 @@
+{
+  "weights": {
+    "base": 0.1102,
+    "zone": 0.0758,
+    "momentum": 0.1654,
+    "volume": 0.0294,
+    "serenity": 0.1536,
+    "factor": 0.1895,
+    "technical": 0.0857,
+    "sentiment": 0.1002,
+    "moat": 0.0902
+  }
+}

@@ -5,8 +5,7 @@ import json, os, sys
 from datetime import date, datetime, timedelta
 from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from db import get_conn
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 from serenity_logger import get_logger
 log = get_logger(__name__)
 
@@ -49,7 +48,7 @@ def analyze_week() -> dict:
                 if is_win: stats["wins"] += 1
                 else: stats["losses"] += 1
 
-                name = STOCK_MAP.get(code, {}).get("name", code)
+                name = get_stock_name(code)
                 hold_days = (datetime.strptime(sell["date"], "%Y-%m-%d") - datetime.strptime(buy["date"], "%Y-%m-%d")).days
 
                 lesson = {

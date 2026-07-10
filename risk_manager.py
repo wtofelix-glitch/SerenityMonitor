@@ -8,7 +8,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from config import RISK_CONFIG, STOCK_MAP, CAPITAL_CONFIG
+from config import RISK_CONFIG, STOCK_MAP, CAPITAL_CONFIG, get_stock_name
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -30,6 +30,12 @@ SECTOR_MAP: dict[str, str] = {
     "601398": "银行",
     "601006": "交通运输",
     "000938": "ICT设备",
+    # 机器人/自动化（2026-07-06 入池）
+    "601689": "汽车零部件",   # 拓普集团
+    "002050": "家电零部件",   # 三花智控
+    "601100": "机械",         # 恒立液压
+    "600580": "电气设备",     # 卧龙电驱
+    "002896": "机械",         # 中大力德
 }
 
 # ── 状态文件 ──────────────────────────────────────────
@@ -437,6 +443,63 @@ class RiskManager:
 
         return alerts
 
+    # ── T4 防御底仓强制检查 ─────────────────────────────
+
+    def check_t4_defensive_floor(self, code: str, action: str,
+                                 holdings: list[dict],
+                                 current_total_value: float,
+                                 sell_amount: float = 0) -> Optional[dict]:
+        """v4 §10.2: T4 防御底仓最低 20% 强制执行。
+
+        卖出 T4 标的时，检查卖出后 T4 总仓位是否仍 ≥ 20%。
+        不足则阻止全部卖出或建议部分卖出。
+
+        Returns:
+            None 表示通过；dict 表示触发限制（含建议可卖量）
+        """
+        try:
+            from config import TIER_4_CODES, CAPITAL_CONFIG
+        except ImportError:
+            return None
+
+        _t4_floor = CAPITAL_CONFIG.get("t4_defensive_floor_pct", 0.20)
+
+        if action.upper() != "SELL" or code not in TIER_4_CODES:
+            return None  # 非 T4 卖出，不检查
+
+        if current_total_value <= 0:
+            return None
+
+        # 计算当前 T4 总仓位
+        t4_current = 0.0
+        for h in holdings:
+            h_code = h.get("code", "")
+            if h_code in TIER_4_CODES:
+                amt = h.get("trade_amount", 0) or 0
+                t4_current += amt
+
+        t4_before_pct = t4_current / current_total_value
+        t4_after_sell = t4_current - sell_amount
+        t4_after_pct = t4_after_sell / current_total_value
+
+        if t4_after_pct >= _t4_floor:
+            return None  # 通过
+
+        # 触发保护
+        max_sellable = max(0, t4_current - current_total_value * _t4_floor)
+
+        return {
+            "triggered": True,
+            "rule": "t4_defensive_floor",
+            "level": "BLOCK" if max_sellable <= 0 else "REDUCE",
+            "t4_current_pct": round(t4_before_pct * 100, 1),
+            "t4_after_pct": round(t4_after_pct * 100, 1),
+            "t4_floor_pct": round(_t4_floor * 100, 0),
+            "max_sellable_amount": round(max_sellable, 2),
+            "reason": (f"T4 防御底仓保护: 卖出后 T4={t4_after_pct*100:.1f}%"
+                       f" < 下限 {_t4_floor*100:.0f}% (当前 {t4_before_pct*100:.1f}%)"),
+        }
+
     # ── 统一检查入口 ───────────────────────────────────
 
     def is_trade_allowed(self, code: str, action: str,
@@ -625,7 +688,7 @@ class RiskManager:
         # 黑名单
         lines.append(f"\n📋 黑名单: {r['blacklist_count']} 只")
         for code, expiry in sorted(r['blacklist'].items()):
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             lines.append(f"  ⛔ {name}({code}) 至 {expiry}")
 
         # 阈值

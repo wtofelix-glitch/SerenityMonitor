@@ -718,8 +718,10 @@ function renderHoldingsTab(d) {
   }
 
   // ── Score Ranking ───────────────────────────────────────
+  // TODO: 标的池 > ~30 只时需评估分页/虚拟滚动，
+  //       当前全量渲染在 30s 自动刷新下可能造成移动端卡顿。
   if (scores.length) {
-    const chips = scores.slice(0, 12).map(s => {
+    const chips = scores.map(s => {
       const sc = s.total_score || 0;
       const color = sc >= 65 ? 'var(--up)' : sc >= 50 ? 'var(--gold)' : 'var(--down)';
       const uzi = s.uzi_score || 0;
@@ -1783,9 +1785,9 @@ function renderGovernanceContent(d) {
   if (mods.length > 0) {
     mods.forEach(function(m) {
       var locked = m.frozen || m.locked || false;
-      modulesHtml += '<tr><td>' + (m.name || m.module || '?') + '</td>'
+      modulesHtml += '<tr><td>' + (m.name || m.module || m.id || '?') + '</td>'
         + '<td style="text-align:center;font-size:16px">' + (locked ? '🔒' : '🔓') + '</td>'
-        + '<td class="text-dim" style="font-size:10px">' + (m.version || m.reason || '') + '</td></tr>';
+        + '<td class="text-dim governance-note">' + (m.version || m.reason || m.description || '') + '</td></tr>';
     });
   } else {
     modulesHtml = '<tr><td colspan="3" class="text-dim" style="text-align:center;padding:12px">暂无模块数据</td></tr>';
@@ -1842,6 +1844,8 @@ function renderGovernanceContent(d) {
     + '<div><span>执行率</span><b style="color:var(--gold)">' + (aud.execution_rate || 0) + '%</b></div>'
     + '<div><span>覆写率</span><b>' + (aud.override_rate || 0) + '%</b></div>'
     + '<div><span>待结算</span><b style="color:' + ((aud.pending_settlements || 0) > 0 ? 'var(--up)' : 'var(--text-secondary)') + '">' + (aud.pending_settlements || 0) + '</b></div>'
+    + '<div><span>可回放</span><b style="color:var(--down)">' + (aud.replay_ready || 0) + '</b></div>'
+    + '<div><span>旧版缺口</span><b style="color:' + ((aud.legacy_incomplete || 0) > 0 ? 'var(--accent-orange)' : 'var(--text-secondary)') + '">' + (aud.legacy_incomplete || 0) + '</b></div>'
     + '</div></div>';
 
   // ── 4. 观察模式状态 ──

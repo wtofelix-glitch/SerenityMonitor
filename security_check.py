@@ -10,7 +10,7 @@ import inspect
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Optional, Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -307,7 +307,7 @@ def build_security_report() -> dict[str, Any]:
     }
 
 
-def format_security_report(report: dict[str, Any] | None = None) -> str:
+def format_security_report(report: Optional[dict[str, Any]] = None) -> str:
     report = report or build_security_report()
     lines = [
         report["title"],

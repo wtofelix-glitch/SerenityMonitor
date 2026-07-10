@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from typing import Iterable
+from typing import Optional, Iterable
 
 from db import get_conn
 
@@ -48,7 +48,7 @@ def rank_ic(scores: list[float], returns: list[float]) -> float:
     return _pearson(_rank_values(scores), _rank_values(returns))
 
 
-def _extract_uzi_score(row: dict) -> float | None:
+def _extract_uzi_score(row: dict) -> Optional[float]:
     raw = row.get("uzi_score")
     if raw is not None:
         try:
@@ -95,7 +95,7 @@ def _load_prices() -> dict[str, list[tuple[str, float]]]:
     return prices
 
 
-def _forward_return(prices: list[tuple[str, float]], date: str, horizon: int) -> float | None:
+def _forward_return(prices: list[tuple[str, float]], date: str, horizon: int) -> Optional[float]:
     index = {dt: i for i, (dt, _) in enumerate(prices)}
     i = index.get(date)
     if i is None or i + horizon >= len(prices):

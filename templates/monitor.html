@@ -9,7 +9,7 @@
   <meta name="description" content="Serenity — A股量化交易监控看板">
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <title>Serenity</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}?v=5.1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}?v=6.0">
   <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 </head>
@@ -47,7 +47,7 @@
   <div class="tab-content" id="tab-operations" role="tabpanel" aria-labelledby="tab-button-operations" hidden></div>
   <div class="tab-content" id="tab-live" role="tabpanel" aria-labelledby="tab-button-live" hidden></div>
   <div class="tab-content" id="tab-governance" role="tabpanel" aria-labelledby="tab-button-governance" hidden></div>
-  <script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/monitor.js') }}?v=6.0"></script>
   <script>
     if('serviceWorker' in navigator){
       navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");

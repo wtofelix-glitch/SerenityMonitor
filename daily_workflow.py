@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional
 """
 Serenity 每日工作流 — 一站式运行全部子系统
 
@@ -26,7 +27,7 @@ Serenity 每日工作流 — 一站式运行全部子系统
   📡 推送 (含净值 + 行业 + 绩效 + 执行计划)
   🚀 [--execute] 受控半自动排队（pending_confirm），v1 不提交实盘订单
 """
-import sys, os
+import sys, os, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, datetime
@@ -76,7 +77,7 @@ def run_real_data_gate_step(dry_run: bool = False) -> dict:
     return {"skipped": False, "record": record, "settle": settle, "gate": gate}
 
 
-def send_real_data_audit_push(result: dict, today: str | None = None) -> bool:
+def send_real_data_audit_push(result: dict, today: Optional[str] = None) -> bool:
     """Push a compact audit trail for real data recording and gate state."""
     if result.get("skipped"):
         return False
@@ -122,15 +123,83 @@ def send_real_data_audit_push(result: dict, today: str | None = None) -> bool:
     return True
 
 
-def _stage_pending_confirm_orders(plan: dict) -> int:
+def run_operations_audit_step(dry_run: bool = False) -> dict:
+    """Refresh reconciliation and risk/P0 tasks without staging any orders."""
+    import operations_center
+
+    reconciliation = operations_center.run_reconciliation(dry_run=dry_run)
+    quality = operations_center.get_data_quality_summary()
+    tasks = operations_center.generate_risk_tasks(
+        quality=quality,
+        reconciliation=reconciliation,
+        dry_run=dry_run,
+    )
+    critical = sum(1 for task in tasks if task.get("severity") == "critical")
+    warnings = sum(1 for task in tasks if task.get("severity") == "warning")
+    p0_tasks = [
+        task for task in tasks
+        if str(task.get("dedupe_key") or "").startswith("p0:")
+    ]
+
+    verb = "预览" if dry_run else "已刷新"
+    print(f"  ✅ 运维任务{verb}: critical={critical} warning={warnings}")
+    if p0_tasks:
+        keys = ", ".join(task["dedupe_key"] for task in p0_tasks[:4])
+        print(f"  🔒 P0阻断: {keys}")
+    return {
+        "dry_run": dry_run,
+        "reconciliation": reconciliation,
+        "quality": quality,
+        "tasks": tasks,
+        "critical": critical,
+        "warning": warnings,
+        "p0_task_count": len(p0_tasks),
+    }
+
+
+def _buy_net_edge(order: dict) -> dict:
+    """Return the buy order's same-version real-data edge, failing closed."""
+    edge = order.get("net_edge")
+    if isinstance(edge, dict):
+        return edge
+
+    try:
+        import auto_gate
+        edge = auto_gate.estimate_net_expected_return(
+            order["code"], order.get("signal", "BUY")
+        )
+    except Exception as exc:
+        edge = {
+            "ready": False,
+            "samples": 0,
+            "gross_pct": None,
+            "net_pct": None,
+            "reason": f"net_edge_unavailable: {exc}",
+        }
+    order["net_edge"] = edge
+    return edge
+
+
+def _stage_pending_confirm_orders(plan: dict) -> tuple[int, list[dict]]:
     """Stage generated orders into order_state_log without submitting trades."""
     import auto_gate
 
     count = 0
+    skipped_buys: list[dict] = []
     for group in ("sells", "buys"):
         for order in plan.get(group, []):
             code = order["code"]
             action = "SELL" if group == "sells" else "BUY"
+            if action == "BUY":
+                edge = _buy_net_edge(order)
+                if not edge.get("ready"):
+                    skipped_buys.append({
+                        "code": code,
+                        "reason": "net_edge_not_ready",
+                        "samples": edge.get("samples", 0),
+                        "net_pct": edge.get("net_pct"),
+                    })
+                    continue
             price = order.get("price") or (
                 order.get("estimated_proceeds", 0) / max(order.get("shares", 1), 1)
             )
@@ -148,7 +217,7 @@ def _stage_pending_confirm_orders(plan: dict) -> int:
                 reason="awaiting manual confirmation", idempotency_key=key,
             )
             count += 1
-    return count
+    return count, skipped_buys
 
 
 def run_controlled_execution_step(plan: dict, dry_run: bool = False) -> dict:
@@ -168,9 +237,76 @@ def run_controlled_execution_step(plan: dict, dry_run: bool = False) -> dict:
         print("  blocked: SEMI_AUTO requires passing gate + compliance_status=approved")
         return {"blocked": True, "staged": 0, "gate": gate}
 
-    staged = _stage_pending_confirm_orders(plan)
+    staged, skipped_buys = _stage_pending_confirm_orders(plan)
+    if skipped_buys:
+        codes = ", ".join(
+            f"{item['code']}(samples={item['samples']}, net={item['net_pct']})"
+            for item in skipped_buys
+        )
+        print(f"  🟡 买入净期望证据不足，未排队: {codes}")
     print(f"  ✅ SEMI_AUTO 已排队 {staged} 笔 pending_confirm；v1 不提交实盘订单")
-    return {"blocked": False, "staged": staged, "gate": gate}
+    return {
+        "blocked": False,
+        "staged": staged,
+        "skipped_buys": skipped_buys,
+        "gate": gate,
+    }
+
+
+def _scale_micro_live_plan(plan: dict) -> dict:
+    """Apply the existing micro-live caps without changing signal selection."""
+    max_per_trade = 5000
+    max_daily = 10000
+    scaled_plan = {
+        "sells": plan.get("sells", []),
+        "buys": [{
+            **item,
+            "shares": min(
+                item.get("shares", 100),
+                int(max_per_trade / max(item.get("price", 50), 1) / 100) * 100,
+            ),
+            "amount": min(
+                item.get("amount", 0) or item.get("price", 50) * item.get("shares", 100),
+                max_per_trade,
+            ),
+            "reasons": item.get("reasons", ["自动信号"])[:1] + ["微仓实盘"],
+        } for item in plan.get("buys", [])[:2]],
+    }
+    total_amount = sum(item.get("amount", 0) for item in scaled_plan["buys"])
+    if total_amount > max_daily:
+        scaled_plan["buys"] = scaled_plan["buys"][:1]
+    return scaled_plan
+
+
+def run_ths_live_step(plan: dict, dry_run: bool = False) -> dict:
+    """Gate the THS instruction bridge behind the current P0-aware SEMI_AUTO state."""
+    import auto_gate
+
+    gate = auto_gate.evaluate_auto_gate(explain=False)
+    print("  " + auto_gate.format_gate_report(gate).replace("\n", "\n  "))
+    if not dry_run and gate.get("state") != "SEMI_AUTO":
+        print("  blocked: THS live instructions require SEMI_AUTO and P0 alpha pass")
+        return {"blocked": True, "dry_run": dry_run, "gate": gate, "result": {}}
+
+    from ths_bridge import auto_execute_to_ths
+
+    scaled_plan = _scale_micro_live_plan(plan)
+    result = auto_execute_to_ths(scaled_plan, dry_run=dry_run)
+    buys_ok = [item for item in result.get("buys", []) if item.get("status") == "pending_confirm"]
+    sells_ok = [item for item in result.get("sells", []) if item.get("status") == "pending_confirm"]
+    if dry_run:
+        print("  DRY-RUN: no THS instruction files generated")
+    else:
+        print(f"  💰 微仓: {len(buys_ok)}买 {len(sells_ok)}卖 (单笔≤¥5,000)")
+        for item in buys_ok:
+            print(f"     📋 {item.get('instruction', item.get('code','?'))[:80]}")
+    return {
+        "blocked": False,
+        "dry_run": dry_run,
+        "gate": gate,
+        "result": result,
+        "scaled_plan": scaled_plan,
+    }
 
 
 def main():
@@ -200,6 +336,13 @@ def main():
         real_data_gate_result = run_real_data_gate_step(dry_run=dry_run)
     except Exception as e:
         print(f"  ⚠️ 真实数据/自动闸门失败: {e}")
+
+    # ── 0c. 运维审计任务刷新 ───────────────────────────────
+    step('0c/8 运维审计任务')
+    try:
+        run_operations_audit_step(dry_run=dry_run)
+    except Exception as e:
+        print(f"  ⚠️ 运维审计任务刷新失败: {e}")
 
     if not trading_day:
         if do_push:
@@ -250,6 +393,42 @@ def main():
             if _div > 0:
                 for d in _frozen_cmp["divergence_details"]:
                     print(f"     ⚠️ {d['code']}: Frozen={d['frozen']} Adaptive={d['adaptive']}")
+
+            # ── 持久化三系统对比 (v4 Phase 2) ──
+            try:
+                from db import get_conn
+                _date = date.today().isoformat()
+                _conn = get_conn()
+                _conn.execute("""
+                    INSERT OR REPLACE INTO frozen_comparison_history
+                    (date, frozen_signals_count, frozen_buy_count, frozen_sell_count,
+                     adaptive_signals_count, adaptive_buy_count, adaptive_sell_count,
+                     divergence_count, agreement_rate, divergence_details_json,
+                     eq_basket_nav, eq_basket_daily_return, eq_basket_weekly_return,
+                     eq_basket_monthly_return, total_value)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    _date,
+                    _frozen_cmp.get("frozen_signal_count", 0),
+                    _frozen_cmp.get("frozen_buy_count", 0),
+                    _frozen_cmp.get("frozen_sell_count", 0),
+                    _frozen_cmp.get("adaptive_signal_count", 0),
+                    _frozen_cmp.get("adaptive_buy_count", 0),
+                    _frozen_cmp.get("adaptive_sell_count", 0),
+                    _div,
+                    round(_agree, 4) if _agree else 0,
+                    json.dumps(_frozen_cmp.get("divergence_details", []), ensure_ascii=False),
+                    _eq.nav if hasattr(_eq, 'nav') else _eq.get_nav() if hasattr(_eq, 'get_nav') else 0,
+                    _eq_ret,
+                    _eq.get_weekly_return() if hasattr(_eq, 'get_weekly_return') else 0,
+                    _eq.get_monthly_return() if hasattr(_eq, 'get_monthly_return') else 0,
+                    sum(r.get("close", 0) * 10000 for r in _snaps[:5]) if _snaps else 0,
+                ))
+                _conn.commit()
+                _conn.close()
+                print(f"  💾 三系统对比已持久化")
+            except Exception as _pe:
+                print(f"  ⚠️ 三系统对比持久化失败: {_pe}")
     except Exception as e:
         print(f"  ⚠️ Frozen Baseline 对比失败: {e}")
 
@@ -329,8 +508,21 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 信号绩效统计失败: {e}")
 
-    # ── 3c. 信号质量检查 ────────────────────────────
-    step('3c/8 信号质量检查')
+    # ── 3c. 决策审计结算 (v4 Phase 2) ────────────────
+    step('3c/8 决策审计结算')
+    try:
+        from audit_logger import get_audit_logger
+        _dal = get_audit_logger()
+        _settled = _dal.settle_all_pending(min_age_days=6)
+        _backfilled = _dal.backfill_from_signal_log()
+        _pending = _dal.get_pending_count()
+        print(f"  ✅ 直接结算: {_settled} 条, signal_log回填: {_backfilled} 条")
+        print(f"  📊 审计待结算: {_pending} 条")
+    except Exception as e:
+        print(f"  ⚠️ 审计结算失败: {e}")
+
+    # ── 3d. 信号质量检查 ────────────────────────────
+    step('3d/8 信号质量检查')
     try:
         from signal_performance import check_signal_quality, format_quality_alerts
         quality_alerts = check_signal_quality(min_samples=5)
@@ -440,32 +632,60 @@ def main():
         except Exception as e:
             print(f"  ❌ 自动决策失败: {e}")
 
+    # ── 6d. 微观结构回填 (v4 Phase 2) ──────────────────
+    try:
+        from audit_logger import get_audit_logger
+        _dal_ms = get_audit_logger()
+        _ms_updated = _dal_ms.backfill_microstructure()
+        if _ms_updated > 0:
+            print(f"  📊 微观结构回填: {_ms_updated} 条")
+    except Exception as e:
+        print(f"  ⚠️ 微观结构回填失败: {e}")
+
+    # ── 6e. 观察模式日检 (v4 Phase 4) ──────────────────
+    try:
+        from observation_mode import get_observer
+        _obs = get_observer()
+        from portfolio import get_portfolio
+        _pm = get_portfolio()
+        _pv = _pm.get_portfolio_value()
+        _obs_check = _obs.check(
+            max_drawdown=(_pv["total_value"] / _pm.initial_capital - 1.0)
+            if _pv["total_value"] > 0 else 0,
+            audit_stats={},  # audit logging wired separately
+        )
+        if _obs_check["mode"] != "NORMAL":
+            print(f"  ⚠️ 观察模式: {_obs_check['mode']} — {_obs_check.get('reason', '')[:80]}")
+            print(f"  ⚠️ 操作: {_obs_check.get('action_required', 'NONE')}")
+        else:
+            # Check for market event (3%+ broad market swing)
+            from observation_mode import detect_market_event
+            _evt = detect_market_event()
+            if _evt.get("detected"):
+                print(f"  📊 市场事件: {_evt.get('description', '')}")
+    except Exception as e:
+        print(f"  ⚠️ 观察模式日检失败: {e}")
+
+    # ── 6f. OOS 实验记录 (v4.5) ──────────────────────
+    if trading_day:
+        try:
+            from freeze_experiment import FreezeExperiment
+            _oos = FreezeExperiment()
+            _oos_result = _oos.record()
+            if _oos_result.get("success") and not _oos_result.get("skipped"):
+                print(f"  🔬 OOS Day {_oos_result.get('day', '?')}: "
+                      f"策略 ¥{_oos_result.get('strategy_nav', 0):,.0f} | "
+                      f"等权 ¥{_oos_result.get('equal_weight_nav', 0):,.0f}")
+                if _oos_result.get("equal_weight_rebalanced"):
+                    print(f"     🔄 等权基准本月再平衡")
+        except Exception as e:
+            print(f"  ⚠️ OOS 记录失败 (无活跃实验或实验未启动): {e}")
+
     # ── v5.6 微仓实盘: --live 模式 ─────────────────────
     if do_live and (plan.get('sells') or plan.get('buys')):
         step('💰 微仓实盘执行')
         try:
-            from ths_bridge import auto_execute_to_ths
-            # 微仓限制: 单笔 ≤ ¥5000, 每日 ≤ ¥10000
-            MAX_PER_TRADE = 5000
-            MAX_DAILY = 10000
-            scaled_plan = {
-                "sells": plan.get("sells", []),
-                "buys": [{
-                    **b,
-                    "shares": min(b.get("shares", 100), int(MAX_PER_TRADE / max(b.get("price", 50), 1) / 100) * 100),
-                    "amount": min(b.get("amount", 0) or b.get("price", 50) * b.get("shares", 100), MAX_PER_TRADE),
-                    "reasons": b.get("reasons", ["自动信号"])[:1] + ["微仓实盘"]
-                } for b in plan.get("buys", [])[:2]],  # 每日最多2笔
-            }
-            total_amount = sum(b.get("amount", 0) for b in scaled_plan["buys"])
-            if total_amount > MAX_DAILY:
-                scaled_plan["buys"] = scaled_plan["buys"][:1]
-            result = auto_execute_to_ths(scaled_plan, dry_run=False)
-            buys_ok = [r for r in result.get("buys", []) if r.get("status") == "pending_confirm"]
-            sells_ok = [r for r in result.get("sells", []) if r.get("status") == "pending_confirm"]
-            print(f"  💰 微仓: {len(buys_ok)}买 {len(sells_ok)}卖 (单笔≤¥{MAX_PER_TRADE:,})")
-            for r in buys_ok:
-                print(f"     📋 {r.get('instruction', r.get('code','?'))[:80]}")
+            run_ths_live_step(plan, dry_run=dry_run)
         except Exception as e:
             print(f"  ❌ 微仓实盘失败: {e}")
 

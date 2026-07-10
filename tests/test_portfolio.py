@@ -157,7 +157,7 @@ class TestGetCash:
         self._add_trade(conn, "CASH", "sell", 0, 0, -1000.0)  # 校准记录
         self._add_trade(conn, "600487", "buy", 94.39, 200, 18878.0)
         self._add_trade(conn, "600487", "sell", 105.02, 200, 21004.0)
-        assert pm.get_cash() == 50000 - 18878.0 + 21004.0 - 1000.0
+        assert pm.get_cash() == 50000 - 18878.0 + 21004.0  # v5.5: CASH records excluded from formula
         conn.close()
 
     def test_db_exception_fallback(self, monkeypatch):

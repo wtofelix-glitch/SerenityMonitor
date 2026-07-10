@@ -35,7 +35,7 @@ def _qd_decision_label(decision: str) -> str:
     }.get(decision, decision or "观察")
 
 
-def _format_qd_signal_line(label: str, items: list[dict], empty_text: str = "") -> str | None:
+def _format_qd_signal_line(label: str, items: list[dict], empty_text: str = "") -> Optional[str]:
     sliced = items[:3]
     if not sliced:
         return f"  {label}: {empty_text}" if empty_text else None

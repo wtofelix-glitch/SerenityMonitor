@@ -394,35 +394,35 @@ class TestSuggestWeightAdjustments:
         """正 IC → 权重上调"""
         monkeypatch.setattr(reflection_engine, 'get_reflection_dimension_ic',
                             lambda days=20: {
-                                "base_score": 0.15, "zone_score": 0.10,
-                                "momentum_score": 0.05, "volume_score": 0.02,
-                                "serenity_score": 0.12, "factor_score": 0.08,
-                                "technical_score": 0.03, "sentiment_score": 0.06,
+                                "zone_score": 0.15, "momentum_score": 0.10,
+                                "volume_score": 0.05, "serenity_score": 0.02,
+                                "factor_score": 0.12, "technical_score": 0.08,
+                                "moat_score": 0.06,
                             })
         suggestions = suggest_weight_adjustments(days=20)
         assert len(suggestions) > 0
-        # IC=0.15 for base_score → factor = 1 + 0.15*1.667 ≈ 1.25
-        # new_weight = 0.15 * 1.25 = 0.1875
+        # IC=0.15 for zone_score → factor = 1 + 0.15*1.667 ≈ 1.25
+        # new_weight = 0.20 * 1.25 = 0.25
         from weight_adjuster import DEFAULT_WEIGHTS, IC_TO_WEIGHT
         expected_factor = 1.0 + 0.15 * 1.667
         expected_factor = max(0.5, min(1.5, expected_factor))
-        expected_weight = round(DEFAULT_WEIGHTS["base"] * expected_factor, 4)
-        assert suggestions["base"]["suggested"] == expected_weight
-        assert suggestions["base"]["ic"] == 0.15
+        expected_weight = round(DEFAULT_WEIGHTS["zone"] * expected_factor, 4)
+        assert suggestions["zone"]["suggested"] == expected_weight
+        assert suggestions["zone"]["ic"] == 0.15
 
     def test_negative_ic_lowers_weight(self, monkeypatch):
         """负 IC → 权重下调"""
         monkeypatch.setattr(reflection_engine, 'get_reflection_dimension_ic',
                             lambda days=20: {
-                                "base_score": -0.15, "zone_score": -0.10,
-                                "momentum_score": 0.05, "volume_score": 0.02,
-                                "serenity_score": -0.12, "factor_score": -0.08,
-                                "technical_score": 0.03, "sentiment_score": -0.06,
+                                "zone_score": -0.15, "momentum_score": -0.10,
+                                "volume_score": 0.05, "serenity_score": 0.02,
+                                "factor_score": -0.12, "technical_score": -0.08,
+                                "moat_score": 0.03,
                             })
         suggestions = suggest_weight_adjustments(days=20)
         from weight_adjuster import DEFAULT_WEIGHTS
-        assert suggestions["base"]["suggested"] < DEFAULT_WEIGHTS["base"]
-        assert suggestions["base"]["change_pct"] < 0
+        assert suggestions["zone"]["suggested"] < DEFAULT_WEIGHTS["zone"]
+        assert suggestions["zone"]["change_pct"] < 0
 
     def test_empty_ic_returns_empty(self, monkeypatch):
         """无 IC 数据 → 返回空字典"""

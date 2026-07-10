@@ -146,8 +146,8 @@ def cmd_trade_record(args: list):
 
     # 尝试获得股票名称
     try:
-        from config import STOCK_MAP
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        from config import get_stock_name
+        name = get_stock_name(code)
     except Exception:
         name = code
 

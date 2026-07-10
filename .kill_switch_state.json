@@ -1,0 +1,18 @@
+{
+  "triggered": false,
+  "trigger_type": "",
+  "trigger_reason": "",
+  "triggered_at": "2026-07-09T23:39:33.887758",
+  "daily_loss_locked": false,
+  "daily_loss_pct": 0.0,
+  "drawdown_warning": false,
+  "position_cap_multiplier": 1.0,
+  "events": [
+    {
+      "type": "MANUAL_RESET",
+      "reason": "done",
+      "timestamp": "2026-07-09T23:39:33.888012"
+    }
+  ],
+  "updated_at": "2026-07-09T23:39:33.888014"
+}

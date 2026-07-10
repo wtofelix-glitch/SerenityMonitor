@@ -142,8 +142,7 @@ def get_ensemble_signal(code: str, name: str = "", serenity_signal: str = "", se
 
 
 def run_ensemble_for_all() -> list[dict]:
-    """对所有 ALL_CODES 运行集成投票, 返回高确信列表"""
-    from config import ALL_CODES, STOCK_MAP
+    from config import ALL_CODES, STOCK_MAP, get_stock_name
     from db import get_conn
 
     conn = get_conn()
@@ -157,7 +156,7 @@ def run_ensemble_for_all() -> list[dict]:
     results = []
     for code in ALL_CODES:
         sig = sig_map.get(code, {})
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         result = get_ensemble_signal(
             code, name=name,
             serenity_signal=dict(sig).get("action", "WATCH") if sig else "WATCH",

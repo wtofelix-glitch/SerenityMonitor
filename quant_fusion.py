@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
-from typing import Any
-
-from config import ALL_CODES, STOCK_MAP
+from typing import Optional, Any
+from config import ALL_CODES, STOCK_MAP, get_stock_name
 from db import get_conn
 from security_check import build_security_report
 
@@ -174,7 +173,7 @@ def _safe_scalar(
     return default if value is None else value
 
 
-def _days_since(date_text: str | None) -> int | None:
+def _days_since(date_text: Optional[str]) -> Optional[int]:
     if not date_text:
         return None
     try:
@@ -232,7 +231,7 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _center_score(score_0_100: Any) -> float | None:
+def _center_score(score_0_100: Any) -> Optional[float]:
     try:
         value = float(score_0_100)
     except (TypeError, ValueError):
@@ -329,7 +328,7 @@ def _recent_total_scores(conn: sqlite3.Connection, code: str, limit: int) -> lis
     return scores
 
 
-def _price_return_score(conn: sqlite3.Connection, code: str, limit: int) -> float | None:
+def _price_return_score(conn: sqlite3.Connection, code: str, limit: int) -> Optional[float]:
     try:
         rows = conn.execute(
             """
@@ -389,7 +388,7 @@ def _build_code_consensus(
     columns: set[str],
 ) -> dict[str, Any]:
     code = row["code"]
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     objective = _objective_from_scoring_row(row, columns)
     current_score = float(objective["overall_score"])
     timeframes = {
@@ -451,9 +450,9 @@ def _build_code_consensus(
 
 def _empty_quantdinger_consensus(
     *,
-    latest_date: str | None = None,
+    latest_date: Optional[str] = None,
     covered: int = 0,
-    total: int | None = None,
+    total: Optional[int] = None,
 ) -> dict[str, Any]:
     total = len(ALL_CODES) if total is None else total
     return {
@@ -472,7 +471,7 @@ def _empty_quantdinger_consensus(
 
 
 def build_quantdinger_consensus(
-    conn: sqlite3.Connection | None = None,
+    conn: sqlite3.Optional[Connection] = None,
     *,
     limit: int = 8,
 ) -> dict[str, Any]:
@@ -543,7 +542,7 @@ def build_quantdinger_consensus(
             conn.close()
 
 
-def _score_data_resilience(coverage_pct: float, days_stale: int | None,
+def _score_data_resilience(coverage_pct: float, days_stale: Optional[int],
                            provider_count: int) -> int:
     provider_score = 30 if provider_count >= 2 else 12
     coverage_score = min(40, round(coverage_pct * 0.4))
@@ -900,7 +899,7 @@ def _build_recommendations(assessments: dict[str, dict[str, Any]]) -> list[dict[
     return recommendations
 
 
-def build_fusion_report(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+def build_fusion_report(conn: sqlite3.Optional[Connection] = None) -> dict[str, Any]:
     """构建融合体检报告。conn 传入时由调用方负责关闭。"""
     should_close = conn is None
     if conn is None:
@@ -932,7 +931,7 @@ def build_fusion_report(conn: sqlite3.Connection | None = None) -> dict[str, Any
             conn.close()
 
 
-def format_fusion_report(report: dict[str, Any] | None = None) -> str:
+def format_fusion_report(report: Optional[dict[str, Any]] = None) -> str:
     """格式化 CLI 输出。"""
     report = report or build_fusion_report()
     lines: list[str] = [

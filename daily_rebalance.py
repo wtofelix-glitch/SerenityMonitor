@@ -9,8 +9,7 @@ Usage:
 import logging
 from datetime import date
 from typing import Optional
-
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 logger = logging.getLogger("Serenity.DailyRebalance")
 
@@ -83,7 +82,7 @@ def generate_rebalance_push() -> Optional[str]:
     hold_items = []     # 持有
 
     for code, alloc in allocation.items():
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         cur_pct = alloc["current_weight"] * 100
         tgt_pct = alloc["suggested_weight"] * 100
         action = alloc["action"]

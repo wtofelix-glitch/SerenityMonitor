@@ -5,9 +5,9 @@
 from datetime import date, datetime
 from typing import Optional
 
-from db import get_conn
-from config import CAPITAL_CONFIG, STOCK_MAP
+from config import CAPITAL_CONFIG, STOCK_MAP, get_stock_name
 from data_engine import fetch_realtime
+from db import get_conn
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -185,7 +185,7 @@ class PaperTrader:
 
             positions.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "avg_cost": round(avg_cost, 2),
                 "current_price": current_price,
                 "shares": shares,
@@ -257,7 +257,7 @@ class PaperTrader:
         conn.commit()
         conn.close()
 
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         log.info("纸面%s: %s(%s) %d股 @%.2f", action, name, code, shares, price)
 
         return {

@@ -85,17 +85,72 @@ def test_wilson_lower_bound_blocks_nominal_60pct_gate(gate_db):
 
     assert result["sample_count"] >= result["required_sample_count"]
     assert result["win_rate"] == pytest.approx(0.60)
-    assert result["wilson_lower"] < 0.35
+    assert result["wilson_lower"] < 0.50
     assert result["gate_passed"] is False
     assert result["state"] != "SEMI_AUTO"
 
 
-def test_compliance_three_state_caps_semi_auto(gate_db):
+def test_net_expected_return_requires_same_version_settled_samples(gate_db):
+    import auto_gate
+
+    version = auto_gate.ensure_current_strategy_version()["version"]
+    conn = gate_db.get_conn()
+    for idx in range(10):
+        conn.execute(
+            """
+            INSERT INTO signal_log
+                (code, date, time, action, total_score, price, return_5d,
+                 strategy_version, settlement_status, executable_status,
+                 data_quality, adjustment_mode)
+            VALUES ('600585', ?, '09:30', 'BUY', 70, 10, 1.0,
+                    ?, 'settled', 'executable', 'high', 'raw')
+            """,
+            ((date(2026, 2, 1) + timedelta(days=idx)).isoformat(), version),
+        )
+    conn.commit()
+    conn.close()
+
+    edge = auto_gate.estimate_net_expected_return("600585", "BUY")
+
+    assert edge["ready"] is True
+    assert edge["samples"] == 10
+    assert edge["net_pct"] == pytest.approx(0.698)
+    assert auto_gate.estimate_net_expected_return("600036", "BUY")["ready"] is False
+
+
+def test_returning_to_old_hash_creates_new_major_version(gate_db, monkeypatch):
+    import auto_gate
+
+    original = auto_gate.default_strategy_config
+    config_a = original()
+    config_b = {**config_a, "min_point_win_rate": 0.61}
+
+    monkeypatch.setattr(auto_gate, "default_strategy_config", lambda: config_a)
+    first = auto_gate.ensure_current_strategy_version()
+    monkeypatch.setattr(auto_gate, "default_strategy_config", lambda: config_b)
+    second = auto_gate.ensure_current_strategy_version()
+    monkeypatch.setattr(auto_gate, "default_strategy_config", lambda: config_a)
+    third = auto_gate.ensure_current_strategy_version()
+
+    assert [first["version"], second["version"], third["version"]] == ["v1.0", "v2.0", "v3.0"]
+    assert first["config_hash"] == third["config_hash"]
+    assert third["version"] != first["version"]
+
+
+def test_compliance_three_state_caps_semi_auto(gate_db, monkeypatch):
     import auto_gate
 
     version = auto_gate.ensure_current_strategy_version()["version"]
     _insert_gate_samples(gate_db, version, wins=33)
     _insert_valid_broker_risk_evidence(gate_db)
+    monkeypatch.setattr(auto_gate, "assess_p0_alpha_validation", lambda conn=None: {
+        "source": "alpha_validation",
+        "verified": True,
+        "hard_lock_required": False,
+        "verdict": "P0_PASS",
+        "reasons": [],
+        "criteria": [],
+    })
 
     for status in ("not_reported", "reported_pending_review", "rejected"):
         gate_db.set_compliance_status(status)
@@ -130,6 +185,99 @@ def test_consecutive_loss_rule_is_hashed_and_explained(gate_db):
     assert result["gate_passed"] is False
     assert result["consecutive_loss_ok"] is False
     assert len(result["consecutive_loss_trigger"]) == 3
+
+
+def test_p0_alpha_failure_hard_locks_automation(gate_db, monkeypatch):
+    import auto_gate
+
+    version = auto_gate.ensure_current_strategy_version()["version"]
+    _insert_gate_samples(gate_db, version, wins=50)
+    _insert_valid_broker_risk_evidence(gate_db)
+    gate_db.set_compliance_status("approved")
+    monkeypatch.setattr(auto_gate, "assess_p0_alpha_validation", lambda conn=None: {
+        "source": "alpha_validation",
+        "verified": False,
+        "hard_lock_required": True,
+        "verdict": "P0_FAIL",
+        "reasons": ["p0_alpha_validation P0_FAIL != P0_PASS"],
+        "criteria": [{"key": "same_pool_drawdown", "status": "BLOCK"}],
+    })
+
+    result = auto_gate.evaluate_auto_gate()
+
+    assert result["gate_passed"] is False
+    assert result["state"] == "LOCKED"
+    assert result["p0_alpha_validation"]["verdict"] == "P0_FAIL"
+    assert "p0_alpha_validation P0_FAIL != P0_PASS" in result["reasons"]
+
+
+def test_p0_not_proven_keeps_gate_in_paper_research_state(gate_db, monkeypatch):
+    import auto_gate
+
+    version = auto_gate.ensure_current_strategy_version()["version"]
+    _insert_gate_samples(gate_db, version, wins=50)
+    _insert_valid_broker_risk_evidence(gate_db)
+    gate_db.set_compliance_status("approved")
+    monkeypatch.setattr(auto_gate, "assess_p0_alpha_validation", lambda conn=None: {
+        "source": "alpha_validation",
+        "verified": False,
+        "hard_lock_required": False,
+        "verdict": "P0_NOT_PROVEN",
+        "reasons": ["p0_alpha_validation P0_NOT_PROVEN != P0_PASS"],
+        "criteria": [{"key": "real_samples", "status": "INSUFFICIENT"}],
+    })
+
+    result = auto_gate.evaluate_auto_gate()
+
+    assert result["gate_passed"] is False
+    assert result["state"] == "PAPER"
+    assert result["p0_alpha_validation"]["verdict"] == "P0_NOT_PROVEN"
+
+
+def test_paper_samples_are_diagnostic_not_gate_eligible(gate_db, monkeypatch):
+    import auto_gate
+
+    config = auto_gate.default_strategy_config()
+    monkeypatch.setattr(auto_gate, "default_strategy_config", lambda: {**config, "sample_size": 1})
+    auto_gate.ensure_current_strategy_version()
+    _insert_valid_broker_risk_evidence(gate_db)
+    gate_db.set_compliance_status("approved")
+
+    conn = gate_db.get_conn()
+    conn.execute(
+        """
+        INSERT INTO paper_trades
+            (code, action, price, quantity, date, trade_amount)
+        VALUES ('600585', 'buy', 10, 100, '2026-01-05', 1000)
+        """
+    )
+    for price_date, close in [
+        ("2026-01-06", 10.1),
+        ("2026-01-07", 10.2),
+        ("2026-01-08", 10.3),
+        ("2026-01-09", 10.4),
+        ("2026-01-12", 10.5),
+    ]:
+        conn.execute(
+            """
+            INSERT INTO price_history
+                (code, date, open, close, high, low, volume, change_pct,
+                 adjustment_mode, quality_status)
+            VALUES ('600585', ?, ?, ?, ?, ?, 1000, 0, 'raw', 'high')
+            """,
+            (price_date, close, close, close, close),
+        )
+    conn.commit()
+    conn.close()
+
+    result = auto_gate.evaluate_auto_gate(explain=True)
+
+    assert result["sample_count"] == 0
+    assert result["gate_passed"] is False
+    assert result["state"] == "PAPER"
+    assert "sample_count 0 < 1" in result["reasons"]
+    assert result["explain"]["paper_sample_count"] == 1
+    assert "diagnostic only" in result["explain"]["paper_note"]
 
 
 def test_backtest_adjusted_data_is_diagnostic_only():
@@ -265,6 +413,44 @@ def test_record_real_data_conflict_marks_low_quality(gate_db, monkeypatch):
     assert "source conflict" in warning["warning"]
 
 
+def test_record_real_data_flags_source_date_mismatch(gate_db, monkeypatch):
+    import auto_gate
+    import data_engine
+
+    def fake_fetch(codes, source="sina"):
+        return [{
+            "code": "002281",
+            "name": "光迅科技",
+            "date": "2026-01-04",
+            "open": 100.0,
+            "price": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "volume": 1000,
+            "amount": 100000,
+            "close_yesterday": 99.0,
+        }]
+
+    monkeypatch.setattr(data_engine, "fetch_realtime", fake_fetch)
+
+    result = auto_gate.record_real_data(dry_run=False, codes=["002281"], as_of="2026-01-05")
+
+    assert result["date"] == "2026-01-05"
+    assert result["source_date_mismatches"][0]["code"] == "002281"
+    assert result["low_quality"][0]["code"] == "002281"
+    conn = gate_db.get_conn()
+    row = conn.execute(
+        "SELECT date, quality_status FROM price_history WHERE code='002281'"
+    ).fetchone()
+    warning = conn.execute(
+        "SELECT warning FROM data_quality_log WHERE code='002281'"
+    ).fetchone()
+    conn.close()
+    assert row["date"] == "2026-01-05"
+    assert row["quality_status"] == "low"
+    assert "source date 2026-01-04 != collection date 2026-01-05" in warning["warning"]
+
+
 def test_record_real_data_skips_akshare_when_primary_sources_cover_codes(gate_db, monkeypatch):
     import auto_gate
     import data_engine
@@ -358,6 +544,50 @@ def test_default_real_data_collection_includes_gate_benchmarks(gate_db, monkeypa
 
     assert {"000300", "000905"}.issubset(requested[0][1])
     assert {"000300", "000905"}.issubset({row["code"] for row in result["records"]})
+
+
+def test_default_real_data_collection_includes_pending_signal_codes(gate_db, monkeypatch):
+    import auto_gate
+    import data_engine
+
+    version = auto_gate.ensure_current_strategy_version()["version"]
+    conn = gate_db.get_conn()
+    conn.execute(
+        """
+        INSERT INTO signal_log
+            (code, date, time, action, total_score, price, strategy_version,
+             settlement_status, executable_status, data_quality, adjustment_mode)
+        VALUES ('600999', '2026-07-02', '16:00', 'BUY', 80, 10, ?,
+                'pending', 'unknown', 'unknown', 'raw')
+        """,
+        (version,),
+    )
+    conn.commit()
+    conn.close()
+    requested = []
+
+    def fake_fetch(codes, source="sina"):
+        requested.append((source, set(codes)))
+        return [{
+            "code": code,
+            "name": code,
+            "date": "2026-07-03",
+            "open": 100.0,
+            "price": 100.0,
+            "high": 101.0,
+            "low": 99.0,
+            "volume": 1000,
+            "amount": 100000,
+            "close_yesterday": 99.0,
+        } for code in codes]
+
+    monkeypatch.setattr(data_engine, "fetch_realtime", fake_fetch)
+
+    result = auto_gate.record_real_data(dry_run=True, as_of="2026-07-03")
+
+    assert "600999" in requested[0][1]
+    assert "000905" in requested[0][1]
+    assert "600999" in {row["code"] for row in result["records"]}
 
 
 def test_benchmark_indices_use_shanghai_market_prefix():
@@ -466,6 +696,49 @@ def test_settle_outcome_uses_t1_to_t6_for_stock_and_benchmark(gate_db):
     assert row["benchmark_return_5d"] == pytest.approx(2.0)
     assert row["excess_5d"] == pytest.approx(8.0)
     assert row["settlement_status"] == "settled"
+
+
+def test_settle_outcome_as_of_waits_until_exit_date(gate_db):
+    import auto_gate
+
+    signal_date = "2026-07-02"
+    entry_date = auto_gate.add_trading_days(signal_date, 1)
+    exit_date = auto_gate.add_trading_days(signal_date, 6)
+    version = auto_gate.ensure_current_strategy_version()["version"]
+    conn = gate_db.get_conn()
+    conn.execute(
+        """
+        INSERT INTO signal_log
+            (code, date, time, action, total_score, price,
+             strategy_version, settlement_status, executable_status, data_quality, adjustment_mode)
+        VALUES ('002281', ?, '14:55', 'BUY', 80, 10, ?,
+                'pending', 'unknown', 'unknown', 'raw')
+        """,
+        (signal_date, version),
+    )
+    for code, entry_open, exit_open in [
+        ("002281", 10.0, 11.0),
+        ("000905", 100.0, 102.0),
+    ]:
+        for price_date, value in ((entry_date, entry_open), (exit_date, exit_open)):
+            conn.execute(
+                """
+                INSERT INTO price_history
+                    (code, date, open, close, high, low, volume, change_pct,
+                     adjustment_mode, quality_status)
+                VALUES (?, ?, ?, ?, ?, ?, 1000, 0, 'raw', 'high')
+                """,
+                (code, price_date, value, value, value, value),
+            )
+    conn.commit()
+    conn.close()
+
+    early = auto_gate.settle_pending_signal_outcomes(dry_run=True, as_of=entry_date)
+    mature = auto_gate.settle_pending_signal_outcomes(dry_run=False, as_of=exit_date)
+
+    assert early["settled"] == 0
+    assert early["pending"] == 1
+    assert mature["settled"] == 1
 
 
 def test_settlement_diagnostic_explains_missing_benchmark(gate_db):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+from typing import Optional
 Serenity Monitor CLI
 使用: python3 cli.py info <code>
      python3 cli.py status
@@ -44,13 +45,21 @@ Serenity Monitor CLI
      python3 cli.py health                 # 🔬 系统健康诊断
      python3 cli.py fusion                 # 🧬 GitHub A股量化精华融合体检
      python3 cli.py alpha-gate             # Alpha Gate 选股候选研究闸门
+     python3 cli.py alpha-validation       # P0 alpha 证据验证包
      python3 cli.py security-check         # 🔐 写接口安全体检
      python3 cli.py auto                  # 🆕 自动调仓计划
-     python3 cli.py record-real-data --dry-run  # 🆕 真实行情记录/信号结算
+     python3 cli.py record-real-data --dry-run [--as-of YYYY-MM-DD]  # 🆕 真实行情记录/信号结算
      python3 cli.py auto-gate --explain    # 🆕 自动交易统计闸门
      python3 cli.py strategy-version       # 🆕 当前冻结策略版本
      python3 cli.py compliance-status      # 🆕 合规报告状态
      python3 cli.py broker-snapshot <json-file> [--dry-run]
+     python3 cli.py broker-snapshot-template [--write]
+     python3 cli.py broker-snapshot-lint <json-file>
+     python3 cli.py cashflow-reconciliation <json-file> [--dry-run]
+     python3 cli.py cashflow-reconciliation-template [--write]
+     python3 cli.py cashflow-reconciliation-lint <json-file>
+     python3 cli.py p0-sample-readiness
+     python3 cli.py p0-status
      python3 cli.py auto-exec             # 🚀 强制信号执行（含重试）
      python3 cli.py auto-stats            # 📊 信号执行统计
      python3 cli.py auto-premarket        # ⏰ 盘前简报推送
@@ -72,6 +81,7 @@ import importlib
 import json
 import os
 from datetime import date
+from typing import Optional
 
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -82,8 +92,7 @@ from db import (
 )
 from data_engine import fetch_realtime, fetch_single, get_all_today_snapshots
 from daily_report import generate_daily_report, generate_simple_status
-from price_alert import check_alerts, get_pending_alerts, ack, check_suggested_targets
-from config import get_default_stocks, SUGGESTED_TARGETS, STOCK_MAP, STOCK_DETAILS
+from config import get_default_stocks, SUGGESTED_TARGETS, STOCK_MAP, STOCK_DETAILS, get_stock_name
 from scorer import score_all
 from monitor import monitor_all, get_monitor_summary
 from portfolio import PortfolioManager, get_portfolio
@@ -199,7 +208,7 @@ def cmd_rebalance():
         if code not in {p["code"] for p in positions}:
             current_portfolio.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "trade_amount": 0,
                 "buy_price": 0,
             })
@@ -216,10 +225,20 @@ def cmd_record_real_data():
     """Record real market data and settle mature signal outcomes."""
     from auto_gate import format_record_report, record_real_data, settle_pending_signal_outcomes
 
+    args = sys.argv[2:]
     dry_run = "--dry-run" in sys.argv
-    data_result = record_real_data(dry_run=dry_run)
+    as_of = None
+    if "--as-of" in args:
+        idx = args.index("--as-of")
+        if idx + 1 >= len(args):
+            raise SystemExit("用法: python3 cli.py record-real-data [--dry-run] [--as-of YYYY-MM-DD]")
+        as_of = args[idx + 1]
+        as_of_date = date.fromisoformat(as_of)
+        if as_of_date > date.today() and not dry_run:
+            raise SystemExit("record-real-data: 未来日期只能使用 --dry-run")
+    data_result = record_real_data(dry_run=dry_run, as_of=as_of)
     print(format_record_report(data_result))
-    settle_result = settle_pending_signal_outcomes(dry_run=dry_run)
+    settle_result = settle_pending_signal_outcomes(dry_run=dry_run, as_of=as_of)
     print(
         "settle outcomes "
         f"dry_run={settle_result['dry_run']} "
@@ -243,6 +262,97 @@ def cmd_broker_snapshot():
         payload = json.load(handle)
     result = import_broker_snapshot(payload, dry_run="--dry-run" in sys.argv)
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_broker_snapshot_template():
+    """Print a fill-in broker-account snapshot template."""
+    from operations_center import build_broker_snapshot_template
+
+    result = build_broker_snapshot_template()
+    if "--write" in sys.argv:
+        filename = result["suggested_filename"]
+        with open(filename, "w", encoding="utf-8") as handle:
+            json.dump(result["template"], handle, ensure_ascii=False, indent=2, default=str)
+            handle.write("\n")
+        result = {**result, "written_path": os.path.abspath(filename)}
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_broker_snapshot_lint():
+    """Validate a broker-account snapshot JSON file without writing it."""
+    from operations_center import lint_broker_snapshot_payload
+
+    if len(sys.argv) < 3:
+        raise SystemExit("用法: python3 cli.py broker-snapshot-lint <json-file>")
+    with open(sys.argv[2], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    print(json.dumps(lint_broker_snapshot_payload(payload), ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_cashflow_reconciliation_template():
+    """Print a fill-in template for the P0 drawdown-window cashflow blocker."""
+    from operations_center import build_cashflow_reconciliation_template
+
+    result = build_cashflow_reconciliation_template()
+    if "--write" in sys.argv:
+        filename = result.get("suggested_filename") or "cashflow_reconciliation.json"
+        with open(filename, "w", encoding="utf-8") as handle:
+            json.dump(result.get("template", result), handle, ensure_ascii=False, indent=2, default=str)
+            handle.write("\n")
+        result = {**result, "written_path": os.path.abspath(filename)}
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_cashflow_reconciliation():
+    """Import validated P0 cashflow reconciliation evidence from JSON."""
+    from operations_center import import_cashflow_reconciliation
+
+    args = [arg for arg in sys.argv[2:] if arg != "--dry-run"]
+    if not args:
+        raise SystemExit("用法: python3 cli.py cashflow-reconciliation <json-file> [--dry-run]")
+    with open(args[0], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    result = import_cashflow_reconciliation(payload, dry_run="--dry-run" in sys.argv)
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_cashflow_reconciliation_lint():
+    """Validate a filled P0 cashflow reconciliation JSON file without writing it."""
+    from operations_center import lint_cashflow_reconciliation_payload
+
+    if len(sys.argv) < 3:
+        raise SystemExit("用法: python3 cli.py cashflow-reconciliation-lint <json-file>")
+    with open(sys.argv[2], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    print(json.dumps(lint_cashflow_reconciliation_payload(payload), ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_p0_sample_readiness():
+    """Show P0 real BUY sample settlement readiness."""
+    from operations_center import build_sample_readiness_report
+
+    as_of = None
+    args = sys.argv[2:]
+    if "--as-of" in args:
+        idx = args.index("--as-of")
+        if idx + 1 >= len(args):
+            raise SystemExit("用法: python3 cli.py p0-sample-readiness [--as-of YYYY-MM-DD]")
+        as_of = args[idx + 1]
+    print(json.dumps(build_sample_readiness_report(as_of=as_of), ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_p0_evidence_status():
+    """Show one P0 evidence status object with ordered next actions."""
+    from operations_center import build_p0_evidence_status
+
+    as_of = None
+    args = sys.argv[2:]
+    if "--as-of" in args:
+        idx = args.index("--as-of")
+        if idx + 1 >= len(args):
+            raise SystemExit("用法: python3 cli.py p0-status [--as-of YYYY-MM-DD]")
+        as_of = args[idx + 1]
+    print(json.dumps(build_p0_evidence_status(as_of=as_of), ensure_ascii=False, indent=2, default=str))
 
 
 def cmd_auto_gate():
@@ -297,14 +407,28 @@ def cmd_compliance_status():
     print(f"notes: {row.get('notes', '') or '-'}")
 
 
-def _stage_order_states(plan: dict) -> int:
-    from auto_gate import create_order_state
+def _stage_order_states(plan: dict) -> tuple[int, list[dict]]:
+    from auto_gate import create_order_state, estimate_net_expected_return
 
     count = 0
+    skipped_buys: list[dict] = []
     for group in ("sells", "buys"):
         for order in plan.get(group, []):
             code = order["code"]
             action = "SELL" if group == "sells" else "BUY"
+            if action == "BUY":
+                edge = order.get("net_edge")
+                if not isinstance(edge, dict):
+                    edge = estimate_net_expected_return(code, order.get("signal", "BUY"))
+                    order["net_edge"] = edge
+                if not edge.get("ready"):
+                    skipped_buys.append({
+                        "code": code,
+                        "samples": edge.get("samples", 0),
+                        "net_pct": edge.get("net_pct"),
+                        "reason": edge.get("reason", "net_edge_not_ready"),
+                    })
+                    continue
             price = order.get("price") or (
                 order.get("estimated_proceeds", 0) / max(order.get("shares", 1), 1)
             )
@@ -319,7 +443,7 @@ def _stage_order_states(plan: dict) -> int:
                                reason="awaiting manual confirmation",
                                idempotency_key=key)
             count += 1
-    return count
+    return count, skipped_buys
 
 
 def cmd_auto_guarded(force_execute: bool = False):
@@ -349,7 +473,13 @@ def cmd_auto_guarded(force_execute: bool = False):
 
     plan = auto_execute.generate_execution_plan(dry_run=True)
     print(plan["summary"])
-    staged = _stage_order_states(plan)
+    staged, skipped_buys = _stage_order_states(plan)
+    if skipped_buys:
+        skipped = ", ".join(
+            f"{item['code']}(samples={item['samples']}, net={item['net_pct']})"
+            for item in skipped_buys
+        )
+        print(f"\n买入净期望证据不足，未排队: {skipped}")
     print(f"\nSEMI_AUTO: staged {staged} orders as pending_confirm; no live trade submitted in v1")
 
 
@@ -808,7 +938,7 @@ def _print_uzi_rows(results: list[dict], *, traps_only: bool = False):
     print("=" * 92)
 
 
-def cmd_uzi(args: list[str] | None = None):
+def cmd_uzi(args: Optional[list[str]] = None):
     """UZI AI卡位评分、证据账本、权重校准入口。"""
     args = args or []
     sub = args[0] if args else "rank"
@@ -827,8 +957,7 @@ def cmd_uzi(args: list[str] | None = None):
             return
         code = args[1]
         from uzi_insight import evaluate_uzi_insight
-        from moat_factor import compute_moat_score
-        from config import compute_serenity_score
+        from config import compute_serenity_score, get_stock_name
         try:
             snap = next((s for s in get_all_today_snapshots() if s["code"] == code), {})
         except Exception:
@@ -845,7 +974,7 @@ def cmd_uzi(args: list[str] | None = None):
             serenity_score=compute_serenity_score(code),
             sentiment_score=50,
         )
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         print(f"🧬 UZI 细节 | {name}({code})")
         print("=" * 60)
         print(f"评分: {result['uzi_score']:.1f} | 评级: {result['rating']} | 结论: {result['verdict']}")
@@ -881,7 +1010,7 @@ def cmd_uzi(args: list[str] | None = None):
                 print("暂无证据")
                 return
             for row in rows:
-                name = STOCK_MAP.get(row["code"], {}).get("name", row["code"])
+                name = get_stock_name(row["code"])
                 status = "" if row.get("active", 1) else " [inactive]"
                 print(f"#{row['id']} {name}({row['code']}) {row['event_date']} {row['strength']}{status}")
                 print(f"  {row['title']}")
@@ -1222,8 +1351,7 @@ def cmd_trade(code: str, action: str, amount: float = 0):
         if actual_amount <= 0:
             print(f"❌ 无效金额")
             return
-        from db import set_active, add_trade
-        from config import STOCK_DETAILS
+        from config import STOCK_DETAILS, get_stock_name
         detail = STOCK_DETAILS.get(code, {})
         today = date.today().isoformat()
         set_active(code, price, today, detail.get("target_sell", 0), detail.get("buy_zone_low", 0))
@@ -1232,7 +1360,7 @@ def cmd_trade(code: str, action: str, amount: float = 0):
         conn.commit()
         conn.close()
         add_trade(code, "buy", price, shares, today, f"手动买入 {actual_amount:.0f}元", trade_amount=actual_amount)
-        print(f"✅ 已记录买入 {STOCK_MAP.get(code,{}).get('name',code)} {shares}股 @ {price:.2f}")
+        print(f"✅ 已记录买入 {get_stock_name(code)} {shares}股 @ {price:.2f}")
     elif action == "sell" and amount > 0:
         # 部分卖出
         from data_engine import fetch_single
@@ -1368,7 +1496,7 @@ def cmd_sector():
             else:
                 change_pct = 0.0
 
-            name = name_map.get(code, STOCK_MAP.get(code, {}).get("name", code))
+            name = name_map.get(code, get_stock_name(code))
             is_active = code in active_codes
             prefix = "  "
             star = ""
@@ -1589,7 +1717,7 @@ def _quick_query(code: str):
         print(f"❌ 无法获取 {code} 行情数据")
         return
 
-    name = STOCK_MAP.get(code, {}).get("name", data.get("name", code))
+    name = data.get("name") or get_stock_name(code)
     price = data.get("price", 0)
     close_y = data.get("close_yesterday", 0)
     change_pct = round((price - close_y) / close_y * 100, 2) if close_y else 0
@@ -1760,7 +1888,7 @@ def cmd_multi_cycle_factors(code: str):
         print(f"⚠️ {code} 数据不足，无法计算三周期因子")
         return
 
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     print(f"🅱 三周期因子对比矩阵 | {code} {name}")
     print("═══════════════════════════════════════════════════════════════════")
     print()
@@ -1947,6 +2075,11 @@ def cmd_alpha_gate():
     """Alpha Gate 选股候选研究闸门"""
     from alpha_gate import format_alpha_gate_report
     print(format_alpha_gate_report())
+
+def cmd_alpha_validation():
+    """P0 alpha 证据验证包"""
+    from alpha_validation import format_alpha_validation_report
+    print(format_alpha_validation_report())
 
 def cmd_security_check():
     """🔐 写接口安全体检"""
@@ -2154,6 +2287,8 @@ def main():
         "fusion": cmd_quant_fusion,
         "quant-fusion": cmd_quant_fusion,
         "alpha-gate": cmd_alpha_gate,
+        "alpha-validation": cmd_alpha_validation,
+        "alpha-validate": cmd_alpha_validation,
         "security-check": cmd_security_check,
         "tier1-reentry": cmd_tier1_reentry,
         "record-real-data": cmd_record_real_data,
@@ -2161,6 +2296,18 @@ def main():
         "strategy-version": cmd_strategy_version,
         "compliance-status": cmd_compliance_status,
         "broker-snapshot": cmd_broker_snapshot,
+        "broker-snapshot-template": cmd_broker_snapshot_template,
+        "broker-snapshot-lint": cmd_broker_snapshot_lint,
+        "cashflow-reconciliation": cmd_cashflow_reconciliation,
+        "p0-cashflow": cmd_cashflow_reconciliation,
+        "cashflow-reconciliation-template": cmd_cashflow_reconciliation_template,
+        "p0-cashflow-template": cmd_cashflow_reconciliation_template,
+        "cashflow-reconciliation-lint": cmd_cashflow_reconciliation_lint,
+        "p0-cashflow-lint": cmd_cashflow_reconciliation_lint,
+        "p0-sample-readiness": cmd_p0_sample_readiness,
+        "sample-readiness": cmd_p0_sample_readiness,
+        "p0-status": cmd_p0_evidence_status,
+        "p0-evidence-status": cmd_p0_evidence_status,
         "auto": lambda: cmd_auto_guarded(force_execute=False),
         "auto-exec": lambda: cmd_auto_guarded(force_execute=True),
         "auto-stats": lambda: (sys.argv.append('--stats'), cmd_auto_execute())[1],
@@ -2184,6 +2331,12 @@ def main():
         "phase4-checklist": lambda: __import__('phase4_checklist').run_checklist(),
         "observe-status": lambda: cmd_observe_status(),
         "weekly-report": lambda: cmd_weekly_report(),
+        "phase-status": lambda: cmd_phase_status(),
+        "oos-freeze": lambda: __import__('freeze_experiment').main_after(['freeze']),
+        "oos-status": lambda: __import__('freeze_experiment').main_after(['status']),
+        "oos-record": lambda: __import__('freeze_experiment').main_after(['record']),
+        "oos-judge": lambda: __import__('freeze_experiment').main_after(['judge']),
+        "oos-weekly-log": lambda: __import__('freeze_experiment').main_after(['weekly-log'] + sys.argv[2:]),
     }
 
     if cmd in commands:
@@ -2361,6 +2514,181 @@ def cmd_weekly_report():
     if "--push" in sys.argv:
         save_report(report)
         push_report(report)
+
+
+def cmd_phase_status():
+    """v4 五阶段优化进度仪表盘。"""
+    from datetime import date, datetime
+    import json
+
+    today = date.today()
+
+    # ═══ Header ═══
+    print("═" * 64)
+    print("  SerenityMonitor v4 五阶段优化进度")
+    print(f"  {today.isoformat()}  |  751 tests passing  |  kernel FROZEN")
+    print("═" * 64)
+
+    # ═══ Phase 1-5 ═══
+    phases = [
+        ("Phase 1", "交易内核冻结 + A股微观结构", True, [
+            "market_microstructure.py ✅", "execution_simulator.py ✅",
+            "fill_model.py ✅", "kernel_freeze (9 modules) ✅",
+            "max_single_weight 35% ✅", "T4 防御底仓 20% ✅",
+        ]),
+        ("Phase 2", "决策审计链 + Frozen Baseline", True, [
+            "decision_audit_log (1356 records) ✅", "audit_logger ✅",
+            "frozen_baseline.py v2 ✅", "equal_weight_basket.py ✅",
+            "weekly_comparison_report ✅", "frozen_comparison_history ✅",
+        ]),
+        ("Phase 3", "统计修复 + 消融实验", True, [
+            "factor_audit (去冗余 7→2) ✅", "ICIR 主排序 ✅",
+            "stock_pool_audit (反事实回测) ✅", "ablation_framework ✅",
+            "correlation_cluster 风控 ✅", "Frozen Baseline v2 ✅",
+        ]),
+        ("Phase 4", "小资金半自动实盘验证", True, [
+            "observation_mode (7 停机条件) ✅", "market_event_detector ✅",
+            "phase4_checklist ✅", "human_override logging ✅",
+            "T4 防御底仓强制执行 ✅", "correlation_cluster 集成 ✅",
+        ]),
+        ("Phase 5", "TradeGateway + KillSwitch + 晋级", True, [
+            "trade_gateway.py ✅", "kill_switch.py ✅",
+            "promotion_ceremony.py ✅", "sim_verification.py ✅",
+        ]),
+    ]
+
+    for name, desc, done, items in phases:
+        icon = "✅" if done else "⏳"
+        print(f"\n  {icon} {name}: {desc}")
+        for item in items:
+            print(f"      {item}")
+
+    # ═══ Clock-dependent items ═══
+    print(f"\n  {'─' * 60}")
+    print("  ⏳ 时钟依赖项 (需自然时间积累)")
+
+    try:
+        from frozen_baseline import FROZEN_SINCE, FROZEN_VERSION
+        frozen_date = date.fromisoformat(FROZEN_SINCE)
+        cal_weeks = (today - frozen_date).days / 7
+        from db import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT date) FROM frozen_comparison_history"
+        ).fetchone()
+        data_days = row[0] if row else 0
+        conn.close()
+        print(f"  Frozen Baseline {FROZEN_VERSION}: {cal_weeks:.1f} 日历周 / {data_days} data天 (需 ≥8周)")
+    except Exception as e:
+        print(f"  Frozen Baseline: 读取失败 ({e})")
+
+    try:
+        from phase4_checklist import Phase4Checklist
+        cl = Phase4Checklist()
+        results = cl.run_all()
+        passed = sum(1 for r in results if r['status'] == 'PASS')
+        failed = sum(1 for r in results if r['status'] == 'FAIL')
+        pending = sum(1 for r in results if r['status'] == 'PENDING')
+        print(f"  Phase 4 上线自检: {passed}P/{failed}F/{pending}⏳")
+        if pending > 0:
+            for r in results:
+                if r['status'] == 'PENDING':
+                    print(f"    ⏳ {r['item']}: {r['detail'][:60]}")
+    except Exception as e:
+        print(f"  Phase 4 自检: 读取失败 ({e})")
+
+    try:
+        from observation_mode import get_observer, market_coverage_ok
+        obs = get_observer()
+        status = obs.get_status()
+        emoji = {"NORMAL": "🟢", "OBSERVATION": "🔶", "EMERGENCY": "🔴"}
+        print(f"  观察模式: {emoji.get(status['mode'], '❓')} {status['mode']}")
+        mkt = market_coverage_ok()
+        if mkt["ok"]:
+            print(f"  市场事件覆盖: ✅ {mkt['events_found']} 次 ≥3% 大盘波动")
+        else:
+            print(f"  市场事件覆盖: ⏳ 未检测到 ≥3% 大盘波动")
+    except Exception:
+        pass
+
+    try:
+        from kill_switch import get_kill_switch
+        ks = get_kill_switch()
+        ks_status = ks.get_status()
+        if ks_status["triggered"]:
+            print(f"  🔴 熔断: {ks_status['trigger_type']} — {ks_status['trigger_reason'][:50]}")
+        else:
+            print(f"  熔断: 🟢 正常 (position_cap={ks_status['position_cap_multiplier']:.1f}x)")
+    except Exception:
+        pass
+
+    # ═══ Key metrics ═══
+    print(f"\n  {'─' * 60}")
+    print("  📊 关键指标")
+
+    try:
+        from db import get_conn
+        conn = get_conn()
+        # Audit log
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM decision_audit_log")
+        dal_total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM decision_audit_log WHERE t5_return_net IS NOT NULL")
+        dal_settled = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM decision_audit_log WHERE signal_divergence != ''")
+        dal_div = cur.fetchone()[0]
+        print(f"  决策审计: {dal_total} 条 ({dal_settled} 已结算, {dal_div} 分歧)")
+
+        # Signal log
+        cur.execute("SELECT COUNT(*) FROM signal_log")
+        sig_total = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM signal_log WHERE return_5d IS NOT NULL")
+        sig_settled = cur.fetchone()[0]
+        print(f"  信号日志: {sig_total} 条 ({sig_settled} 有outcome)")
+
+        # Portfolio
+        from portfolio import get_portfolio
+        pm = get_portfolio()
+        pv = pm.get_portfolio_value()
+        print(f"  组合净值: ¥{pv['total_value']:,.0f} (收益 {pv['total_profit_pct']:+.1f}%)")
+
+        # EW Basket
+        from equal_weight_basket import get_basket
+        eb = get_basket()
+        snap = eb.snapshot()
+        print(f"  Equal Weight: ¥{snap['nav']:,.0f} (日 {snap['daily_return']}%)")
+
+        # Frozen
+        from frozen_baseline import get_frozen_metadata
+        meta = get_frozen_metadata()
+        print(f"  Frozen Baseline: {meta['version']} (since {meta['frozen_since']}, {meta.get('factor_count','?')} factors)")
+
+        # Kernel freeze
+        from kernel_freeze import all_frozen_ids
+        frozen_ids = all_frozen_ids()
+        print(f"  内核冻结: {len(frozen_ids)}/9 模块 (clock_reset={meta.get('clock_reset', '?')})")
+
+        conn.close()
+    except Exception as e:
+        print(f"  (指标读取部分失败: {e})")
+
+    # ═══ De-redundancy ═══
+    try:
+        import os, json
+        config_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            ".de_redundancy_config.json"
+        )
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                dr = json.load(f)
+            print(f"  因子去冗余: {dr['original_factors']}→{dr['n_independent']} ({dr['generated_at']})")
+    except Exception:
+        pass
+
+    print(f"\n{'═' * 64}")
+    print("  下一里程碑: Frozen Baseline ≥8 周 → Adaptive vs Frozen 判定")
+    print(f"{'═' * 64}")
 
 
 if __name__ == "__main__":

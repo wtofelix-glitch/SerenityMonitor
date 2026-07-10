@@ -96,8 +96,8 @@ def map_news_to_market(news_titles):
     if not AVAILABLE or not news_titles:
         return None
 
-    from config import ALL_CODES, STOCK_MAP
-    stock_list = "\n".join(f"{c} {STOCK_MAP.get(c,{}).get('name',c)}" for c in ALL_CODES)
+    from config import ALL_CODES, STOCK_MAP, get_stock_name
+    stock_list = "\n".join(f"{c} {get_stock_name(c)}" for c in ALL_CODES)
 
     prompt = f"""你是A股量化研究员。根据当前新闻判断哪些持仓标的会受影响。可用标的:
 {stock_list}

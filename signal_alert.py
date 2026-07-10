@@ -20,8 +20,7 @@ import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-
-from config import STOCK_MAP, ALL_CODES
+from config import STOCK_MAP, ALL_CODES, get_stock_name
 from factor_engine import AlphaFactorEngine
 from signal_engine import compute_technical_factors, compute_trend_score
 from fundamental_engine import FundamentalEngine
@@ -444,7 +443,7 @@ def check_all_alerts() -> list[dict]:
 
     for code in ALL_CODES:
         try:
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             signals = all_factors_cache.get(code, {})
 
             checkers = [

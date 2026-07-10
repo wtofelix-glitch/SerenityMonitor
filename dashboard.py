@@ -5,7 +5,7 @@
 """
 import sqlite3, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import STOCK_DETAILS, STOCK_MAP
+from config import STOCK_DETAILS, STOCK_MAP, get_stock_name
 
 DB = os.path.join(os.path.dirname(__file__), 'serenity.db')
 
@@ -17,7 +17,7 @@ def price_zone_alerts():
     conn = sqlite3.connect(DB)
     
     for code, detail in STOCK_DETAILS.items():
-        name = STOCK_MAP.get(code, {}).get('name', code)
+        name = get_stock_name(code)
         low = detail.get('buy_zone_low', 0)
         high = detail.get('buy_zone_high', 0)
         target = detail.get('target_sell', 0)

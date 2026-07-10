@@ -9,8 +9,7 @@ from datetime import datetime
 from typing import Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-
-from config import STOCK_MAP, ALL_CODES
+from config import STOCK_MAP, ALL_CODES, get_stock_name
 from data_engine import retry
 import json as _json
 import os as _os
@@ -25,7 +24,10 @@ except ImportError:
     METRICS_AVAILABLE = False
 
 # ── LLM 配置 ──────────────────────────────────────────
-LLM_API_KEY = _os.environ.get("SERENITY_LLM_API_KEY", "")
+LLM_API_KEY = (
+    _os.environ.get("SERENITY_LLM_API_KEY", "")
+    or _os.environ.get("DEEPSEEK_API_KEY", "")
+)
 LLM_API_BASE = _os.environ.get("SERENITY_LLM_API_BASE", "https://api.deepseek.com/v1")
 LLM_MODEL = _os.environ.get("SERENITY_LLM_MODEL", "deepseek-chat")
 LLM_AVAILABLE = bool(LLM_API_KEY)
@@ -366,7 +368,7 @@ def compute_sentiment_score(code: str) -> float:
         if not news:
             return 50.0
 
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         titles = [item["title"] for item in news]
 
         # 尝试 LLM
@@ -391,7 +393,7 @@ def compute_sentiment_score(code: str) -> float:
 
 def get_sentiment_report(code: str) -> dict:
     """获取完整情绪分析报告（优先 LLM，回退关键词）"""
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     news = fetch_sentiment_data(code)
 
     # 关键词计数（始终计算，用于报告统计）

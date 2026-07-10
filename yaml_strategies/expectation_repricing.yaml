@@ -1,0 +1,53 @@
+name: expectation_repricing
+display_name: 预期重估策略
+category: framework
+description: >
+  识别市场预期与Serenity框架定价之间的偏差，捕捉预期修正带来的重估机会。
+  当市场过度悲观（标的跌入买点区间但基本面未恶化）或过度乐观（突破卖点但
+  瓶颈逻辑松动）时，提供逆向交易信号。
+  核心假设：Serenity框架的CPO/瓶颈/AIcapex/护城河/动量五维模型
+  对AI供应链标的的定价能力优于短期市场情绪。
+core_rules: [1, 2, 4, 6]
+required_data:
+  - get_daily_history
+  - get_news
+  - get_sentiment
+  - get_reference
+default_priority: 28
+market_regimes: [volatile, range_bound, trending_down]
+serenity_dimensions:
+  - cpo_alignment: 0.25
+  - bottleneck: 0.25
+  - AIcapex: 0.20
+  - moat: 0.20
+  - momentum: 0.10
+scoring_rules:
+  - condition: "Serenity框架评分≥80 但 股价处于买点区间下限以下（市场过度悲观）"
+    score_adjustment: +12
+    reason: "基本面强劲但被错杀，逆向买入良机"
+  - condition: "Serenity框架评分近期提升≥10分 但 股价尚未反映"
+    score_adjustment: +8
+    reason: "基本面改善领先股价，预期差机会"
+  - condition: "股价突破卖点上限 但 瓶颈逻辑出现松动信号"
+    score_adjustment: -10
+    reason: "高估值+逻辑弱化=戴维斯双杀风险"
+  - condition: "Serenity评分连续2周下降 但 股价仍在高位"
+    score_adjustment: -8
+    reason: "基本面恶化领先股价，减仓窗口"
+  - condition: "预期差（Serenity隐含价 vs 市价）>15%"
+    score_adjustment: +7
+    reason: "显著的错误定价创造超额收益空间"
+instructions: |
+  **预期重估策略**
+  1. 分析步骤：
+     a) 获取标的当前的 Serenity 五维评分（cpo_alignment, bottleneck, AIcapex, moat, momentum），计算框架隐含合理估值区间。
+     b) 对比当前市价与隐含估值的偏离度：偏离度 =（隐含价 - 市价）/ 市价 × 100%。
+     c) 分析偏离原因：是市场情绪错杀（机会）还是基本面已实质恶化（陷阱）？通过瓶颈维度和护城河维度交叉验证。
+
+  2. 数据依赖：日K线（当前市价及走势）、新闻/情绪（市场预期温度）、参考数据（基本面变化验证）。
+
+  3. 评分调整：
+     - 正向偏离>15% + 瓶颈逻辑稳固 → +12分（重仓逆向买入）
+     - 正向偏离 5-15% → +7分（轻仓试探）
+     - 负向偏离>10% + 瓶颈松动 → -10分（果断减仓）
+     - 负向偏离 5-10% → -5分（逐步降仓）

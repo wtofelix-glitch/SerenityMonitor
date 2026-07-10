@@ -90,3 +90,60 @@ def test_hermes_balance_accepts_matching_token_on_public_host(monkeypatch):
 
     assert resp.status_code == 400
     assert resp.get_json()["ok"] is False
+
+
+def test_broker_snapshot_endpoint_is_write_protected(monkeypatch):
+    monkeypatch.delenv("SERENITY_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("SERENITY_API_TOKEN", raising=False)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/broker-snapshot",
+        json={"snapshot_at": "2026-07-04 15:30:00"},
+        headers={"Host": "serenity.example.com"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_broker_snapshot_endpoint_returns_validation_error(monkeypatch):
+    import operations_center
+
+    monkeypatch.setattr(
+        operations_center,
+        "import_broker_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("asset equation mismatch")),
+    )
+    client = app.test_client()
+    response = client.post(
+        "/api/broker-snapshot",
+        json={"snapshot_at": "2026-07-04 15:30:00"},
+        headers={"Host": "127.0.0.1:8401"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert "asset equation" in response.get_json()["error"]
+
+
+def test_broker_snapshot_endpoint_passes_dry_run_without_mutating_payload(monkeypatch):
+    import operations_center
+
+    captured = []
+    monkeypatch.setattr(
+        operations_center,
+        "import_broker_snapshot",
+        lambda payload, dry_run=False: captured.append((payload, dry_run)) or {"saved": False},
+    )
+    client = app.test_client()
+    response = client.post(
+        "/api/broker-snapshot",
+        json={"snapshot_at": "2026-07-04 15:30:00", "dry_run": True},
+        headers={"Host": "127.0.0.1:8401"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert captured == [({"snapshot_at": "2026-07-04 15:30:00"}, True)]
+    assert response.get_json()["data"]["saved"] is False

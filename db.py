@@ -413,17 +413,65 @@ def init_db():
             version TEXT NOT NULL UNIQUE,
             major INTEGER NOT NULL DEFAULT 1,
             minor INTEGER NOT NULL DEFAULT 0,
-            config_hash TEXT NOT NULL UNIQUE,
+            config_hash TEXT NOT NULL,
             config_json TEXT NOT NULL DEFAULT '{}',
             reset_reason TEXT DEFAULT '',
+            change_source TEXT DEFAULT '',
             is_active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
+    # 旧表把 config_hash 设为 UNIQUE，会导致切回旧配置时复用历史样本。
+    hash_unique = False
+    for index_row in cur.execute("PRAGMA index_list(strategy_versions)").fetchall():
+        if not index_row["unique"]:
+            continue
+        columns = [
+            row["name"]
+            for row in cur.execute(f"PRAGMA index_info({index_row['name']})").fetchall()
+        ]
+        if columns == ["config_hash"]:
+            hash_unique = True
+            break
+    if hash_unique:
+        cur.execute("DROP TABLE IF EXISTS strategy_versions_v2")
+        cur.execute("""
+            CREATE TABLE strategy_versions_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL UNIQUE,
+                major INTEGER NOT NULL DEFAULT 1,
+                minor INTEGER NOT NULL DEFAULT 0,
+                config_hash TEXT NOT NULL,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                reset_reason TEXT DEFAULT '',
+                change_source TEXT DEFAULT '',
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
+        cur.execute("""
+            INSERT INTO strategy_versions_v2
+                (id, version, major, minor, config_hash, config_json,
+                 reset_reason, is_active, created_at)
+            SELECT id, version, major, minor, config_hash, config_json,
+                   reset_reason, is_active, created_at
+            FROM strategy_versions
+        """)
+        cur.execute("DROP TABLE strategy_versions")
+        cur.execute("ALTER TABLE strategy_versions_v2 RENAME TO strategy_versions")
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_strategy_versions_active
         ON strategy_versions(is_active, created_at)
     """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_strategy_versions_hash
+        ON strategy_versions(config_hash, created_at)
+    """)
+    # v6.0: 新增 change_source 字段 — 记录每次 config_hash 变化的根因
+    try:
+        cur.execute("ALTER TABLE strategy_versions ADD COLUMN change_source TEXT DEFAULT ''")
+    except Exception:
+        pass  # 列已存在，跳过
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS order_state_log (
@@ -489,6 +537,23 @@ def init_db():
             position_ratio_pct REAL DEFAULT 0,
             positions_json TEXT NOT NULL DEFAULT '[]',
             evidence_path TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cashflow_reconciliations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
+            unexplained_cash_effect REAL NOT NULL,
+            tolerance REAL NOT NULL,
+            evidence_cash_effect_total REAL NOT NULL,
+            remaining_gap REAL NOT NULL,
+            evidence_hash TEXT NOT NULL UNIQUE,
+            evidence_items_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL DEFAULT '{}',
             notes TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
@@ -578,6 +643,7 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_operational_tasks_status ON operational_tasks(status, severity, last_seen_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_audits_created ON reconciliation_audits(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cashflow_reconciliations_window ON cashflow_reconciliations(window_start, window_end, created_at)")
     # 🆕 权重辩论日志表（conviction_engine 持久化）
     cur.execute("""
         CREATE TABLE IF NOT EXISTS conviction_log (
@@ -746,6 +812,74 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_signal ON decision_audit_log(signal_type, created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_settled ON decision_audit_log(settled_at, execution_status)")
 
+    # v4 Phase 2: 三系统对比持久化 (frozen_comparison_history)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS frozen_comparison_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            date            TEXT NOT NULL,
+            -- System A: Frozen Baseline
+            frozen_nav              REAL,
+            frozen_signals_count    INTEGER DEFAULT 0,
+            frozen_buy_count        INTEGER DEFAULT 0,
+            frozen_sell_count       INTEGER DEFAULT 0,
+            -- System B: Adaptive
+            adaptive_nav            REAL,
+            adaptive_signals_count  INTEGER DEFAULT 0,
+            adaptive_buy_count      INTEGER DEFAULT 0,
+            adaptive_sell_count     INTEGER DEFAULT 0,
+            -- Divergence
+            divergence_count        INTEGER DEFAULT 0,
+            agreement_rate          REAL DEFAULT 0,
+            divergence_details_json TEXT DEFAULT '[]',
+            -- System C: Equal Weight Basket
+            eq_basket_nav           REAL,
+            eq_basket_daily_return  REAL,
+            eq_basket_weekly_return REAL,
+            eq_basket_monthly_return REAL,
+            -- Metadata
+            total_value             REAL,
+            market_regime           TEXT DEFAULT '',
+            created_at              TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(date)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fch_date ON frozen_comparison_history(date)")
+
+    # v4.5: OOS 冻结实验 (cost-adjusted alpha verification)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS oos_experiments (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL DEFAULT 'oos-freeze',
+            started_at      TEXT NOT NULL,
+            commit_hash     TEXT NOT NULL,
+            config_snapshot TEXT NOT NULL,
+            judgment_criteria TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'active',
+            completed_at    TEXT,
+            verdict         TEXT,
+            UNIQUE(name, started_at)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS oos_nav_curves (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            experiment_id   INTEGER NOT NULL,
+            date            TEXT NOT NULL,
+            strategy_nav    REAL NOT NULL,
+            equal_weight_nav REAL NOT NULL,
+            hs300_nav       REAL,
+            strategy_return_daily  REAL,
+            equal_weight_return_daily REAL,
+            hs300_return_daily      REAL,
+            strategy_drawdown       REAL,
+            equal_weight_drawdown   REAL,
+            details_json    TEXT DEFAULT '{}',
+            recorded_at     TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            UNIQUE(experiment_id, date)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_oos_nav_date ON oos_nav_curves(experiment_id, date)")
+
     for sql in _index_sqls:
         conn.execute(sql)
     conn.commit()
@@ -883,6 +1017,72 @@ def get_portfolio_reconciliation(snapshot_at: str) -> Optional[dict]:
             (snapshot_at,),
         ).fetchone()
         return _decode_json_fields(row, {"positions_json": "positions"})
+    finally:
+        conn.close()
+
+
+def save_cashflow_reconciliation(reconciliation: dict) -> dict:
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("""
+            INSERT INTO cashflow_reconciliations
+                (window_start, window_end, source, unexplained_cash_effect,
+                 tolerance, evidence_cash_effect_total, remaining_gap,
+                 evidence_hash, evidence_items_json, payload_json, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(evidence_hash) DO UPDATE SET
+                source=excluded.source,
+                unexplained_cash_effect=excluded.unexplained_cash_effect,
+                tolerance=excluded.tolerance,
+                evidence_cash_effect_total=excluded.evidence_cash_effect_total,
+                remaining_gap=excluded.remaining_gap,
+                evidence_items_json=excluded.evidence_items_json,
+                payload_json=excluded.payload_json,
+                notes=excluded.notes
+        """, (
+            reconciliation["window_start"],
+            reconciliation["window_end"],
+            reconciliation.get("source", "manual"),
+            reconciliation["unexplained_cash_effect"],
+            reconciliation["tolerance"],
+            reconciliation["evidence_cash_effect_total"],
+            reconciliation["remaining_gap"],
+            reconciliation["evidence_hash"],
+            json.dumps(reconciliation.get("evidence_items", []), ensure_ascii=False),
+            json.dumps(reconciliation.get("payload", {}), ensure_ascii=False),
+            reconciliation.get("notes", ""),
+        ))
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM cashflow_reconciliations WHERE evidence_hash=?",
+            (reconciliation["evidence_hash"],),
+        ).fetchone()
+        return _decode_json_fields(row, {
+            "evidence_items_json": "evidence_items",
+            "payload_json": "payload",
+        })
+    finally:
+        conn.close()
+
+
+def get_cashflow_reconciliation(window_start: str, window_end: str) -> Optional[dict]:
+    init_db()
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT * FROM cashflow_reconciliations
+            WHERE window_start=? AND window_end=?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (window_start, window_end),
+        ).fetchone()
+        return _decode_json_fields(row, {
+            "evidence_items_json": "evidence_items",
+            "payload_json": "payload",
+        })
     finally:
         conn.close()
 
@@ -1466,7 +1666,7 @@ def add_uzi_evidence(
     *,
     strength: str = "medium",
     source_type: str = "manual",
-    event_date: str | None = None,
+    event_date: Optional[str] = None,
     summary: str = "",
     url: str = "",
     impact: float = 0,
@@ -1501,7 +1701,7 @@ def add_uzi_evidence(
     return new_id
 
 
-def list_uzi_evidence(code: str | None = None, *, active_only: bool = True, limit: int = 50) -> list[dict]:
+def list_uzi_evidence(code: Optional[str] = None, *, active_only: bool = True, limit: int = 50) -> list[dict]:
     """按时间倒序读取 UZI 证据账本。"""
     conn = get_conn()
     _ensure_uzi_evidence_table(conn)
@@ -1770,7 +1970,7 @@ def update_signal_outcome(signal_id: int, field: str, value: float):
 # ── 🆕 v3.1 信号→实盘闭环 ────────────────────────────────────
 
 def link_signal_to_trade(code: str, trade_action: str, trade_id: int,
-                         trade_date: str, trade_price: float) -> int | None:
+                         trade_date: str, trade_price: float) -> Optional[int]:
     """将一笔实盘交易关联到最近的同方向信号
 
     匹配逻辑:

@@ -31,8 +31,8 @@ def generate_order(code, action, price, quantity, broker="ths"):
     """生成下单指令 (手动模式: 返回可复制到同花顺的文本)"""
     name = ""
     try:
-        from config import STOCK_MAP
-        name = STOCK_MAP.get(code,{}).get("name",code)
+        from config import get_stock_name
+        name = get_stock_name(code)
     except: name = code
 
     cfg = get_config()
