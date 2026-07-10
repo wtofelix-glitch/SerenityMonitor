@@ -385,13 +385,18 @@ class FreezeExperiment:
 
     def record(self, experiment_id: Optional[int] = None,
                as_of: Optional[str] = None) -> dict:
-        """记录今日三条净值曲线。
+        """记录今日三条曲线。
 
         在 daily_workflow 收盘后调用。
+
+        Day 1：锚定基线。三条线全部 = 1.0000，日收益 = 0。Day 1 的
+        实际净值/价格仅作为后续计算的基准锚点，不产生任何涨跌——因为
+        "从冻结到第一次记录"之间没有样本外时间流逝。
+
+        Day 2+：每条线记录"今日相对于前一记录日的变动"，叠乘到累计乘数上。
         """
         today = as_of or date.today().isoformat()
 
-        # 获取活跃实验
         conn = get_conn()
         try:
             if experiment_id:
@@ -410,14 +415,9 @@ class FreezeExperiment:
                 return {"success": False, "error": "没有活跃的 OOS 实验。请先 python3 freeze_experiment.py freeze"}
 
             exp_id = exp["id"]
-            started = exp["started_at"]
             config = json.loads(exp["config_snapshot"])
-            criteria = json.loads(exp["judgment_criteria"])
-            cost_model = criteria["cost_model"]
             all_codes = config["stock_pool"]["all_codes"]
-            initial_capital = config["capital_config"]["initial_capital"]
 
-            # 检查是否已记录
             dup = conn.execute(
                 "SELECT id FROM oos_nav_curves WHERE experiment_id=? AND date=?",
                 (exp_id, today)
@@ -426,26 +426,79 @@ class FreezeExperiment:
                 conn.close()
                 return {"success": True, "skipped": True, "reason": f"{today} 已记录"}
 
-            # ── 三条归一化收益率 — 全部从 1.0 出发 ──
-
-            # 读取前日累计乘数（第一日默认为 1.0）
+            # ── 读取前日记录 (用于 Day 2+ 的基准对比) ──
             prev_row = conn.execute(
                 "SELECT * FROM oos_nav_curves WHERE experiment_id=? "
                 "ORDER BY date DESC LIMIT 1",
                 (exp_id,)
             ).fetchone()
 
-            if prev_row:
-                prev_strat_mult = prev_row["strategy_nav"]
-                prev_ew_mult = prev_row["equal_weight_nav"]
-                prev_hs300_mult = prev_row["hs300_nav"] or 1.0
-                prev_strat_real_nav = json.loads(prev_row["details_json"]).get(
-                    "strategy_real_nav", initial_capital)
-            else:
-                prev_strat_mult = 1.0
-                prev_ew_mult = 1.0
-                prev_hs300_mult = 1.0
-                prev_strat_real_nav = initial_capital
+            is_day1 = (prev_row is None)
+
+            if is_day1:
+                # ═══════════════════════════════════════════
+                # Day 1 — 锚定基线。三线全部 = 1.0000。
+                # 冻结实验的诚实性取决于"线之前"的旧账不污染
+                # "线之后"的样本外记录。Day 1 是起跑线，起跑线
+                # 上没有样本外收益可言——第一个真实样本外数据
+                # 点在 Day 2。
+                # ═══════════════════════════════════════════
+
+                # 获取策略当前真实净值 (存为锚点, 不进曲线)
+                from portfolio import get_portfolio
+                pm = get_portfolio()
+                pv = pm.get_portfolio_value()
+                anchor_strat_nav = pv["total_value"]
+
+                conn.execute(
+                    "INSERT INTO oos_nav_curves "
+                    "(experiment_id, date, strategy_nav, equal_weight_nav, hs300_nav, "
+                    " strategy_return_daily, equal_weight_return_daily, hs300_return_daily, "
+                    " strategy_drawdown, equal_weight_drawdown, details_json) "
+                    "VALUES (?, ?, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, ?)",
+                    (exp_id, today,
+                     json.dumps({
+                         "is_anchor_day": True,
+                         "anchor_strategy_nav": round(anchor_strat_nav, 2),
+                         "anchor_strategy_cash": round(pv["cash"], 2),
+                         "anchor_note": "Day 1 = 起跑线。三条线全部 = 1.0000。"
+                                        "第一个样本外数据点在 Day 2。"
+                                        "策略线基准锚点为今日实际净值(¥{:.0f})；"
+                                        "实验启动前的历史回撤不计入OOS。"
+                                        "等权和沪深300的第一日变动(相对于 Day 0)同属实验"
+                                        "之前, 同样清零。".format(anchor_strat_nav),
+                     }, ensure_ascii=False))
+                )
+                conn.commit()
+                day_count = 1
+
+                conn.close()
+                return {
+                    "success": True,
+                    "experiment_id": exp_id,
+                    "date": today,
+                    "day": day_count,
+                    "is_anchor": True,
+                    "strategy_anchor_nav": round(anchor_strat_nav, 2),
+                    "strategy_mult": 1.0,
+                    "equal_weight_mult": 1.0,
+                    "hs300_mult": 1.0,
+                }
+
+            # ═════════════════════════════════════════════
+            # Day 2+ — 正常记录
+            # ═════════════════════════════════════════════
+
+            prev_detail = json.loads(prev_row["details_json"])
+            prev_strat_real_nav = prev_detail.get("anchor_strategy_nav", 0)
+
+            # 如果前一条也是非锚点, 从前一条详情中取前一次真实净值
+            if not prev_detail.get("is_anchor_day"):
+                prev_strat_real_nav = prev_detail.get("strategy_real_nav", prev_strat_real_nav)
+
+            prev_strat_mult = prev_row["strategy_nav"]
+            prev_ew_mult = prev_row["equal_weight_nav"]
+            prev_hs300_mult = prev_row["hs300_nav"] or 1.0
 
             # 1. 策略日收益率 (基于真实净值变动)
             strat = get_strategy_daily_return(prev_strat_real_nav)
@@ -462,7 +515,7 @@ class FreezeExperiment:
             hs300_ret = hs300["daily_return"]
             hs300_mult = prev_hs300_mult * (1.0 + hs300_ret)
 
-            # ── 最大回撤 (从各自曲线的历史峰值计算) ──
+            # ── 最大回撤 ──
             prev_peaks = conn.execute(
                 "SELECT MAX(strategy_nav) as sp, MAX(equal_weight_nav) as ep "
                 "FROM oos_nav_curves WHERE experiment_id=?",
@@ -485,18 +538,12 @@ class FreezeExperiment:
                  round(strat_ret, 8), round(ew_ret, 8), round(hs300_ret, 8),
                  round(strat_dd, 8), round(ew_dd, 8),
                  json.dumps({
-                     "all_start_from": 1.0,
                      "strategy_real_nav": strat.get("nav"),
                      "strategy_cash": strat.get("cash"),
-                     "equal_weight_theoretical": True,
+                     "anchor_strategy_nav": prev_detail.get("anchor_strategy_nav"),
                      "equal_weight_n_stocks": ew["n_stocks"],
                      "equal_weight_suspended": ew.get("suspended_codes", []),
                      "hs300_warning": hs300.get("warning"),
-                     "note": "三条线从 2026-07-10 归一化到 1.0 出发。"
-                             "等权基准使用理论分数股(不受A股100股整手限制),"
-                             "是纯理论参照物而非可交易组合。"
-                             "策略线包含真实交易成本(佣金+印花税+滑点)。"
-                             "沪深300全收益线不扣成本(代表买指数基金)。",
                  }, ensure_ascii=False))
             )
             conn.commit()
@@ -841,8 +888,11 @@ def main():
         if result.get("success"):
             if result.get("skipped"):
                 print(f"⏭  {result['date']} 已记录")
+            elif result.get("is_anchor"):
+                print(f"⚓ Day 1 — 锚定基线 (三线 = 1.0000, 第一个样本外数据点在 Day 2)")
+                print(f"   策略锚点: ¥{result.get('strategy_anchor_nav', '?'):,}")
             else:
-                print(f"📊 Day {result['day']} 已记录 (三线从 1.0000 出发)")
+                print(f"📊 Day {result['day']} (三线从 1.0000 出发)")
                 print(f"   策略:    {result['strategy_mult']:.4f}x ({result['strategy_mult']-1:+.2%})")
                 print(f"   等权:    {result['equal_weight_mult']:.4f}x ({result['equal_weight_mult']-1:+.2%})")
                 print(f"   沪深300: {result['hs300_mult']:.4f}x ({result['hs300_mult']-1:+.2%})")
