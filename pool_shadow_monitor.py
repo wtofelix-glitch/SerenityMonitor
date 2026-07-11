@@ -48,6 +48,10 @@ LOGIC_REVIEW_MAX_DAYS = 90          # 超过 90 天未审查 → 标记
 PROBATION_MIN_DAYS = 30             # PROBATION 至少 30 天后才能推进
 ENTRY_FREEZE_DAYS = 120             # 120 天 OOS 期间冻结出入
 
+# 置信度分层
+CONFIDENCE_TIERS = ("OBSERVATION", "LOW_CONFIDENCE", "ACTIONABLE")
+ECONOMIC_LOW_CONFIDENCE_MIN_SAMPLES = 30  # ≥30 已结算样本 → LOW_CONFIDENCE，否则 OBSERVATION
+
 # ═══════════════════════════════════════════════════════════════
 # 数据结构
 # ═══════════════════════════════════════════════════════════════
@@ -105,12 +109,33 @@ class StockStatus:
     probation_days: int = 0
     entry_frozen_days: int = 0
 
+    # 置信度分层 — 最高层决定整体
+    confidence: str = "OBSERVATION"
+
+    @property
+    def overall_confidence(self) -> str:
+        """整体置信度 — 取所有标记中的最高层。
+
+        ACTIONABLE > LOW_CONFIDENCE > OBSERVATION。
+        仅硬资格异常可达 ACTIONABLE。
+        """
+        if self.hard_qual_flags:
+            return "ACTIONABLE"
+        if self.economic_flags:
+            if self.signal_samples >= ECONOMIC_LOW_CONFIDENCE_MIN_SAMPLES:
+                return "LOW_CONFIDENCE"
+            return "OBSERVATION"
+        if self.logic_flags:
+            return "OBSERVATION"
+        return "OBSERVATION"
+
     def to_dict(self) -> dict:
         return {
             "code": self.code,
             "name": self.name,
             "status": self.status,
             "tier": self.tier,
+            "confidence": self.overall_confidence,
             "hard_qual_flags": self.hard_qual_flags,
             "economic_flags": self.economic_flags,
             "logic_flags": self.logic_flags,
@@ -423,10 +448,10 @@ class UniverseShadowMonitor:
                 conn.execute(
                     """
                     INSERT INTO universe_status_log
-                      (code, date, name, tier, status,
+                      (code, date, name, tier, status, confidence,
                        hard_qual_flags_json, economic_flags_json, logic_flags_json,
                        details_json, trigger_reasons, hypothetical_exit_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ss.code,
@@ -434,6 +459,7 @@ class UniverseShadowMonitor:
                         ss.name,
                         ss.tier,
                         ss.status,
+                        ss.overall_confidence,
                         json.dumps(ss.hard_qual_flags, ensure_ascii=False),
                         json.dumps(ss.economic_flags, ensure_ascii=False),
                         json.dumps(ss.logic_flags, ensure_ascii=False),
@@ -478,23 +504,29 @@ class UniverseShadowMonitor:
             "",
         ]
 
-        # 按状态分组
-        by_status: dict[str, list[StockStatus]] = defaultdict(list)
+        # 按置信度分组
+        by_confidence: dict[str, list[StockStatus]] = defaultdict(list)
         for s in results:
-            by_status[s.status].append(s)
+            by_confidence[s.overall_confidence].append(s)
 
-        for status in ("ACTIVE", "PROBATION", "ENTRY_FROZEN", "ARCHIVE"):
-            group = by_status.get(status, [])
+        icon_c = {"ACTIONABLE": "🔴", "LOW_CONFIDENCE": "🟡", "OBSERVATION": "🔵"}
+        for tier in ("ACTIONABLE", "LOW_CONFIDENCE", "OBSERVATION"):
+            group = by_confidence.get(tier, [])
             if not group:
                 continue
-            icon = {"ACTIVE": "🟢", "PROBATION": "🟡", "ENTRY_FROZEN": "🔵", "ARCHIVE": "⚫"}
-            lines.append(f"  {icon.get(status, '⚪')} {status} ({len(group)} 只)")
+            tier_desc = {
+                "ACTIONABLE": "硬资格异常 — 满足条件时可自动推进状态机",
+                "LOW_CONFIDENCE": "经济证据初步（≥30样本）— 需积累更多OOS数据",
+                "OBSERVATION": "仅记录观察 — 样本不足或需人工审查",
+            }
+            lines.append(f"  {icon_c.get(tier, '⚪')} {tier} ({len(group)} 只)")
+            lines.append(f"     {tier_desc.get(tier, '')}")
             for s in sorted(group, key=lambda x: x.tier):
                 flags_all = s.hard_qual_flags + s.economic_flags + s.logic_flags
                 if flags_all:
-                    lines.append(f"     {s.name:<10} T{s.tier} {', '.join(flags_all)}")
+                    lines.append(f"     {s.name:<10} T{s.tier} [{s.status}] {', '.join(flags_all)}")
                 else:
-                    lines.append(f"     {s.name:<10} T{s.tier}")
+                    lines.append(f"     {s.name:<10} T{s.tier} [{s.status}]")
             lines.append("")
 
         # 统计
@@ -502,15 +534,18 @@ class UniverseShadowMonitor:
         hard = [s for s in results if s.hard_qual_flags]
         econ = [s for s in results if s.economic_flags]
         logic = [s for s in results if s.logic_flags]
+        actionable = [s for s in results if s.overall_confidence == "ACTIONABLE"]
+        low_conf = [s for s in results if s.overall_confidence == "LOW_CONFIDENCE"]
+        obs = [s for s in results if s.overall_confidence == "OBSERVATION"]
 
         lines.extend(
             [
                 "─" * 68,
                 f"  证据统计:",
-                f"    硬资格触发: {len(hard)} 只",
-                f"    经济贡献触发: {len(econ)} 只",
-                f"    产业逻辑触发: {len(logic)} 只",
-                f"    任意证据触发: {len(flagged)} 只",
+                f"    🔴 ACTIONABLE:     {len(actionable)} 只 (仅硬资格异常)",
+                f"    🟡 LOW_CONFIDENCE: {len(low_conf)} 只 (经济证据≥30样本)",
+                f"    🔵 OBSERVATION:    {len(obs)} 只 (仅记录, 小样本/待审查)",
+                f"    硬资格触发: {len(hard)} | 经济: {len(econ)} | 产业: {len(logic)}",
                 "",
                 "  ⚠️ 当前 OOS 冻结期：退池不执行，仅记录证据",
                 "  📋 ACTIVE → PROBATION: 需硬资格证据",

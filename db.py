@@ -890,6 +890,7 @@ def init_db():
             name            TEXT NOT NULL,
             tier            INTEGER DEFAULT 0,
             status          TEXT NOT NULL DEFAULT 'ACTIVE',
+            confidence      TEXT NOT NULL DEFAULT 'OBSERVATION',
             hard_qual_flags_json    TEXT DEFAULT '[]',
             economic_flags_json     TEXT DEFAULT '[]',
             logic_flags_json        TEXT DEFAULT '[]',
@@ -899,6 +900,11 @@ def init_db():
             recorded_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
         )
     """)
+    # Migration: add confidence column if table predates v0.2.0
+    try:
+        cur.execute("ALTER TABLE universe_status_log ADD COLUMN confidence TEXT NOT NULL DEFAULT 'OBSERVATION'")
+    except Exception:
+        pass
     cur.execute("CREATE INDEX IF NOT EXISTS idx_universe_status_code ON universe_status_log(code, date)")
 
     for sql in _index_sqls:

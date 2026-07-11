@@ -60,12 +60,30 @@ def _ensure_evidence_table(store: EvolutionStore) -> None:
             CREATE TABLE IF NOT EXISTS evolution_ic_evidence (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 collected_at TEXT NOT NULL,
+                collected_on TEXT NOT NULL,
                 factor TEXT NOT NULL,
                 sample_count INTEGER NOT NULL,
-                ic_values_json TEXT NOT NULL
+                ic_values_json TEXT NOT NULL,
+                as_of_date TEXT NOT NULL DEFAULT '',
+                outcome_horizon TEXT NOT NULL DEFAULT '1d',
+                strategy_version TEXT NOT NULL DEFAULT 'frozen-v1',
+                settled INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(factor, collected_on, outcome_horizon, strategy_version)
             )
             """
         )
+        # Migration: add new columns if table predates v0.2.0 idempotency update
+        for col, col_def in [
+            ("collected_on", "TEXT NOT NULL DEFAULT ''"),
+            ("as_of_date", "TEXT NOT NULL DEFAULT ''"),
+            ("outcome_horizon", "TEXT NOT NULL DEFAULT '1d'"),
+            ("strategy_version", "TEXT NOT NULL DEFAULT 'frozen-v1'"),
+            ("settled", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                db.execute(f"ALTER TABLE evolution_ic_evidence ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass  # column already exists
 
 
 def now_utc() -> str:
@@ -109,27 +127,48 @@ def collect_ic_evidence(
 def backfill_evidence_to_store(
     factor_ic_result: dict,
     db_path: str | Path | None = None,
+    *,
+    as_of_date: str = "",
+    outcome_horizon: str = "1d",
+    strategy_version: str = "frozen-v1",
 ) -> int:
-    """将 IC 证据持久化到 evolution 存储（只写，不改权重）。
+    """将 IC 证据持久化到 evolution 存储（只写，不改权重，幂等）。
+
+    每 (factor, collected_on, outcome_horizon, strategy_version) 唯一。
+    同一天多次运行不会产生重复行。as_of_date 记录 IC 数据覆盖的截止日期，
+    防止前视偏差。
 
     Returns:
-        写入的证据维度数
+        新写入的证据维度数（跳过重复行不计入）
     """
     evidence = collect_ic_evidence(factor_ic_result)
-    # Always ensure store + table are ready, even when evidence is empty
     store = _get_store(db_path)
     if not evidence:
         return 0
-    # 证据作为候选的元数据保存（不生成候选，只记录证据）
+    now = now_utc()
+    collected_on = now[:10]  # UTC date
+    written = 0
     with store.connect() as db:
-        now = now_utc()
         for item in evidence:
-            db.execute(
-                "INSERT INTO evolution_ic_evidence (collected_at, factor, sample_count, ic_values_json) "
-                "VALUES (?, ?, ?, ?)",
-                (now, item.factor, len(item.ic_values), json.dumps(list(item.ic_values))),
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO evolution_ic_evidence "
+                "(collected_at, collected_on, factor, sample_count, ic_values_json, "
+                "as_of_date, outcome_horizon, strategy_version) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    now,
+                    collected_on,
+                    item.factor,
+                    len(item.ic_values),
+                    json.dumps(list(item.ic_values)),
+                    as_of_date,
+                    outcome_horizon,
+                    strategy_version,
+                ),
             )
-    return len(evidence)
+            if cursor.rowcount > 0:
+                written += 1
+    return written
 
 
 # ═══════════════════════════════════════════════════════════════

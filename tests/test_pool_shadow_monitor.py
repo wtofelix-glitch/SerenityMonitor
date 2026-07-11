@@ -21,6 +21,8 @@ from config import ALL_CODES, STOCK_MAP
 class TestPoolShadowMonitor(unittest.TestCase):
 
     def setUp(self):
+        from db import init_db
+        init_db()  # ensure confidence column exists (migration)
         self.monitor = UniverseShadowMonitor(oos_frozen=True)
 
     # ── 状态机 ──────────────────────────────────────────
@@ -159,6 +161,50 @@ class TestPoolShadowMonitor(unittest.TestCase):
                 self.assertNotIn("negative_marginal_return", s.economic_flags,
                                 f"{s.code} 0 样本但标记了负边际收益")
 
+    # ── 置信度分层 ──────────────────────────────────────
+
+    def test_confidence_tiers_are_valid(self):
+        """所有标的的置信度必须在预定义枚举中。"""
+        from pool_shadow_monitor import CONFIDENCE_TIERS
+        results = self.monitor.compute_all()
+        for s in results:
+            self.assertIn(s.overall_confidence, CONFIDENCE_TIERS,
+                         f"{s.code} 无效置信度: {s.overall_confidence}")
+
+    def test_no_hard_qual_no_actionable(self):
+        """无硬资格证据时，整体置信度不能是 ACTIONABLE。"""
+        results = self.monitor.compute_all()
+        for s in results:
+            if not s.hard_qual_flags:
+                self.assertNotEqual(s.overall_confidence, "ACTIONABLE",
+                                   f"{s.code} 无硬资格证据但置信度为 ACTIONABLE")
+
+    def test_hard_qual_gives_actionable(self):
+        """硬资格证据存在 → 置信度自动升级为 ACTIONABLE。"""
+        # 逻辑验证：如果硬资格标记非空，overall_confidence 必须是 ACTIONABLE
+        results = self.monitor.compute_all()
+        for s in results:
+            if s.hard_qual_flags:
+                self.assertEqual(s.overall_confidence, "ACTIONABLE",
+                                f"{s.code} 有硬资格但置信度={s.overall_confidence}")
+
+    def test_low_samples_stay_observation(self):
+        """经济证据但样本数 < 30 → OBSERVATION，不能是 LOW_CONFIDENCE。"""
+        from pool_shadow_monitor import ECONOMIC_LOW_CONFIDENCE_MIN_SAMPLES
+        results = self.monitor.compute_all()
+        for s in results:
+            if s.economic_flags and s.signal_samples < ECONOMIC_LOW_CONFIDENCE_MIN_SAMPLES:
+                self.assertEqual(s.overall_confidence, "OBSERVATION",
+                                f"{s.code} {s.signal_samples}样本但置信度={s.overall_confidence}")
+
+    def test_logic_only_is_observation(self):
+        """仅有产业逻辑标记（无硬资格、无经济证据）→ OBSERVATION。"""
+        results = self.monitor.compute_all()
+        for s in results:
+            if s.logic_flags and not s.hard_qual_flags and not s.economic_flags:
+                self.assertEqual(s.overall_confidence, "OBSERVATION",
+                                f"{s.code} 仅有逻辑标记但置信度={s.overall_confidence}")
+
     # ── 报告生成 ────────────────────────────────────────
 
     def test_generate_report_returns_string(self):
@@ -172,6 +218,13 @@ class TestPoolShadowMonitor(unittest.TestCase):
         """报告包含池规模和 OOS 状态。"""
         report = self.monitor.generate_report()
         self.assertIn(f"{len(ALL_CODES)} 只", report)
+
+    def test_generate_report_includes_confidence_tiers(self):
+        """报告包含三级置信度分组。"""
+        report = self.monitor.generate_report()
+        self.assertIn("ACTIONABLE", report)
+        self.assertIn("LOW_CONFIDENCE", report)
+        self.assertIn("OBSERVATION", report)
         self.assertIn("OOS 冻结", report)
 
 
