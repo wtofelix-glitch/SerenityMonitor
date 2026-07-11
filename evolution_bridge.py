@@ -48,7 +48,24 @@ def _get_store(db_path: str | Path | None = None) -> EvolutionStore:
     path = str(db_path or DEFAULT_DB_PATH)
     store = EvolutionStore(path)
     store.migrate()
+    _ensure_evidence_table(store)
     return store
+
+
+def _ensure_evidence_table(store: EvolutionStore) -> None:
+    """Ensure evolution_ic_evidence exists — called on every bridge init."""
+    with store.connect() as db:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evolution_ic_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collected_at TEXT NOT NULL,
+                factor TEXT NOT NULL,
+                sample_count INTEGER NOT NULL,
+                ic_values_json TEXT NOT NULL
+            )
+            """
+        )
 
 
 def now_utc() -> str:
@@ -99,22 +116,12 @@ def backfill_evidence_to_store(
         写入的证据维度数
     """
     evidence = collect_ic_evidence(factor_ic_result)
+    # Always ensure store + table are ready, even when evidence is empty
+    store = _get_store(db_path)
     if not evidence:
         return 0
-    store = _get_store(db_path)
     # 证据作为候选的元数据保存（不生成候选，只记录证据）
     with store.connect() as db:
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS evolution_ic_evidence (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                collected_at TEXT NOT NULL,
-                factor TEXT NOT NULL,
-                sample_count INTEGER NOT NULL,
-                ic_values_json TEXT NOT NULL
-            )
-            """
-        )
         now = now_utc()
         for item in evidence:
             db.execute(
