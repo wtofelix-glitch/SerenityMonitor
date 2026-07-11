@@ -2,9 +2,11 @@
 数据库层 — SQLite 存储股票配置、每日快照、交易记录、预警历史
 """
 from __future__ import annotations
+import hashlib
 import json
-import sqlite3
 import os
+import sqlite3
+import traceback
 from datetime import datetime, date
 from typing import Optional, Any
 
@@ -97,8 +99,40 @@ def init_db():
     for table, col in [("trades", "trade_amount"), ("stocks", "trade_amount")]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} REAL DEFAULT 0")
-        except sqlite3.OperationalError:
+        except Exception:
             pass
+
+    # 🆕 v6.0 幂等保护：trade_hash + source + UNIQUE 索引
+    for table, col, col_def in [
+        ("trades", "trade_hash", "TEXT DEFAULT ''"),
+        ("trades", "source", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+        except Exception:
+            pass
+
+    # 为已有行回填唯一 trade_hash（使用 rowid 保证唯一性）
+    try:
+        blank_rows = conn.execute(
+            "SELECT id, code, action, date, quantity, price FROM trades "
+            "WHERE trade_hash = '' OR trade_hash IS NULL"
+        ).fetchall()
+        for row in blank_rows:
+            h = hashlib.sha256(
+                f"{row['code']}|{row['action']}|{row['date']}|{row['quantity']}|{round(row['price'],4)}|{row['id']}"
+                .encode()
+            ).hexdigest()[:16]
+            conn.execute("UPDATE trades SET trade_hash = ? WHERE id = ?", (h, row["id"]))
+        if blank_rows:
+            conn.commit()
+    except Exception:
+        pass
+
+    try:
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_hash ON trades(trade_hash)")
+    except Exception:
+        pass
 
     # 评分历史表
     cur.execute("""
@@ -1488,17 +1522,50 @@ def get_snapshots(code: str, days: int = 30) -> list[dict]:
 
 # ---------- 交易记录 ----------
 
+import hashlib
+import traceback
+
+
+def _compute_trade_hash(code: str, action: str, date_str: str, quantity: int, price: float) -> str:
+    """计算 trade_hash — 幂等写入的唯一键。"""
+    raw = f"{code}|{action}|{date_str}|{quantity}|{round(price, 4)}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
 def add_trade(code: str, action: str, price: float, quantity: int, date_str: str,
-              note: str = "", trade_amount: float = 0):
+              note: str = "", trade_amount: float = 0) -> bool:
+    """记录一笔交易。幂等：相同 (code,action,date,quantity,price) 不会重复写入。
+
+    Returns:
+        True 如果插入了新行，False 如果是重复写入（被忽略）。
+    """
+    import os
+
+    trade_hash = _compute_trade_hash(code, action, date_str, quantity, price)
+    # 捕获调用者堆栈用于审计（只取关键帧）
+    stack_frames = traceback.extract_stack(limit=6)
+    caller_info = " <- ".join(
+        f"{os.path.basename(f.filename)}:{f.lineno}" for f in stack_frames[:-1]
+    )[-500:]  # 截断防止过长
+
     conn = get_conn()
-    conn.execute("""
-        INSERT INTO trades (code, action, price, quantity, date, note, trade_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (code, action, price, quantity, date_str, note, trade_amount))
-    conn.commit()
-    conn.close()
-    # 同步到交易日志 (trading_journal)
-    _sync_to_journal(code, action, date_str, price, quantity, note)
+    try:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO trades
+              (code, action, price, quantity, date, note, trade_amount, trade_hash, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (code, action, price, quantity, date_str, note, trade_amount,
+             trade_hash, caller_info),
+        )
+        inserted = cursor.rowcount > 0
+        conn.commit()
+        if inserted:
+            _sync_to_journal(code, action, date_str, price, quantity, note)
+        return inserted
+    finally:
+        conn.close()
 
 
 def _sync_to_journal(code: str, action: str, date_str: str, price: float,
