@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, date
 from typing import Optional, Any
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serenity.db")
+DB_PATH = os.environ.get("SERENITY_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "serenity.db"))
 
 
 def get_conn() -> sqlite3.Connection:
@@ -1546,7 +1546,21 @@ def add_trade(code: str, action: str, price: float, quantity: int, date_str: str
     stack_frames = traceback.extract_stack(limit=6)
     caller_info = " <- ".join(
         f"{os.path.basename(f.filename)}:{f.lineno}" for f in stack_frames[:-1]
-    )[-500:]  # 截断防止过长
+    )[-500:]
+
+    # 非交易日检测（仅标记，不阻止——有时需补录历史交易）
+    is_test = any("test_" in f.filename or "pytest" in f.filename for f in stack_frames)
+    try:
+        from datetime import date as _date
+        trade_date = _date.fromisoformat(date_str)
+        if trade_date.weekday() >= 5:  # Saturday=5, Sunday=6
+            caller_info = "[WEEKEND] " + caller_info
+    except (ValueError, TypeError):
+        pass
+    # 测试代码保护：如果调用来自测试文件，且当前使用生产数据库路径 → 拒绝写入
+    _is_prod_db = ("serenity.db" in DB_PATH and "_test" not in DB_PATH)
+    if is_test and _is_prod_db:
+        return False
 
     conn = get_conn()
     try:
