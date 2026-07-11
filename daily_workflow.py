@@ -367,8 +367,33 @@ def main():
     except Exception as e:
         print(f"  ⚠️ 评分失败: {e}")
 
-    # ── 1b. Frozen Baseline 对比 (v4 Phase 2) ──────────────
-    step('1b Frozen Baseline 三系统对比')
+    # ── 1b. 进化证据自动回填 (v6.0) ──────────────────────────
+    step('1b 进化 IC 证据回填')
+    try:
+        from evolution_bridge import backfill_evidence_to_store
+        import factor_ic
+
+        _ic = factor_ic.compute_rank_ic(days=60, window=20)
+        _n = backfill_evidence_to_store(_ic)
+        if _n > 0:
+            print(f"  ✅ 进化证据回填: {_n} 维度 (≥50 样本)")
+            # 检查是否到达周度候选生成门槛
+            _all_ics = _ic.get("all_ics", {})
+            _ready = sum(1 for v in _all_ics.values() if len(v) >= 50)
+            if _ready >= 3:
+                print(f"  🧬 {_ready} 个维度达到候选门槛 → 可运行 --evolve-weekly")
+            else:
+                _max_samples = max((len(v) for v in _all_ics.values()), default=0)
+                print(f"  ⏳ 样本不足: {_ready}/7 维度达标, 最多 {_max_samples}/50")
+        else:
+            _all_ics = _ic.get("all_ics", {})
+            _max_samples = max((len(v) for v in _all_ics.values()), default=0)
+            print(f"  ⏳ 无维度达标 (≥50), 当前最多 {_max_samples} 样本 — 继续积累")
+    except Exception as e:
+        print(f"  ⚠️ 进化证据回填失败 (非阻塞): {e}")
+
+    # ── 1c. Frozen Baseline 对比 (v4 Phase 2) ──────────────
+    step('1c Frozen Baseline 三系统对比')
     _frozen_cmp = None
     try:
         from frozen_baseline import get_comparator as _get_cmp
