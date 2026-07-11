@@ -196,8 +196,95 @@ def main():
         show_weights()
     elif "--reset" in sys.argv:
         reset_weights()
+    elif "--evolve-weekly" in sys.argv:
+        _evolve_weekly_candidate()
     else:
         adjust_weights()
+
+
+def _evolve_weekly_candidate():
+    """🆕 v6.0 周度进化候选生成 — 对接 serenity_evolution 内核。
+
+    从 factor_ic.py 收集 ≥50 样本的 IC 证据，生成候选权重，
+    通过 Frozen vs Adaptive 回测对比，闸门评估，写入 evolution 存储。
+    """
+    from evolution_bridge import (
+        collect_ic_evidence,
+        generate_weekly_candidate,
+        backtest_strategy_series,
+        backtest_frozen_baseline,
+        FROZEN_DEFAULT_WEIGHTS,
+    )
+    from serenity_evolution.engine import EvolutionEngine
+    from serenity_evolution.store import EvolutionStore
+    import factor_ic
+    from db import get_conn
+
+    print("🧬 周度进化候选生成")
+    print("─" * 50)
+
+    # 1. 收集 IC 证据
+    ic_result = factor_ic.compute_rank_ic(days=60, window=20)
+    evidence = collect_ic_evidence(ic_result)
+    if len(evidence) < 3:
+        print(f"⚠️ 有效证据维度不足 ({len(evidence)} < 3)，跳过本周进化")
+        return
+    print(f"📊 IC 证据: {len(evidence)} 个维度")
+
+    # 2. 获取回测数据
+    conn = get_conn()
+    price_rows = [
+        dict(r) for r in conn.execute(
+            "SELECT code, date, open, high, low, close, volume FROM price_history "
+            "ORDER BY code, date"
+        ).fetchall()
+    ]
+    score_rows = [
+        dict(r) for r in conn.execute(
+            "SELECT code, date, zone_score, momentum_score, volume_score, "
+            "serenity_score, factor_score, technical_score, moat_score "
+            "FROM scoring_history ORDER BY code, date"
+        ).fetchall()
+    ]
+    conn.close()
+
+    if len(price_rows) < 120:
+        print(f"⚠️ 价格数据不足 ({len(price_rows)} < 120 天)，跳过")
+        return
+
+    # 3. 生成候选
+    candidate = generate_weekly_candidate(
+        "frozen-v1", FROZEN_DEFAULT_WEIGHTS, evidence
+    )
+    print(f"🎯 候选: {candidate.candidate_id}")
+    for k, v in candidate.weights.items():
+        delta = v - FROZEN_DEFAULT_WEIGHTS.get(k, 0)
+        print(f"  {k}: {FROZEN_DEFAULT_WEIGHTS.get(k, 0):.3f} → {v:.3f} ({delta:+.3f})")
+
+    # 4. 回测对比
+    print("⏳ 回测中...")
+    cand_series = backtest_strategy_series(candidate.weights, price_rows, score_rows)
+    base_series = backtest_frozen_baseline(price_rows, score_rows)
+
+    # 5. 闸门评估
+    store = EvolutionStore("serenity.db")
+    engine = EvolutionEngine(store)
+    comparison, gate_result = engine.evaluate(
+        candidate.candidate_id,
+        cand_series,
+        base_series,
+        data_quality_ok=True,
+        costs_included=True,
+        market_rules_included=True,
+    )
+
+    print(f"\n📋 结果: {'✅ PASS' if gate_result.passed else '❌ FAIL'}")
+    print(f"  Stage: {gate_result.stage.value}")
+    print(f"  Excess Return: {comparison.excess_return:+.4f}")
+    print(f"  Sharpe Delta:  {comparison.sharpe_delta:+.4f}")
+    print(f"  Bootstrap P:    {comparison.bootstrap_probability:.4f}")
+    if gate_result.failures:
+        print(f"  Failures: {', '.join(gate_result.failures)}")
 
 
 if __name__ == "__main__":

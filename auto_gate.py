@@ -1361,3 +1361,72 @@ def format_record_report(result: dict[str, Any]) -> str:
     for item in result["low_quality"][:8]:
         lines.append(f"  warning {item['code']}: {item.get('warning', '')}")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 🆕 v6.0 进化内核实盘守卫 — serenity_evolution 三道锁
+# ═══════════════════════════════════════════════════════════════
+
+
+def evolution_live_check() -> dict[str, Any]:
+    """
+    每次实盘交易决策前调用此函数。
+
+    三道锁:
+      1. live_apply_enabled 必须为 True
+      2. evolution_active_v2 中必须有 environment='live' 且 stage='LIVE' 的候选
+      3. 必须有显式人工批准记录 (approval_ref 非空)
+
+    未通过任一锁 → 返回 frozen_active=True，系统继续使用 Frozen Baseline。
+
+    Returns:
+        {live_allowed, candidate_id, reason, frozen_active, active_weights}
+    """
+    try:
+        from evolution_bridge import (
+            check_live_gate,
+            get_active_live_weights,
+            FROZEN_DEFAULT_WEIGHTS,
+        )
+    except ImportError:
+        return {
+            "live_allowed": False,
+            "candidate_id": None,
+            "reason": "evolution_bridge 不可用",
+            "frozen_active": True,
+            "active_weights": None,
+        }
+
+    gate = check_live_gate()
+    weights = None
+    if gate.live_allowed:
+        weights = get_active_live_weights()
+
+    return {
+        "live_allowed": gate.live_allowed,
+        "candidate_id": gate.candidate_id,
+        "reason": gate.reason,
+        "frozen_active": gate.frozen_active,
+        "active_weights": weights or FROZEN_DEFAULT_WEIGHTS,
+    }
+
+
+def get_active_execution_weights() -> dict[str, float]:
+    """
+    获取当前应使用的实盘权重。
+
+    优先级:
+      1. 进化内核 LIVE 候选权重（三道锁全部通过）
+      2. weight_adjuster 的动态权重
+      3. Frozen Baseline 默认权重
+    """
+    evo = evolution_live_check()
+    if evo["live_allowed"] and evo["active_weights"]:
+        return evo["active_weights"]
+
+    try:
+        from weight_adjuster import load_adjusted_weights
+        return load_adjusted_weights()
+    except Exception:
+        from evolution_bridge import FROZEN_DEFAULT_WEIGHTS
+        return dict(FROZEN_DEFAULT_WEIGHTS)

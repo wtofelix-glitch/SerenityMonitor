@@ -344,6 +344,27 @@ if __name__ == "__main__":
 
 
 # ============================================================
+# 🆕 v6.0 进化内核证据导出 — 供 serenity_evolution 消费
+# ============================================================
+
+
+def export_evolution_evidence(days: int = 60, window: int = 20) -> dict:
+    """导出 IC 证据供进化内核使用。
+
+    返回格式对齐 evolution_bridge.collect_ic_evidence()。
+    只写证据，绝不修改权重。
+    """
+    result = compute_rank_ic(days=days, window=window)
+    return {
+        "all_ics": result.get("all_ics", {}),
+        "mean_ic": result.get("mean_ic", {}),
+        "n_days": result.get("n_days", {}),
+        "rankings": result.get("rankings", {}),
+        "collected_at": __import__("datetime").datetime.now().isoformat(),
+    }
+
+
+# ============================================================
 # 🆕 v3.0 维度自动建议 — 基于 IC 趋势的淘汰/降权推荐
 # ============================================================
 

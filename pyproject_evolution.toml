@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "serenity-evolution"
+version = "0.1.0"
+description = "Safety-first automatic evolution kernel for SerenityMonitor"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+serenity-evolution = "serenity_evolution.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["serenity_evolution*"]
