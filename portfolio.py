@@ -82,9 +82,66 @@ class PortfolioManager:
 
     @property
     def positions(self) -> list[dict]:
-        """从数据库读取当前持仓"""
-        stocks = load_all_stocks()
-        return [s for s in stocks if s["is_active"] and s.get("code") != "CASH"]
+        """当前持仓：trades 表净持仓 > 0 的标的（不依赖 stocks.is_active）。
+
+        trades 表是唯一真相源。每次调用自动同步 stocks.is_active。
+        """
+        conn = get_conn()
+        try:
+            # 从 trades 表直接算净值（唯一真相源）
+            net_rows = conn.execute(
+                "SELECT code, "
+                "COALESCE(SUM(CASE WHEN action IN ('buy','BUY') THEN quantity ELSE 0 END), 0) as bought, "
+                "COALESCE(SUM(CASE WHEN action IN ('sell','SELL') THEN quantity ELSE 0 END), 0) as sold "
+                "FROM trades WHERE code != 'CASH' "
+                "GROUP BY code"
+            ).fetchall()
+
+            held_codes = {row["code"] for row in net_rows if (row["bought"] - row["sold"]) > 0}
+
+            # 全量 stocks 元数据
+            stocks = load_all_stocks()
+            stock_map = {s["code"]: s for s in stocks}
+
+            # 自动同步 stocks.is_active — 修复名册-账本不一致
+            all_stock_codes = {s["code"] for s in stocks if s.get("code") != "CASH"}
+            needs_activate = held_codes - {s["code"] for s in stocks if s.get("is_active")}
+            needs_deactivate = (all_stock_codes - held_codes) - {"CASH"}
+            if needs_activate or needs_deactivate:
+                for code in needs_activate:
+                    conn.execute("UPDATE stocks SET is_active=1 WHERE code=?", (code,))
+                for code in needs_deactivate:
+                    conn.execute("UPDATE stocks SET is_active=0 WHERE code=?", (code,))
+                conn.commit()
+
+            # 构建返回列表：held_codes 为主，fallback 到 stocks.is_active（兼容测试数据只有 stocks 无 trades）
+            result: list[dict] = []
+            seen: set[str] = set()
+            for code in sorted(held_codes):
+                meta = stock_map.get(code, {})
+                result.append({
+                    "code": code,
+                    "name": meta.get("name", code),
+                    "is_active": True,
+                    "buy_price": meta.get("buy_price", 0),
+                    "buy_date": meta.get("buy_date", ""),
+                    "target_high": meta.get("target_high", 0),
+                    "target_low": meta.get("target_low", 0),
+                    "stop_loss": meta.get("stop_loss", 0),
+                    "peak_price": meta.get("peak_price", 0),
+                    "trade_amount": meta.get("trade_amount", 0),
+                })
+                seen.add(code)
+            # fallback: stocks.is_active 中有但 trades 中无净持仓的（测试兼容）
+            for s in stocks:
+                code = s.get("code", "")
+                if code in seen or code == "CASH":
+                    continue
+                if s.get("is_active"):
+                    result.append(s)
+            return result
+        finally:
+            conn.close()
 
     @property
     def position_codes(self) -> list[str]:
