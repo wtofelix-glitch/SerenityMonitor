@@ -1730,6 +1730,50 @@ def api_clear_cache():
     return jsonify({"ok": True, "msg": "缓存已清除"})
 
 
+# ===== 实时指数 =====
+_indices_cache: dict = {}
+_indices_cache_ts: float = 0
+
+
+@app.route("/api/indices")
+def api_indices():
+    """实时三大指数 — 30秒缓存"""
+    global _indices_cache, _indices_cache_ts
+    now = time.time()
+    if _indices_cache and now - _indices_cache_ts < 30:
+        return jsonify(_indices_cache)
+
+    import urllib.request
+    try:
+        url = "https://hq.sinajs.cn/list=s_sh000001,s_sz399001,s_sz399006"
+        req = urllib.request.Request(url, headers={"Referer": "https://finance.sina.com.cn"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = resp.read().decode("gbk")
+        result = {"ok": True, "indices": [], "updated_at": datetime.now().strftime("%H:%M:%S")}
+        for line in data.strip().split("\n"):
+            if "=" not in line:
+                continue
+            name, raw = line.split("=", 1)
+            code = name.split("_")[-1] if "_" in name else name
+            fields = raw.strip('";').split(",")
+            if len(fields) >= 4:
+                result["indices"].append({
+                    "code": code,
+                    "name": fields[0],
+                    "price": float(fields[1]) if fields[1] else 0,
+                    "change": float(fields[2]) if fields[2] else 0,
+                    "change_pct": float(fields[3]) if fields[3] else 0,
+                })
+        _indices_cache = result
+        _indices_cache_ts = now
+        return jsonify(result)
+    except Exception as e:
+        if _indices_cache:
+            _indices_cache["stale"] = True
+            return jsonify(_indices_cache)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ===== Hermes 实时更新通道 =====
 @app.route("/api/hermes/trade", methods=["POST"])
 @require_write_auth

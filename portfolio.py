@@ -563,6 +563,8 @@ class PortfolioManager:
                 continue
 
             buy_price = p["buy_price"]
+            if buy_price <= 0:
+                continue  # 无有效成本价 → 跳过止损检查
             is_free = buy_price < 0
 
             # 🛡️ v3.0 免费仓位（前期获利已覆盖成本）不触发止损

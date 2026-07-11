@@ -353,22 +353,41 @@ function updateHeader() {
 
 // ─── 行情条 ────────────────────────────────────────────────────
 function updateMarketTape() {
-  const d = STATE.data; const el = $('market-tape'); if (!d || !el) return;
-  const pf = d.portfolio_summary || {}; const sb = d.signal_brief || {};
-  const mkt = d.market || {}; const sh = mkt.sh || {}; const hs300 = mkt.hs300 || {};
-  const mv = getMarketView(mkt); const session = getSession(d);
-  const pnl = pf.total_profit_pct || 0;
+  // Replaced by updateMarketBar — keep stub for backward compat
+  updateMarketBar();
+}
 
-  el.innerHTML = `
-    <span class="tape-kicker">MARKET</span>
-    <div class="tape-track">
-      <span><b>上证</b><em>${sh.last_close ? fmt(sh.last_close, 0) : '--'} · ${mv.label}</em></span>
-      <span><b>沪深300</b><em>${hs300.last_close ? fmt(hs300.last_close, 0) : '--'} · ${mv.label}</em></span>
-      <span><b>阶段</b><em class="${session.tone}">${session.label}</em></span>
-      <span><b>组合</b><em class="${pnl >= 0 ? 'up' : 'down'}">${(pnl >= 0 ? '+' : '') + fmt(pnl, 2)}%</em></span>
-      <span><b>信号</b><em>${sb.buy_count || 0}B / ${sb.risk_count || 0}R</em></span>
-    </div>
-    <span class="tape-time">${d.timestamp || 'LIVE'}</span>`;
+function updateMarketBar() {
+  fetch('/api/indices').then(r => r.json()).then(d => {
+    if (!d.ok || !d.indices) return;
+    const row = $('index-row');
+    const time = $('idx-time');
+    if (!row) return;
+
+    const els = d.indices.map(function(idx) {
+      const up = idx.change >= 0;
+      const arrow = up ? '↑' : '↓';
+      const cls = up ? 'up' : 'down';
+      const sign = up ? '+' : '';
+      return '<span class="idx-item">' +
+        '<b>' + idx.name + '</b>' +
+        '<em>' + fmt(idx.price, 2) + '</em>' +
+        '<em class="' + cls + '">' + arrow + sign + fmt(idx.change, 2) + ' ' + sign + fmt(idx.change_pct, 2) + '%</em>' +
+        '</span>';
+    }).join('');
+
+    const d2 = STATE.data;
+    const pf = d2 ? d2.portfolio_summary || {} : {};
+    const sb = d2 ? d2.signal_brief || {} : {};
+    const pnl = pf.total_profit_pct || 0;
+    const session = d2 ? getSession(d2) : {label:'--',tone:''};
+
+    els.push('<span class="idx-item"><b>组合</b><em class="' + (pnl >= 0 ? 'up' : 'down') + '">' + (pnl >= 0 ? '+' : '') + fmt(pnl, 2) + '%</em></span>');
+    els.push('<span class="idx-item"><b>信号</b><em>' + (sb.buy_count || 0) + '买/' + (sb.risk_count || 0) + '卖</em></span>');
+
+    row.innerHTML = els.join('');
+    if (time) time.textContent = d.updated_at || '--';
+  }).catch(function(){});
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -496,9 +515,9 @@ function renderOverview(d) {
       const isUp = pnlPct >= 0;
       // 盈利=金暖渐变, 亏损=冷灰渐变
       const bgGrad = isUp
-        ? `linear-gradient(135deg, rgba(255,214,10,0.08), rgba(255,159,10,0.04))`
-        : `linear-gradient(135deg, rgba(255,69,58,0.06), rgba(0,0,0,0.2))`;
-      const borderClr = isUp ? 'rgba(255,214,10,0.2)' : 'rgba(255,69,58,0.15)';
+        ? `linear-gradient(135deg, rgba(255,59,48,0.06), rgba(255,59,48,0.02))`
+        : `linear-gradient(135deg, rgba(52,199,89,0.06), rgba(0,0,0,0.2))`;
+      const borderClr = isUp ? 'rgba(255,59,48,0.15)' : 'rgba(52,199,89,0.12)';
       pnlCards += `
       <div class="pnl-premium-card" style="background:${bgGrad};border-color:${borderClr}">
         <div class="pnl-premium-left">
@@ -808,6 +827,36 @@ function renderRiskTab(d) {
         <div class="rg-limit">${fmtCurrency(pf.cash)}</div>
       </div>
     </div></div></div>`;
+
+  // ── Full Stock Pool (20只) ──────────────────────────────
+  if (scores.length) {
+    const poolChips = scores.map(s => {
+      const sc = s.total_score || 0;
+      const pct = s.change_pct || 0;
+      const sig = s.signal_action || '';
+      const sigLabel = {STRONG_BUY:'强买',BUY:'买入',CAUTION_BUY:'谨慎',HOLD:'持有',STRONG_HOLD:'强持',WATCH:'观察',WEAK_HOLD:'弱持',SELL:'卖出',STOP_LOSS:'止损',TAKE_PROFIT:'止盈',REDUCE:'减仓'}[sig] || sig;
+      const scoreCls = sc >= 74 ? 'score-hot' : (sc >= 60 ? 'score-warm' : (sc >= 45 ? 'score-cool' : 'score-cold'));
+      const pctCls = pct >= 0 ? 'up' : 'down';
+      const pctSign = pct >= 0 ? '+' : '';
+      const held = heldCodes.has(s.code);
+      return '<div class="pool-chip' + (held ? ' held' : '') + '">' +
+        '<div class="pool-chip-top">' +
+          '<span class="pool-name">' + (s.name || s.code) + '</span>' +
+          '<span class="pool-code">' + (s.code || '').slice(-4) + '</span>' +
+        '</div>' +
+        '<div class="pool-chip-mid">' +
+          '<span class="pool-score ' + scoreCls + '">' + fmt(sc, 0) + '</span>' +
+          '<span class="pool-pct ' + pctCls + '">' + pctSign + fmt(pct, 2) + '%</span>' +
+        '</div>' +
+        '<div class="pool-chip-bot">' +
+          '<span class="pool-sig">' + sigLabel + '</span>' +
+          (held ? '<span class="pool-held">●持</span>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+    html += '<div class="card pool-card"><div class="card-header"><span class="card-title">📋 标的池</span><span class="card-subtitle">' + scores.length + '只 · 滑动查看</span></div>' +
+      '<div class="card-body"><div class="pool-scroll">' + poolChips + '</div></div></div>';
+  }
 
   // ── NAV Chart ───────────────────────────────────────────
   html += `<div class="card" id="nav-card">
