@@ -881,6 +881,26 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_oos_nav_date ON oos_nav_curves(experiment_id, date)")
 
+    # 🆕 v6.0 影子退池监控
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS universe_status_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            code            TEXT NOT NULL,
+            date            TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            tier            INTEGER DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'ACTIVE',
+            hard_qual_flags_json    TEXT DEFAULT '[]',
+            economic_flags_json     TEXT DEFAULT '[]',
+            logic_flags_json        TEXT DEFAULT '[]',
+            details_json    TEXT DEFAULT '{}',
+            trigger_reasons TEXT DEFAULT '[]',
+            hypothetical_exit_date  TEXT,
+            recorded_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_universe_status_code ON universe_status_log(code, date)")
+
     for sql in _index_sqls:
         conn.execute(sql)
     conn.commit()

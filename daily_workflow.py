@@ -457,6 +457,27 @@ def main():
     except Exception as e:
         print(f"  ⚠️ Frozen Baseline 对比失败: {e}")
 
+    # ── 1d. 影子退池监控 (v6.0) ──────────────────────────────
+    step('1d 影子退池监控')
+    try:
+        from pool_shadow_monitor import UniverseShadowMonitor
+        _shadow = UniverseShadowMonitor(oos_frozen=True)
+        _shadow_results = _shadow.record_daily()
+        _flagged = sum(1 for s in _shadow_results if s.status != "ACTIVE")
+        _evidence = sum(1 for s in _shadow_results if s.hard_qual_flags or s.economic_flags or s.logic_flags)
+        if _flagged > 0:
+            print(f"  ⚠️ {_flagged} 只非活跃, {_evidence} 只有退池证据 — 仅记录，不改变交易")
+            for s in _shadow_results:
+                if s.status != "ACTIVE":
+                    print(f"     {s.status}: {s.name}({s.code})")
+        else:
+            _hard = sum(1 for s in _shadow_results if s.hard_qual_flags)
+            _econ = sum(1 for s in _shadow_results if s.economic_flags)
+            _logic = sum(1 for s in _shadow_results if s.logic_flags)
+            print(f"  ✅ 20 只全部 ACTIVE | 证据: 硬资格{_hard} 经济{_econ} 产业{_logic}")
+    except Exception as e:
+        print(f"  ⚠️ 影子退池监控失败 (非阻塞): {e}")
+
     # ── 2. 信号 ──────────────────────────────────────
     step('2/8 交易信号')
     try:
