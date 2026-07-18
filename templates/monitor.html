@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="{{ theme }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -9,11 +9,13 @@
   <meta name="description" content="Serenity — A股量化交易监控看板">
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <title>Serenity</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}?v=6.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor-base.css') }}?v=7.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/theme-' + theme + '.css') }}?v=7.0">
   <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 </head>
 <body>
+  <a href="#tab-bar" class="sr-only focusable" aria-label="跳到主菜单">跳到导航</a>
   <header class="top-header">
     <div class="header-inner">
       <div class="header-brand"><div class="header-logo">S</div><span class="header-title">Serenity</span></div>
@@ -47,7 +49,7 @@
   <div class="tab-content" id="tab-operations" role="tabpanel" aria-labelledby="tab-button-operations" hidden></div>
   <div class="tab-content" id="tab-live" role="tabpanel" aria-labelledby="tab-button-live" hidden></div>
   <div class="tab-content" id="tab-governance" role="tabpanel" aria-labelledby="tab-button-governance" hidden></div>
-  <script src="{{ url_for('static', filename='js/monitor.js') }}?v=6.0"></script>
+  <script src="{{ url_for('static', filename='js/monitor.js') }}?v=7.0"></script>
   <script>
     if('serviceWorker' in navigator){
       navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");

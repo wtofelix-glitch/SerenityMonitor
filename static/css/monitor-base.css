@@ -1,0 +1,18 @@
+/* Serenity monitor — base structural styles shared across themes.
+   Legacy styles are in theme-legacy.css (frozen asset, do not edit).
+   Terminal Noir styles will be in theme-terminal-noir.css (R1).
+   Rules added here after R0 must be theme-agnostic structural-only. */
+
+/* skip-link — accessibility: keyboard users jump to tab navigation */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0;
+  margin: -1px; overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+.sr-only.focusable:focus {
+  position: fixed; top: 8px; left: 8px; z-index: 10000;
+  width: auto; height: auto; padding: 10px 16px;
+  margin: 0; clip: auto; white-space: normal;
+  background: var(--bg-root, #080808); color: var(--text-primary, #fff);
+  font-size: 14px; border-radius: 6px; text-decoration: none;
+}

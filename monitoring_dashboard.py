@@ -74,6 +74,13 @@ setTimeout(loadExecutionPlan,1000);
 """
 import sys
 import os
+
+# ── R0 主题开关（模块级常量，永久默认 legacy）──
+_ALLOWED_THEMES = ('legacy',)  # R1 上线 terminal-noir 时扩为二元组
+SERENITY_THEME = os.environ.get('SERENITY_THEME', 'legacy')
+if SERENITY_THEME not in _ALLOWED_THEMES:
+    SERENITY_THEME = 'legacy'  # 非法值静默回退，失效安全
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 防止 Hermes cron 执行 daemon 后发 SIGTERM 误杀看板进程
@@ -124,6 +131,26 @@ from portfolio import PortfolioManager
 from quant_fusion import build_quantdinger_consensus
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SERENITY_DASHBOARD_TOKEN") or os.urandom(24).hex()
+
+@app.after_request
+def _add_security_headers(resp):
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-XSS-Protection", "1; mode=block")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://*.sinaimg.cn; "
+        "font-src 'self' data:; "
+        "frame-ancestors 'none'"
+    )
+    return resp
+
 DASHBOARD_PORT = int(os.environ.get("SERENITY_DASHBOARD_PORT", "8401"))
 MONITOR_API_TIMEOUT = float(os.environ.get("SERENITY_MONITOR_API_TIMEOUT", "7"))
 
@@ -1052,7 +1079,16 @@ def _get_portfolio_summary():
 @app.route("/monitor")
 def monitor():
     """Serenity 旧版看板"""
-    return render_template("monitor.html")
+    return render_template("monitor.html", theme=SERENITY_THEME)
+
+
+@app.after_request
+def _api_no_store(resp):
+    """双保险：所有 /api/** 响应禁用浏览器 HTTP 缓存。
+    SW 已对 API 做 network-only，加上此头防未来 SW 改动回归。"""
+    if request.path.startswith('/api/'):
+        resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 @app.route("/dashboard")
