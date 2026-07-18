@@ -1,0 +1,2307 @@
+{
+ "data": {
+  "auto_gate": {
+   "avg_excess_5d": 0.0,
+   "avg_return_5d": 0.0,
+   "compliance_flow": [
+    {
+     "active": true,
+     "done": false,
+     "id": "not_reported",
+     "label": "未报告"
+    },
+    {
+     "active": false,
+     "done": false,
+     "id": "reported_pending_review",
+     "label": "待核查"
+    },
+    {
+     "active": false,
+     "done": false,
+     "id": "approved",
+     "label": "核查通过"
+    }
+   ],
+   "compliance_status": "not_reported",
+   "consecutive_loss_ok": true,
+   "data_quality_warnings": [],
+   "excess_win_rate": 0.0,
+   "gate_passed": false,
+   "latest_10": [],
+   "max_state": "MANUAL",
+   "reasons": [
+    "sample_count 0 < 50",
+    "win_rate 0.00% < 60.00%",
+    "wilson_lower 0.00% < 50.00%",
+    "avg_return_5d 0.00% <= 0"
+   ],
+   "required_sample_count": 50,
+   "sample_count": 0,
+   "state": "LOCKED",
+   "strategy_version": "v25.0",
+   "wilson_lower": 0.0,
+   "win_rate": 0.0
+  },
+  "date": "2026-07-15",
+  "dividend_top5": [],
+  "etf_top5": [],
+  "factor_labels": {
+   "beta_20": "Beta20",
+   "cci_signal": "CCI",
+   "ksft": "KSFT(形态)",
+   "macd_signal": "MACD",
+   "mfi_signal": "MFI",
+   "obv_trend": "OBV",
+   "rank_20": "Rank20",
+   "resi_20": "Resi20",
+   "rsv_20": "RSV20",
+   "wq_alpha1": "WQα#1",
+   "wq_alpha15": "WQα#15",
+   "wq_alpha19": "WQα#19",
+   "wq_alpha3": "WQα#3",
+   "wq_alpha5": "WQα#5"
+  },
+  "factors": [
+   {
+    "beta_20": -0.99846,
+    "cci_signal": -0.948008,
+    "code": "002281",
+    "ksft": -0.19436,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.109503,
+    "name": "光迅科技",
+    "obv_trend": -0.553384,
+    "rank_20": null,
+    "resi_20": -0.168632,
+    "rsv_20": null,
+    "signal": -0.4055,
+    "wq_alpha1": -0.950237,
+    "wq_alpha15": 0.959904,
+    "wq_alpha19": -0.933465,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958109
+   },
+   {
+    "beta_20": -0.99967,
+    "cci_signal": -0.959697,
+    "code": "000988",
+    "ksft": -0.189902,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.600809,
+    "name": "华工科技",
+    "obv_trend": -0.525222,
+    "rank_20": null,
+    "resi_20": -0.249,
+    "rsv_20": null,
+    "signal": -0.4543,
+    "wq_alpha1": -0.955797,
+    "wq_alpha15": 0.959652,
+    "wq_alpha19": -0.961518,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958112
+   },
+   {
+    "beta_20": -0.999997,
+    "cci_signal": -0.923994,
+    "code": "603083",
+    "ksft": -0.198438,
+    "macd_signal": -0.964028,
+    "mfi_signal": 0.064162,
+    "name": "剑桥科技",
+    "obv_trend": -0.458478,
+    "rank_20": null,
+    "resi_20": -0.005916,
+    "rsv_20": null,
+    "signal": -0.351,
+    "wq_alpha1": -0.9553,
+    "wq_alpha15": 0.960498,
+    "wq_alpha19": -0.724842,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958109
+   },
+   {
+    "beta_20": -0.999939,
+    "cci_signal": -0.935431,
+    "code": "600487",
+    "ksft": -0.208805,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.55274,
+    "name": "亨通光电",
+    "obv_trend": -0.573693,
+    "rank_20": null,
+    "resi_20": -0.010368,
+    "rsv_20": 0.00065,
+    "signal": -0.3996,
+    "wq_alpha1": -0.952872,
+    "wq_alpha15": 0.961336,
+    "wq_alpha19": -0.952713,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958121
+   },
+   {
+    "beta_20": -0.999712,
+    "cci_signal": -0.951941,
+    "code": "002428",
+    "ksft": -0.214283,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.51015,
+    "name": "云南锗业",
+    "obv_trend": -0.434225,
+    "rank_20": null,
+    "resi_20": -0.138463,
+    "rsv_20": null,
+    "signal": -0.4301,
+    "wq_alpha1": -0.951305,
+    "wq_alpha15": 0.961573,
+    "wq_alpha19": -0.953261,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958118
+   },
+   {
+    "beta_20": -0.970259,
+    "cci_signal": -0.918847,
+    "code": "600141",
+    "ksft": -0.120141,
+    "macd_signal": -0.964006,
+    "mfi_signal": -0.940569,
+    "name": "兴发集团",
+    "obv_trend": -0.554834,
+    "rank_20": null,
+    "resi_20": 0.095865,
+    "rsv_20": 0.001782,
+    "signal": -0.3983,
+    "wq_alpha1": -0.885849,
+    "wq_alpha15": 0.936283,
+    "wq_alpha19": -0.851663,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958115
+   },
+   {
+    "beta_20": -1.0,
+    "cci_signal": -0.947571,
+    "code": "603986",
+    "ksft": -0.184773,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.676915,
+    "name": "兆易创新",
+    "obv_trend": -0.576134,
+    "rank_20": null,
+    "resi_20": -0.078077,
+    "rsv_20": null,
+    "signal": -0.448,
+    "wq_alpha1": -0.95044,
+    "wq_alpha15": 0.958777,
+    "wq_alpha19": -0.950863,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958117
+   },
+   {
+    "beta_20": -0.960085,
+    "cci_signal": -0.953832,
+    "code": "600460",
+    "ksft": -0.147394,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.782797,
+    "name": "士兰微",
+    "obv_trend": -0.544421,
+    "rank_20": null,
+    "resi_20": -0.169209,
+    "rsv_20": 0.028035,
+    "signal": -0.4196,
+    "wq_alpha1": -0.954369,
+    "wq_alpha15": 0.959074,
+    "wq_alpha19": -0.95946,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958119
+   },
+   {
+    "beta_20": 0.197072,
+    "cci_signal": 0.925911,
+    "code": "600036",
+    "ksft": 0.008474,
+    "macd_signal": 0.844028,
+    "mfi_signal": 0.731121,
+    "name": "招商银行",
+    "obv_trend": 0.468401,
+    "rank_20": 0.964028,
+    "resi_20": 0.00021,
+    "rsv_20": 0.954199,
+    "signal": 0.4911,
+    "wq_alpha1": 0.909252,
+    "wq_alpha15": 0.491786,
+    "wq_alpha19": 0.386462,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958101
+   },
+   {
+    "beta_20": 0.043341,
+    "cci_signal": 0.956989,
+    "code": "600585",
+    "ksft": -0.003424,
+    "macd_signal": 0.734991,
+    "mfi_signal": 0.668695,
+    "name": "海螺水泥",
+    "obv_trend": 0.11925,
+    "rank_20": 0.964028,
+    "resi_20": 0.033152,
+    "rsv_20": 0.929065,
+    "signal": 0.4742,
+    "wq_alpha1": 0.835409,
+    "wq_alpha15": 0.722108,
+    "wq_alpha19": 0.641254,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958102
+   },
+   {
+    "beta_20": 0.210245,
+    "cci_signal": 0.66111,
+    "code": "600900",
+    "ksft": 0.031861,
+    "macd_signal": 0.579545,
+    "mfi_signal": 0.583031,
+    "name": "长江电力",
+    "obv_trend": 0.557163,
+    "rank_20": 0.879954,
+    "resi_20": -0.04037,
+    "rsv_20": 0.886338,
+    "signal": 0.4102,
+    "wq_alpha1": 0.893136,
+    "wq_alpha15": 0.79842,
+    "wq_alpha19": -0.291602,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958102
+   },
+   {
+    "beta_20": 0.05705,
+    "cci_signal": 0.926616,
+    "code": "601398",
+    "ksft": 0.043217,
+    "macd_signal": 0.401941,
+    "mfi_signal": 0.764384,
+    "name": "工商银行",
+    "obv_trend": 0.426629,
+    "rank_20": 0.964028,
+    "resi_20": 0.007322,
+    "rsv_20": 0.959335,
+    "signal": 0.4543,
+    "wq_alpha1": 0.953668,
+    "wq_alpha15": 0.756465,
+    "wq_alpha19": 0.105745,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958098
+   },
+   {
+    "beta_20": 0.007308,
+    "cci_signal": 0.614159,
+    "code": "601006",
+    "ksft": -0.012819,
+    "macd_signal": 0.082454,
+    "mfi_signal": 0.066076,
+    "name": "大秦铁路",
+    "obv_trend": 0.50383,
+    "rank_20": 0.689055,
+    "resi_20": -0.01092,
+    "rsv_20": 0.795308,
+    "signal": 0.3163,
+    "wq_alpha1": 0.822846,
+    "wq_alpha15": 0.625152,
+    "wq_alpha19": 0.251152,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958104
+   },
+   {
+    "beta_20": 0.842562,
+    "cci_signal": 0.795272,
+    "code": "000938",
+    "ksft": -0.182,
+    "macd_signal": 0.19868,
+    "mfi_signal": 0.751165,
+    "name": "紫光股份",
+    "obv_trend": 0.540829,
+    "rank_20": 0.8989,
+    "resi_20": -0.211488,
+    "rsv_20": 0.863242,
+    "signal": 0.2606,
+    "wq_alpha1": -0.923489,
+    "wq_alpha15": 0.961812,
+    "wq_alpha19": -0.881793,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958121
+   },
+   {
+    "beta_20": -0.393021,
+    "cci_signal": -0.929152,
+    "code": "601689",
+    "ksft": -0.138985,
+    "macd_signal": -0.957563,
+    "mfi_signal": 0.560685,
+    "name": "拓普集团",
+    "obv_trend": -0.501332,
+    "rank_20": null,
+    "resi_20": -0.126263,
+    "rsv_20": 0.061104,
+    "signal": -0.2481,
+    "wq_alpha1": -0.955824,
+    "wq_alpha15": 0.956736,
+    "wq_alpha19": -0.795191,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958115
+   },
+   {
+    "beta_20": -0.34708,
+    "cci_signal": -0.937602,
+    "code": "002050",
+    "ksft": -0.046488,
+    "macd_signal": -0.95141,
+    "mfi_signal": 0.020847,
+    "name": "三花智控",
+    "obv_trend": 0.123851,
+    "rank_20": null,
+    "resi_20": -0.081451,
+    "rsv_20": 0.228293,
+    "signal": -0.2036,
+    "wq_alpha1": -0.922999,
+    "wq_alpha15": 0.956112,
+    "wq_alpha19": -0.683196,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958108
+   },
+   {
+    "beta_20": -0.421652,
+    "cci_signal": -0.920575,
+    "code": "601100",
+    "ksft": -0.104212,
+    "macd_signal": -0.963325,
+    "mfi_signal": 0.72383,
+    "name": "恒立液压",
+    "obv_trend": -0.227406,
+    "rank_20": null,
+    "resi_20": -0.07791,
+    "rsv_20": 0.031689,
+    "signal": -0.1855,
+    "wq_alpha1": -0.947628,
+    "wq_alpha15": 0.933156,
+    "wq_alpha19": -0.431189,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958108
+   },
+   {
+    "beta_20": -0.360197,
+    "cci_signal": -0.931467,
+    "code": "600580",
+    "ksft": -0.113228,
+    "macd_signal": -0.934707,
+    "mfi_signal": 0.534314,
+    "name": "卧龙电驱",
+    "obv_trend": 0.375553,
+    "rank_20": null,
+    "resi_20": -0.109047,
+    "rsv_20": 0.03602,
+    "signal": -0.1717,
+    "wq_alpha1": -0.941771,
+    "wq_alpha15": 0.945658,
+    "wq_alpha19": -0.727421,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958116
+   },
+   {
+    "beta_20": -0.616303,
+    "cci_signal": -0.915352,
+    "code": "002896",
+    "ksft": -0.159169,
+    "macd_signal": -0.963657,
+    "mfi_signal": 0.604481,
+    "name": "中大力德",
+    "obv_trend": -0.436336,
+    "rank_20": null,
+    "resi_20": -0.113132,
+    "rsv_20": 0.019506,
+    "signal": -0.2487,
+    "wq_alpha1": -0.948779,
+    "wq_alpha15": 0.956516,
+    "wq_alpha19": -0.65541,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958115
+   },
+   {
+    "beta_20": -0.99712,
+    "cci_signal": -0.938109,
+    "code": "600176",
+    "ksft": -0.148515,
+    "macd_signal": -0.964028,
+    "mfi_signal": -0.650694,
+    "name": "中国巨石",
+    "obv_trend": -0.560766,
+    "rank_20": null,
+    "resi_20": -0.05695,
+    "rsv_20": 0.048458,
+    "signal": -0.3997,
+    "wq_alpha1": -0.947827,
+    "wq_alpha15": 0.961808,
+    "wq_alpha19": -0.93586,
+    "wq_alpha3": -0.964028,
+    "wq_alpha5": 0.958114
+   }
+  ],
+  "ic_analysis": {
+   "promotions": [
+    {
+     "action": "PROMOTE",
+     "dim": "total_score",
+     "ic_ir": 0.742,
+     "mean_ic": 0.1994,
+     "reason": "ICIR=0.74 mean_IC=+0.199 → 建议提权",
+     "weight_key": "total_score"
+    },
+    {
+     "action": "PROMOTE",
+     "dim": "momentum_score",
+     "ic_ir": 0.532,
+     "mean_ic": 0.1636,
+     "reason": "ICIR=0.53 mean_IC=+0.164 → 建议提权",
+     "weight_key": "momentum"
+    },
+    {
+     "action": "PROMOTE",
+     "dim": "zone_score",
+     "ic_ir": 0.721,
+     "mean_ic": 0.1519,
+     "reason": "ICIR=0.72 mean_IC=+0.152 → 建议提权",
+     "weight_key": "zone"
+    },
+    {
+     "action": "PROMOTE",
+     "dim": "serenity_score",
+     "ic_ir": 0.668,
+     "mean_ic": 0.1482,
+     "reason": "ICIR=0.67 mean_IC=+0.148 → 建议提权",
+     "weight_key": "serenity"
+    },
+    {
+     "action": "PROMOTE",
+     "dim": "base_score",
+     "ic_ir": 0.735,
+     "mean_ic": 0.1339,
+     "reason": "ICIR=0.73 mean_IC=+0.134 → 建议提权",
+     "weight_key": "base"
+    }
+   ],
+   "summary": "❌ 建议淘汰: volume | 🔻 建议降权: uzi | 👀 需关注: technical, moat | 🔺 建议提权: total_score, momentum, zone, serenity, base",
+   "warnings": [
+    {
+     "action": "DEGRADE",
+     "dim": "uzi_score",
+     "ic_ir": -0.288,
+     "mean_ic": -0.1465,
+     "n_days": 14,
+     "reason": "ICIR=-0.288 持续14天 → 建议降权",
+     "weight_key": "uzi"
+    },
+    {
+     "action": "ELIMINATE",
+     "dim": "volume_score",
+     "ic_ir": -0.312,
+     "mean_ic": -0.085,
+     "n_days": 14,
+     "reason": "ICIR=-0.312 < -0.3 持续14天 → 建议淘汰",
+     "weight_key": "volume"
+    },
+    {
+     "action": "MONITOR",
+     "dim": "technical_score",
+     "ic_ir": -0.061,
+     "mean_ic": -0.0128,
+     "n_days": 14,
+     "reason": "ICIR=-0.061 持续14天 → 关注，暂不调整",
+     "weight_key": "technical"
+    },
+    {
+     "action": "MONITOR",
+     "dim": "moat_score",
+     "ic_ir": -0.028,
+     "mean_ic": -0.0037,
+     "n_days": 14,
+     "reason": "ICIR=-0.028 持续14天 → 关注，暂不调整",
+     "weight_key": "moat"
+    }
+   ],
+   "window": "30d"
+  },
+  "market": {
+   "avg_rsi": 28.2,
+   "hs300": {
+    "last_close": 4529.1,
+    "ma20": 4844.16,
+    "ma60": 4850.94,
+    "name": "沪深300",
+    "price_vs_ma20": -6.5,
+    "rsi": 30.2,
+    "rsi_status": "偏弱",
+    "signals": "趋势偏空",
+    "symbol": "sh000300",
+    "trend": "空头",
+    "vol_ratio": 0.91,
+    "volume_trend": "正常"
+   },
+   "overall_advice": "减仓防守",
+   "overall_signal": "危险",
+   "overall_trend": "空头",
+   "sh": {
+    "last_close": 3764.16,
+    "ma20": 4019.96,
+    "ma60": 4075.78,
+    "name": "上证指数",
+    "price_vs_ma20": -6.36,
+    "rsi": 26.3,
+    "rsi_status": "超卖",
+    "signals": "超卖💡, 趋势偏空",
+    "symbol": "sh000001",
+    "trend": "空头",
+    "vol_ratio": 0.95,
+    "volume_trend": "正常"
+   }
+  },
+  "operational_mode": {
+   "avg_20d_return": -29.54,
+   "buy_threshold_shift": -6,
+   "exit_levels": [
+    0.5,
+    0.5
+   ],
+   "factor_invert": true,
+   "mode": "mean_revert",
+   "profit_take_tiers": [
+    0.05,
+    0.1,
+    0.18
+   ],
+   "regime_label": "震荡市",
+   "sell_trigger_weight": 0.3
+  },
+  "portfolio_summary": {
+   "cash": 0,
+   "holdings_value": 0,
+   "position_details": [],
+   "positions": 0,
+   "total_profit_amount": 0,
+   "total_profit_pct": 0,
+   "total_value": 0
+  },
+  "position_advice": [],
+  "quantdinger_consensus": {
+   "agreement_ratio": 0.967,
+   "coverage": "20/20",
+   "coverage_pct": 100.0,
+   "latest_date": "2026-07-18",
+   "policy": "BUY>=+20, REDUCE<=-20；A股 REDUCE 表示降风险/回避，不表示做空。",
+   "quality_multiplier": 0.9,
+   "risk_flags": [],
+   "signals": [
+    {
+     "agreement_ratio": 1.0,
+     "code": "601006",
+     "confidence": 71,
+     "consensus_decision": "BUY",
+     "consensus_score": 34.38,
+     "date": "2026-07-18",
+     "name": "大秦铁路",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 40.2,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 46.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 17.8,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 100.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 33.0,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 35.0,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 39.79
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 39.79,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 6.91,
+       "score": 30.06,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 2.56,
+       "score": 31.59,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 39.79,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 6.91,
+       "score": 30.06,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 2.56,
+       "score": 31.59,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600585",
+     "confidence": 69,
+     "consensus_decision": "BUY",
+     "consensus_score": 29.86,
+     "date": "2026-07-18",
+     "name": "海螺水泥",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 34.4,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 10.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 26.6,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 100.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 29.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 21.8,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 31.16
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 31.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 11.65,
+       "score": 26.73,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 18.97,
+       "score": 31.01,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 31.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 11.65,
+       "score": 26.73,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 18.97,
+       "score": 31.01,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600036",
+     "confidence": 68,
+     "consensus_decision": "BUY",
+     "consensus_score": 26.37,
+     "date": "2026-07-18",
+     "name": "招商银行",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 26.2,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 10.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 27.6,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 30.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 48.4,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 25.4,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 22.74
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 22.74,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 22.44,
+       "score": 28.59,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 9.04,
+       "score": 28.37,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 22.74,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 22.44,
+       "score": 28.59,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 9.04,
+       "score": 28.37,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600900",
+     "confidence": 67,
+     "consensus_decision": "BUY",
+     "consensus_score": 25.93,
+     "date": "2026-07-18",
+     "name": "长江电力",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 27.4,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 4.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 23.0,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 90.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 53.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 46.2,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 29.16
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 29.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 20.11,
+       "score": 27.29,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": -7.85,
+       "score": 20.78,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 29.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 20.11,
+       "score": 27.29,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": -7.85,
+       "score": 20.78,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 0.667,
+     "code": "601398",
+     "confidence": 60,
+     "consensus_decision": "BUY",
+     "consensus_score": 20.86,
+     "date": "2026-07-18",
+     "name": "工商银行",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 20.8,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": -6.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 25.4,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 20.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 47.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 30.0,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "WATCH",
+      "overall_score": 16.6
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 16.6,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 23.5,
+       "score": 25.8,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 3.73,
+       "score": 21.02,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 16.6,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 23.5,
+       "score": 25.8,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 3.73,
+       "score": 21.02,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "000988",
+     "confidence": 63,
+     "consensus_decision": "WATCH",
+     "consensus_score": 15.9,
+     "date": "2026-07-18",
+     "name": "华工科技",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 27.4,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 6.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": -21.8,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 20.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 60.0,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 31.0,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": 38.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "WATCH",
+      "overall_score": 19.17
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 19.17,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "WATCH",
+       "price_return_score": -50.0,
+       "score": 14.02,
+       "strength": "neutral",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "WATCH",
+       "price_return_score": -50.0,
+       "score": 13.66,
+       "strength": "neutral",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 19.17,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "WATCH",
+       "price_return_score": -50.0,
+       "score": 14.02,
+       "strength": "neutral",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "WATCH",
+       "price_return_score": -50.0,
+       "score": 13.66,
+       "strength": "neutral",
+       "weight": 1.15
+      }
+     }
+    }
+   ],
+   "source": {
+    "repo": "brokermr810/QuantDinger",
+    "stars": 8682,
+    "updated_at": "2026-06-24",
+    "url": "https://github.com/brokermr810/QuantDinger"
+   },
+   "top_opportunities": [
+    {
+     "agreement_ratio": 1.0,
+     "code": "601006",
+     "confidence": 71,
+     "consensus_decision": "BUY",
+     "consensus_score": 34.38,
+     "date": "2026-07-18",
+     "name": "大秦铁路",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 40.2,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 46.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 17.8,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 100.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 33.0,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 35.0,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 39.79
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 39.79,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 6.91,
+       "score": 30.06,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 2.56,
+       "score": 31.59,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 39.79,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 6.91,
+       "score": 30.06,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 2.56,
+       "score": 31.59,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600585",
+     "confidence": 69,
+     "consensus_decision": "BUY",
+     "consensus_score": 29.86,
+     "date": "2026-07-18",
+     "name": "海螺水泥",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 34.4,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 10.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 26.6,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 100.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 29.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 21.8,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 31.16
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 31.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 11.65,
+       "score": 26.73,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 18.97,
+       "score": 31.01,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 31.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 11.65,
+       "score": 26.73,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 18.97,
+       "score": 31.01,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600036",
+     "confidence": 68,
+     "consensus_decision": "BUY",
+     "consensus_score": 26.37,
+     "date": "2026-07-18",
+     "name": "招商银行",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 26.2,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 10.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 27.6,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 30.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 48.4,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 25.4,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 22.74
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 22.74,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 22.44,
+       "score": 28.59,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 9.04,
+       "score": 28.37,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 22.74,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 22.44,
+       "score": 28.59,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 9.04,
+       "score": 28.37,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 1.0,
+     "code": "600900",
+     "confidence": 67,
+     "consensus_decision": "BUY",
+     "consensus_score": 25.93,
+     "date": "2026-07-18",
+     "name": "长江电力",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 27.4,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": 4.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 23.0,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 90.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 53.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 46.2,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "BUY",
+      "overall_score": 29.16
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 29.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 20.11,
+       "score": 27.29,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": -7.85,
+       "score": 20.78,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "BUY",
+       "price_return_score": null,
+       "score": 29.16,
+       "strength": "mild",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 20.11,
+       "score": 27.29,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": -7.85,
+       "score": 20.78,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    },
+    {
+     "agreement_ratio": 0.667,
+     "code": "601398",
+     "confidence": 60,
+     "consensus_decision": "BUY",
+     "consensus_score": 20.86,
+     "date": "2026-07-18",
+     "name": "工商银行",
+     "objective_score": {
+      "component_coverage": 1.0,
+      "components": [
+       {
+        "key": "total_score",
+        "label": "总分",
+        "score": 20.8,
+        "weight": 0.4
+       },
+       {
+        "key": "technical_score",
+        "label": "技术",
+        "score": -6.0,
+        "weight": 0.18
+       },
+       {
+        "key": "factor_score",
+        "label": "Alpha",
+        "score": 25.4,
+        "weight": 0.14
+       },
+       {
+        "key": "sentiment_score",
+        "label": "情绪",
+        "score": 20.0,
+        "weight": 0.1
+       },
+       {
+        "key": "serenity_score",
+        "label": "Serenity匹配",
+        "score": 47.6,
+        "weight": 0.08
+       },
+       {
+        "key": "moat_score",
+        "label": "护城河",
+        "score": 30.0,
+        "weight": 0.06
+       },
+       {
+        "key": "uzi_score",
+        "label": "UZI",
+        "score": -45.0,
+        "weight": 0.04
+       }
+      ],
+      "decision": "WATCH",
+      "overall_score": 16.6
+     },
+     "quality_multiplier": 1.0,
+     "timeframes": {
+      "latest": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 16.6,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "month": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 23.5,
+       "score": 25.8,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "week": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 3.73,
+       "score": 21.02,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     },
+     "trend_outlook": {
+      "next_1d": {
+       "data_points": 1,
+       "days": 1,
+       "decision": "WATCH",
+       "price_return_score": null,
+       "score": 16.6,
+       "strength": "neutral",
+       "weight": 1.3
+      },
+      "next_1m": {
+       "data_points": 20,
+       "days": 20,
+       "decision": "BUY",
+       "price_return_score": 23.5,
+       "score": 25.8,
+       "strength": "mild",
+       "weight": 1.0
+      },
+      "next_1w": {
+       "data_points": 5,
+       "days": 5,
+       "decision": "BUY",
+       "price_return_score": 3.73,
+       "score": 21.02,
+       "strength": "mild",
+       "weight": 1.15
+      }
+     }
+    }
+   ],
+   "universe_decision": "WATCH",
+   "universe_score": 10.54
+  },
+  "ratings": [],
+  "scores": [],
+  "sectors": [],
+  "signal_brief": {
+   "buy_candidates": [],
+   "buy_count": 0,
+   "risk_alerts": [],
+   "risk_count": 0
+  },
+  "signal_factors": [
+   "ksft",
+   "rank_20",
+   "rsv_20",
+   "beta_20",
+   "resi_20",
+   "macd_signal",
+   "obv_trend",
+   "mfi_signal",
+   "cci_signal",
+   "wq_alpha1",
+   "wq_alpha3",
+   "wq_alpha5",
+   "wq_alpha15",
+   "wq_alpha19"
+  ],
+  "stop_conditions": [
+   {
+    "actions": [
+     {
+      "action": "SELL_STOP",
+      "profit_pct": -21.05,
+      "reason": "止损触发 (atr_dynamic): -21.0% ≤ -9%"
+     }
+    ],
+    "code": "000988",
+    "current": 117.62,
+    "drawdown_from_peak": -35.0,
+    "entry": 148.975,
+    "exceeds_profit_take1": false,
+    "exceeds_profit_take2": false,
+    "name": "华工科技",
+    "peak": 180.86,
+    "peak_profit_pct": 21.4,
+    "profit_pct": -21.1,
+    "trailing_triggered": true
+   },
+   {
+    "actions": [],
+    "code": "600141",
+    "current": 29.02,
+    "drawdown_from_peak": -7.3,
+    "entry": 30.928,
+    "exceeds_profit_take1": false,
+    "exceeds_profit_take2": false,
+    "name": "兴发集团",
+    "peak": 31.3,
+    "peak_profit_pct": 1.2,
+    "profit_pct": -6.2,
+    "trailing_triggered": false
+   }
+  ],
+  "target_tracker": {
+   "current_value": 49392.31,
+   "days_elapsed": 41,
+   "days_total": 90,
+   "initial_capital": 51066.41,
+   "progress_pct": -3.3,
+   "remaining": 52740.69,
+   "required_monthly_return": 56.0,
+   "target_capital": 102133.0,
+   "time_pct": 45.6
+  },
+  "timestamp": "2026-07-15 10:29:58",
+  "ui_metadata": {
+   "action_bar": [
+    "refresh",
+    "copy",
+    "status"
+   ],
+   "alert_count": 0,
+   "last_refresh": "14:56:08",
+   "uptime_hours": 11.6,
+   "version": "6.0.0"
+  },
+  "uzi_chain": [
+   {
+    "chain_keywords": [
+     "cpo",
+     "inp",
+     "衬底"
+    ],
+    "chain_tier": "材料耗材",
+    "code": "002428",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "云南锗业",
+    "summary_line": "🔗 材料耗材 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "光芯片",
+     "cpo",
+     "光器件"
+    ],
+    "chain_tier": "芯片/器件",
+    "code": "002281",
+    "evidence_count": 100,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "光迅科技",
+    "summary_line": "🔗 芯片/器件 · 证据:100条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "光模块",
+     "光引擎",
+     "激光器",
+     "算力"
+    ],
+    "chain_tier": "芯片/器件",
+    "code": "000988",
+    "evidence_count": 4,
+    "evidence_grade": "medium",
+    "gates_passed": 2,
+    "is_ai_chain": true,
+    "name": "华工科技",
+    "summary_line": "🔗 芯片/器件 · 证据:4条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "rv减速器"
+    ],
+    "chain_tier": "芯片/器件",
+    "code": "002896",
+    "evidence_count": 0,
+    "evidence_grade": "medium",
+    "gates_passed": 2,
+    "is_ai_chain": true,
+    "name": "中大力德",
+    "summary_line": "🔗 芯片/器件 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "cpo",
+     "光纤"
+    ],
+    "chain_tier": "基础设施",
+    "code": "600487",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "亨通光电",
+    "summary_line": "🔗 基础设施 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "数据中心"
+    ],
+    "chain_tier": "基础设施",
+    "code": "600460",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "士兰微",
+    "summary_line": "🔗 基础设施 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "存储",
+     "数据中心"
+    ],
+    "chain_tier": "基础设施",
+    "code": "603986",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 2,
+    "is_ai_chain": true,
+    "name": "兆易创新",
+    "summary_line": "🔗 基础设施 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "交换机",
+     "算力",
+     "数据中心"
+    ],
+    "chain_tier": "基础设施",
+    "code": "000938",
+    "evidence_count": 0,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "紫光股份",
+    "summary_line": "🔗 基础设施 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "光模块",
+     "cpo",
+     "光学"
+    ],
+    "chain_tier": "模块/子系统",
+    "code": "603083",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "剑桥科技",
+    "summary_line": "🔗 模块/子系统 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "pcb",
+     "电子布",
+     "玻纤",
+     "基材",
+     "ai服务器"
+    ],
+    "chain_tier": "模块/子系统",
+    "code": "600176",
+    "evidence_count": 1,
+    "evidence_grade": "medium",
+    "gates_passed": 3,
+    "is_ai_chain": true,
+    "name": "中国巨石",
+    "summary_line": "🔗 模块/子系统 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "人形机器人"
+    ],
+    "chain_tier": "下游需求",
+    "code": "601100",
+    "evidence_count": 0,
+    "evidence_grade": "medium",
+    "gates_passed": 2,
+    "is_ai_chain": true,
+    "name": "恒立液压",
+    "summary_line": "🔗 下游需求 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [
+     "cpo"
+    ],
+    "chain_tier": "未分层",
+    "code": "600141",
+    "evidence_count": 2,
+    "evidence_grade": "medium",
+    "gates_passed": 2,
+    "is_ai_chain": true,
+    "name": "兴发集团",
+    "summary_line": "🔗 未分层 · 证据:2条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "模块/子系统",
+    "code": "601689",
+    "evidence_count": 0,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "拓普集团",
+    "summary_line": "⚪非AI链 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "模块/子系统",
+    "code": "002050",
+    "evidence_count": 0,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "三花智控",
+    "summary_line": "⚪非AI链 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "下游需求",
+    "code": "600580",
+    "evidence_count": 0,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "卧龙电驱",
+    "summary_line": "⚪非AI链 · 证据:0条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "未分层",
+    "code": "600036",
+    "evidence_count": 7,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "招商银行",
+    "summary_line": "⚪非AI链 · 证据:7条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "未分层",
+    "code": "600585",
+    "evidence_count": 100,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "海螺水泥",
+    "summary_line": "⚪非AI链 · 证据:100条 · 🟡周期伪装成长",
+    "trap_count": 1,
+    "trap_warnings": [
+     {
+      "id": "cyclicality",
+      "label": "周期伪装成长",
+      "severity": "medium"
+     }
+    ]
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "未分层",
+    "code": "600900",
+    "evidence_count": 1,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "长江电力",
+    "summary_line": "⚪非AI链 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "未分层",
+    "code": "601398",
+    "evidence_count": 1,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "工商银行",
+    "summary_line": "⚪非AI链 · 证据:1条",
+    "trap_count": 0,
+    "trap_warnings": []
+   },
+   {
+    "chain_keywords": [],
+    "chain_tier": "未分层",
+    "code": "601006",
+    "evidence_count": 1,
+    "evidence_grade": "none",
+    "gates_passed": 0,
+    "is_ai_chain": false,
+    "name": "大秦铁路",
+    "summary_line": "⚪非AI链 · 证据:1条 · 🟡周期伪装成长",
+    "trap_count": 1,
+    "trap_warnings": [
+     {
+      "id": "cyclicality",
+      "label": "周期伪装成长",
+      "severity": "medium"
+     }
+    ]
+   }
+  ],
+  "yesterday_summary": {
+   "cash": 2652.31,
+   "holdings_value": 46740.0,
+   "profit_pct": -3.28,
+   "total_value": 49392.31
+  }
+ },
+ "ok": true
+}

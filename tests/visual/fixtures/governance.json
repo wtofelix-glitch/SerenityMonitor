@@ -1,0 +1,146 @@
+{
+ "audit": {
+  "blocked": 0,
+  "executed": 0,
+  "execution_rate": 0.0,
+  "legacy_incomplete": 27,
+  "overridden": 5,
+  "override_rate": 0.1,
+  "pending_settlements": 0,
+  "replay_ready": 3645,
+  "settled": 1740,
+  "total": 3672
+ },
+ "comparison": {
+  "agreement_rate": 100.0,
+  "divergence_count": 0,
+  "divergences": [],
+  "system_a": {
+   "name": "Frozen Baseline",
+   "top3": [
+    {
+     "code": "601006",
+     "name": "大秦铁路",
+     "signal": "BUY",
+     "total_score": 70.1
+    },
+    {
+     "code": "600585",
+     "name": "海螺水泥",
+     "signal": "BUY",
+     "total_score": 67.2
+    },
+    {
+     "code": "002281",
+     "name": "光迅科技",
+     "signal": "CAUTION_BUY",
+     "total_score": 65.1
+    }
+   ],
+   "total_signals": 20
+  },
+  "system_b": {
+   "name": "Adaptive",
+   "top3": [
+    {
+     "code": "601006",
+     "name": "大秦铁路",
+     "signal": "CAUTION_BUY",
+     "total_score": 70.1
+    },
+    {
+     "code": "600585",
+     "name": "海螺水泥",
+     "signal": "NO_TRADE",
+     "total_score": 67.2
+    },
+    {
+     "code": "002281",
+     "name": "光迅科技",
+     "signal": "NO_TRADE",
+     "total_score": 65.1
+    }
+   ],
+   "total_signals": 20
+  },
+  "system_c": {
+   "daily_return": 0.0,
+   "name": "Equal Weight",
+   "nav": 52035.43,
+   "weekly_return": -0.3370909396658961
+  }
+ },
+ "date": "2026-07-18",
+ "freeze": {
+  "freeze_reason": "交易内核冻结期",
+  "frozen": true,
+  "last_freeze": "2026-07-05",
+  "modules": [
+   {
+    "description": "IC 驱动权重自进化 — 冻结后使用默认固定权重（_SCORE_WEIGHT_DEFAULTS）",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "weight_adjuster"
+   },
+   {
+    "description": "信号阈值自校准 — 冻结后使用固定阈值，不做周期性重校准",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "signal_thresholds"
+   },
+   {
+    "description": "哨兵信源权重自进化 — 冻结后权重只记录不生效，不影响评分",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "sentinel_weights"
+   },
+   {
+    "description": "Conviction 动态阈值 — 冻结后只输出辩论结果，不调整买卖门槛",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "conviction"
+   },
+   {
+    "description": "LLM 情绪引擎 — 冻结后 LLM 情绪不进核心评分，仅用于日报/复盘",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "llm_sentiment"
+   },
+   {
+    "description": "5-Agent 投委会 — 冻结后只输出委员会意见，不改变任何信号",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "serenity_council"
+   },
+   {
+    "description": "辩论引擎 — 冻结后只输出辩论摘要，不注入评分",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "debate_engine"
+   },
+   {
+    "description": "多源融合投票 — 冻结后只输出融合结果作为参考，不作为交易依据",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "ensemble_voting"
+   },
+   {
+    "description": "市场体制权重偏移 — 冻结后不使用 REGIME_WEIGHT_SHIFTS 动态修改评分权重",
+    "frozen": true,
+    "frozen_since": "2026-07-05",
+    "id": "market_sense_regime_shifts"
+   }
+  ],
+  "total_frozen": 9,
+  "total_managed": 9
+ },
+ "observation": {
+  "days_remaining": 0,
+  "liquidation_status": "",
+  "mode": "NORMAL",
+  "time_entered": "",
+  "trigger_reason": ""
+ },
+ "ok": true,
+ "timestamp": "2026-07-18T15:24:34.521099"
+}

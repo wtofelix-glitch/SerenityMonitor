@@ -1,0 +1,129 @@
+{
+ "bars": [
+  {
+   "dim": "total_score",
+   "ic_ir": 0.82,
+   "label": "综合评分",
+   "latest_ic": 0.0,
+   "mean_ic": 0.205,
+   "win_rate": 65.0
+  },
+  {
+   "dim": "base_score",
+   "ic_ir": 0.54,
+   "label": "基本面",
+   "latest_ic": 0.0,
+   "mean_ic": 0.102,
+   "win_rate": 55.0
+  },
+  {
+   "dim": "zone_score",
+   "ic_ir": 0.73,
+   "label": "价格位置",
+   "latest_ic": 0.0,
+   "mean_ic": 0.184,
+   "win_rate": 60.0
+  },
+  {
+   "dim": "momentum_score",
+   "ic_ir": 0.71,
+   "label": "动量",
+   "latest_ic": 0.0,
+   "mean_ic": 0.213,
+   "win_rate": 60.0
+  },
+  {
+   "dim": "volume_score",
+   "ic_ir": -0.26,
+   "label": "成交量",
+   "latest_ic": 0.0,
+   "mean_ic": -0.059,
+   "win_rate": 20.0
+  },
+  {
+   "dim": "serenity_score",
+   "ic_ir": 0.68,
+   "label": "Serenity",
+   "latest_ic": 0.0,
+   "mean_ic": 0.135,
+   "win_rate": 60.0
+  },
+  {
+   "dim": "factor_score",
+   "ic_ir": -0.04,
+   "label": "因子引擎",
+   "latest_ic": 0.0,
+   "mean_ic": -0.017,
+   "win_rate": 40.0
+  },
+  {
+   "dim": "technical_score",
+   "ic_ir": -0.04,
+   "label": "技术面",
+   "latest_ic": 0.0,
+   "mean_ic": -0.01,
+   "win_rate": 25.0
+  },
+  {
+   "dim": "moat_score",
+   "ic_ir": -0.27,
+   "label": "护城河",
+   "latest_ic": 0.0,
+   "mean_ic": -0.052,
+   "win_rate": 35.0
+  }
+ ],
+ "ok": true,
+ "top": [
+  {
+   "dim": "total_score",
+   "ic_ir": 0.82,
+   "label": "综合评分",
+   "latest_ic": 0.0,
+   "mean_ic": 0.205,
+   "win_rate": 65.0
+  },
+  {
+   "dim": "base_score",
+   "ic_ir": 0.54,
+   "label": "基本面",
+   "latest_ic": 0.0,
+   "mean_ic": 0.102,
+   "win_rate": 55.0
+  },
+  {
+   "dim": "zone_score",
+   "ic_ir": 0.73,
+   "label": "价格位置",
+   "latest_ic": 0.0,
+   "mean_ic": 0.184,
+   "win_rate": 60.0
+  }
+ ],
+ "weak": [
+  {
+   "dim": "technical_score",
+   "ic_ir": -0.04,
+   "label": "技术面",
+   "latest_ic": 0.0,
+   "mean_ic": -0.01,
+   "win_rate": 25.0
+  },
+  {
+   "dim": "moat_score",
+   "ic_ir": -0.27,
+   "label": "护城河",
+   "latest_ic": 0.0,
+   "mean_ic": -0.052,
+   "win_rate": 35.0
+  },
+  {
+   "dim": "uzi_score",
+   "ic_ir": -0.34,
+   "label": "UZI卡位",
+   "latest_ic": 0.0,
+   "mean_ic": -0.164,
+   "win_rate": 25.0
+  }
+ ]
+}

@@ -1,0 +1,29 @@
+{
+ "compare": {
+  "diff_amount": 1674.1,
+  "diff_return": 3.28,
+  "paper_positions": 0,
+  "paper_return": 0.0,
+  "paper_total": 51066.41,
+  "real_positions": 2,
+  "real_return": -3.28,
+  "real_total": 49392.31
+ },
+ "ok": true,
+ "portfolio": {
+  "cash": 51066.41,
+  "holdings_value": 0,
+  "position_count": 0,
+  "positions": [],
+  "total_profit_amount": 0.0,
+  "total_profit_pct": 0.0,
+  "total_value": 51066.41
+ },
+ "stats": {
+  "buy_amount": 0.0,
+  "buys": 0,
+  "sell_amount": 0.0,
+  "sells": 0,
+  "total_trades": 0
+ }
+}
