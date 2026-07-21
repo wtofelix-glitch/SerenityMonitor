@@ -59,5 +59,10 @@ module.exports = defineConfig({
       testMatch: 'soak.spec.js',
       timeout: 15 * 60_000, // 2880 次刷新等效模拟
     },
+    {
+      name: 'chromium-noir',
+      use: { ...devices['Desktop Chrome'] },
+      testMatch: 'monitor-noir.spec.js',
+    },
   ],
 });

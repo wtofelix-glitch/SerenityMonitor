@@ -76,7 +76,7 @@ import sys
 import os
 
 # ── R0 主题开关（模块级常量，永久默认 legacy）──
-_ALLOWED_THEMES = ('legacy',)  # R1 上线 terminal-noir 时扩为二元组
+_ALLOWED_THEMES = ('legacy', 'terminal-noir')  # R1 白名单扩展，默认永为 legacy
 SERENITY_THEME = os.environ.get('SERENITY_THEME', 'legacy')
 if SERENITY_THEME not in _ALLOWED_THEMES:
     SERENITY_THEME = 'legacy'  # 非法值静默回退，失效安全
