@@ -14,11 +14,12 @@ fail() { echo "  ❌ $1"; FAIL=$((FAIL + 1)); }
 
 echo "── Serenity 健康检查 (port ${PORT}) ──"
 
-# 1. /monitor → 200 且含 data-theme="legacy"
-if $CURL "${BASE}/monitor" | grep -q 'data-theme="legacy"'; then
-  pass "/monitor 渲染正常 (data-theme=legacy)"
+# 1. /monitor → 200 且含有效 data-theme（legacy / terminal-noir）
+THEME=$($CURL "${BASE}/monitor" | grep -o 'data-theme="[^"]*"' | head -1 | grep -o '"[^"]*"' | tr -d '"' || echo "")
+if [ "$THEME" = "legacy" ] || [ "$THEME" = "terminal-noir" ]; then
+  pass "/monitor 渲染正常 (data-theme=${THEME})"
 else
-  fail "/monitor 无响应或缺少 data-theme=legacy"
+  fail "/monitor 无响应或 data-theme 无效 (got: ${THEME:-none})"
 fi
 
 # 2. theme-legacy.css → 200
