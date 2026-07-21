@@ -63,6 +63,7 @@ module.exports = defineConfig({
       name: 'chromium-noir',
       use: { ...devices['Desktop Chrome'] },
       testMatch: 'monitor-noir.spec.js',
+      timeout: 5 * 60_000, // 33 测试 × ~1.5s
     },
   ],
 });
