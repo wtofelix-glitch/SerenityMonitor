@@ -90,7 +90,10 @@ class NormalizedQuote:
     validation_errors: list = field(default_factory=list)
     stale_for_trading: bool = False
     acceptable_as_postmarket_snapshot: bool = False
-    action_eligible: bool = False
+    validation_passed: bool = True          # 结构校验通过（非未来、非负数等）
+    fresh_for_session: bool = False          # 数据新鲜度满足当前时段要求
+    session_action_allowed: bool = False     # 当前时段允许生成交易动作
+    effective_action_eligible: bool = False  # 三关全过 → 可用于交易决策
 
 
 @dataclass
@@ -107,6 +110,8 @@ class SmokeMetrics:
     records_rejected: int = 0
     field_missing_count: int = 0
     stale_count: int = 0
+    quarantine_count: int = 0
+    quarantine_details: list = field(default_factory=list)
     future_timestamp_count: int = 0
     negative_price_count: int = 0
     silent_zero_fill_count: int = 0
@@ -287,6 +292,7 @@ class SinaQuoteFetcher:
 
     def _validate(self, nq: NormalizedQuote) -> NormalizedQuote:
         errors = []
+        has_future_ts = False
 
         # —— 价格字段检查 ——
         for f in ["price", "previous_close", "open"]:
@@ -305,6 +311,7 @@ class SinaQuoteFetcher:
                 src_dt = datetime.fromisoformat(nq.source_timestamp)
                 if src_dt > get_clock().now() + timedelta(minutes=5):
                     errors.append("future_timestamp")
+                    has_future_ts = True
                     self.metrics.future_timestamp_count += 1
             except (ValueError, TypeError):
                 errors.append("unparseable_timestamp")
@@ -324,16 +331,17 @@ class SinaQuoteFetcher:
         # 盘后/关闭时段：数据只可能是快照
         SNAPSHOT_SESSIONS = {"POSTMARKET", "CLOSED"}
 
+        # 允许生成交易动作的时段
+        ACTION_SAFE_SESSIONS = {"CONTINUOUS_AM", "CONTINUOUS_PM"}
+
         # 默认：数据新鲜，可用于交易决策
         nq.stale_for_trading = False
         nq.acceptable_as_postmarket_snapshot = False
-        nq.action_eligible = True
 
         if session in ("CONTINUOUS_AM", "CONTINUOUS_PM"):
             # 连续竞价时段：严格 5 分钟过期
             if nq.data_age_ms > 300_000:
                 nq.stale_for_trading = True
-                nq.action_eligible = False
                 errors.append("stale_data")
                 self.metrics.stale_count += 1
 
@@ -341,14 +349,12 @@ class SinaQuoteFetcher:
             # 其他交易时段（集合竞价/午休/收盘竞价）：宽松 15 分钟
             if nq.data_age_ms > 900_000:
                 nq.stale_for_trading = True
-                nq.action_eligible = False
                 errors.append("stale_data")
                 self.metrics.stale_count += 1
 
         elif nq.data_age_ms > 86_400_000:
             # 超过 24h：任何场景都不可用
             nq.stale_for_trading = True
-            nq.action_eligible = False
             errors.append("stale_data_overnight")
             self.metrics.stale_count += 1
 
@@ -363,15 +369,39 @@ class SinaQuoteFetcher:
                         # 同日收盘数据：不可用于交易，但可作为盘后快照
                         nq.stale_for_trading = True
                         nq.acceptable_as_postmarket_snapshot = True
-                        nq.action_eligible = False
                     else:
                         # 前一交易日数据：过期
                         nq.stale_for_trading = True
-                        nq.action_eligible = False
                         errors.append("stale_data_overnight")
                         self.metrics.stale_count += 1
                 except (ValueError, TypeError):
                     pass
+
+        # —— 计算四级可行动性字段 ——
+        # 1. validation_passed: 结构校验通过（排除新鲜度类错误）
+        non_stale_errors = [
+            e for e in errors
+            if e not in ("stale_data", "stale_data_overnight")
+        ]
+        nq.validation_passed = len(non_stale_errors) == 0
+
+        # 2. fresh_for_session: 数据新鲜度满足当前时段
+        nq.fresh_for_session = not nq.stale_for_trading
+        if has_future_ts:
+            nq.fresh_for_session = False
+        # 盘后同日快照：作为快照是"新鲜"的
+        if nq.acceptable_as_postmarket_snapshot:
+            nq.fresh_for_session = True
+
+        # 3. session_action_allowed: 当前时段允许交易动作
+        nq.session_action_allowed = session in ACTION_SAFE_SESSIONS
+
+        # 4. effective_action_eligible: 三关全过
+        nq.effective_action_eligible = (
+            nq.validation_passed
+            and nq.fresh_for_session
+            and nq.session_action_allowed
+        )
 
         # —— 判定整体有效性 ——
         # acceptable_as_postmarket_snapshot 场景：数据有效但不可交易
@@ -442,7 +472,10 @@ def _init_tables(db_path: Path):
                 validation_errors TEXT,
                 stale_for_trading INTEGER DEFAULT 0,
                 acceptable_as_postmarket_snapshot INTEGER DEFAULT 0,
-                action_eligible INTEGER DEFAULT 1,
+                validation_passed INTEGER DEFAULT 1,
+                fresh_for_session INTEGER DEFAULT 0,
+                session_action_allowed INTEGER DEFAULT 0,
+                effective_action_eligible INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_dedup
@@ -459,7 +492,10 @@ def _init_tables(db_path: Path):
         for col, default in [
             ("stale_for_trading", "0"),
             ("acceptable_as_postmarket_snapshot", "0"),
-            ("action_eligible", "1"),
+            ("validation_passed", "1"),
+            ("fresh_for_session", "0"),
+            ("session_action_allowed", "0"),
+            ("effective_action_eligible", "0"),
         ]:
             try:
                 conn.execute(
@@ -468,6 +504,21 @@ def _init_tables(db_path: Path):
                 )
             except sqlite3.OperationalError:
                 pass  # 字段已存在
+
+        # 隔离区表：未来时间戳等异常数据不入正常事件流
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sina_quarantine (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                collected_at TEXT NOT NULL,
+                normalized_at TEXT,
+                quarantine_reason TEXT NOT NULL,
+                validation_errors TEXT,
+                raw_payload_hash TEXT,
+                normalized_json TEXT,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -509,8 +560,9 @@ def store_normalized(db_path: Path, records: list) -> int:
                         volume, amount, raw_payload_hash, data_age_ms,
                         validation_status, validation_errors,
                         stale_for_trading, acceptable_as_postmarket_snapshot,
-                        action_eligible)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        validation_passed, fresh_for_session,
+                        session_action_allowed, effective_action_eligible)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (nq.symbol, nq.source, nq.source_timestamp, nq.exchange_timestamp,
                      nq.collected_at, nq.normalized_at, nq.business_time,
                      nq.name, nq.price, nq.previous_close, nq.open,
@@ -520,7 +572,10 @@ def store_normalized(db_path: Path, records: list) -> int:
                      json.dumps(nq.validation_errors, ensure_ascii=False),
                      int(nq.stale_for_trading),
                      int(nq.acceptable_as_postmarket_snapshot),
-                     int(nq.action_eligible)))
+                     int(nq.validation_passed),
+                     int(nq.fresh_for_session),
+                     int(nq.session_action_allowed),
+                     int(nq.effective_action_eligible)))
                 stored += 1
             except sqlite3.IntegrityError:
                 pass
@@ -528,6 +583,29 @@ def store_normalized(db_path: Path, records: list) -> int:
     finally:
         conn.close()
     return stored
+
+
+def store_quarantine(db_path: Path, nq: NormalizedQuote, reason: str) -> int:
+    """将异常数据存入隔离区（不入正常事件流）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        import json
+        nq_dict = asdict(nq)
+        # 去掉不可序列化的集合
+        nq_dict.pop("validation_errors", None)
+        conn.execute(
+            """INSERT INTO sina_quarantine
+               (symbol, collected_at, normalized_at, quarantine_reason,
+                validation_errors, raw_payload_hash, normalized_json)
+               VALUES (?,?,?,?,?,?,?)""",
+            (nq.symbol, nq.collected_at, nq.normalized_at, reason,
+             json.dumps(nq.validation_errors, ensure_ascii=False),
+             nq.raw_payload_hash,
+             json.dumps(nq_dict, ensure_ascii=False)))
+        conn.commit()
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    finally:
+        conn.close()
 
 
 def store_metrics_snapshot(db_path: Path, metrics: SmokeMetrics) -> int:
@@ -717,7 +795,7 @@ def run_smoke_test(duration_seconds=900, interval_seconds=5):
             prices = [f"{n.symbol}={n.price:.2f}" for n in valid_norms]
 
             flags = []
-            actionable = [n for n in norms if n.action_eligible]
+            actionable = [n for n in norms if n.effective_action_eligible]
             stale_trading = [n for n in norms if n.stale_for_trading]
             pm_snap = [n for n in norms if n.acceptable_as_postmarket_snapshot]
             if actionable:

@@ -275,7 +275,15 @@ class IntelligenceNetwork:
     # ---- 优先级分配 ----
 
     def _assign_priority(self, event: EventRecord) -> str:
-        """根据 docs/C §10 的规则分配 P0-P3。"""
+        """根据 docs/C §10 的规则分配 P0-P3。
+
+        关键设计: 源数据不可执行 (action_eligible=False) → 直接 P3 归档，
+        不进入优先级分支。此检查必须在所有分支之前。
+        """
+        # 不可执行数据 → 直接归档，不做优先级评估
+        if not event.action_eligible:
+            return "P3"
+
         is_holding = event.account_relevance.is_holding
         event_type = event.event_type
         impact_strength = event.impact.strength

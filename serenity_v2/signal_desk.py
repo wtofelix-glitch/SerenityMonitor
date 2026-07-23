@@ -187,7 +187,9 @@ class SignalOutput:
     candidate_trade_action: str = ""        # 降级前原始交易动作
     effective_signal_level: str = ""        # 实际生效等级
     effective_trade_action: str = ""        # 实际生效动作
-    normalization_reason: str = ""          # 降级/规范化原因
+    normalization_reason: str = ""          # 降级/规范化原因（向后兼容）
+    primary_normalization_reason: str = ""  # 主规范化原因（最先触发）
+    secondary_normalization_reasons: list[str] = field(default_factory=list)  # 次生原因
 
     # --- 依据与风险 ---
     trigger_reasons: list[str] = field(default_factory=list)
@@ -591,19 +593,26 @@ class SignalDesk:
         candidate_level = signal_level
         candidate_action = trade_action
         normalization_reason = ""
+        primary_normalization_reason = ""
+        secondary_normalization_reasons: list[str] = []
 
+        # ── Stage 1: 权重规范化（先于时段抑制） ──
         # 合法组合规范化
         if signal_level == "ACTION" and trade_action == "HOLD":
             signal_level = "DECISION"
             normalization_reason = "ACTION_HOLD_TO_DECISION"
+            primary_normalization_reason = "ACTION_HOLD_TO_DECISION"
         elif signal_level == "ACTION" and trade_action == "WATCH":
             signal_level = "WATCH"
             normalization_reason = "BEARISH_NO_HOLDING_NO_SHORT"
+            primary_normalization_reason = "BEARISH_NO_HOLDING_NO_SHORT"
         elif signal_level == "WATCH" and trade_action not in ("WATCH", "HOLD"):
             trade_action = "WATCH"
             normalization_reason = "GATE_DOWNGRADED_NOT_EXECUTABLE"
+            primary_normalization_reason = "GATE_DOWNGRADED_NOT_EXECUTABLE"
 
-        # 时段安全：非连续竞价时段抑制 ACTION
+        # ── Stage 2: 时段安全抑制（权重规范化之后） ──
+        # 非连续竞价时段抑制 ACTION
         market_session = clock.market_session()
         action_suppressed = False
         suppression_reason = ""
@@ -627,6 +636,13 @@ class SignalDesk:
             trade_action = "HOLD"
             if not normalization_reason:
                 normalization_reason = suppression_reason
+                primary_normalization_reason = suppression_reason
+            else:
+                # 权重规范化先触发 → 时段抑制是次生原因
+                secondary_normalization_reasons.append(suppression_reason)
+                normalization_reason = (
+                    f"{primary_normalization_reason} -> {suppression_reason}"
+                )
 
         # 标记 OPENING_MATCH_EVENT 为近似
         if market_session == "OPENING_MATCH_EVENT":
@@ -663,11 +679,13 @@ class SignalDesk:
             session_approximation=session_approximation,
             action_suppressed=action_suppressed,
             suppression_reason=suppression_reason,
-            candidate_signal_level=candidate_level if normalization_reason else "",
-            candidate_trade_action=candidate_action if normalization_reason else "",
+            candidate_signal_level=candidate_level,
+            candidate_trade_action=candidate_action,
             effective_signal_level=signal_level,
             effective_trade_action=trade_action,
             normalization_reason=normalization_reason,
+            primary_normalization_reason=primary_normalization_reason,
+            secondary_normalization_reasons=secondary_normalization_reasons,
         )
 
         sig.trigger_reasons = [

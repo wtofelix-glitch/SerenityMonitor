@@ -102,14 +102,21 @@ class B1Scenario:
     src_date: str
     src_time: str
     expected_market_session: str
-    expected_action_eligible: bool
-    expected_acceptable_postmarket: bool
-    expected_stale_for_trading: bool
+    # 四级可行动性字段
+    expected_validation_passed: bool = True
+    expected_fresh_for_session: bool = True
+    expected_session_action_allowed: bool = False
+    expected_effective_action_eligible: bool = False
+    # 向后兼容
+    expected_action_eligible: bool = False  # deprecated, mapped to effective
+    expected_acceptable_postmarket: bool = False
+    expected_stale_for_trading: bool = False
     expected_signal_level: str = ""  # "" = no signal expected
     expected_action_suppressed: bool = False
     expected_session_approximation: bool = False
     should_produce_event: bool = True
     should_produce_signal: bool = True
+    expected_quarantined: bool = False  # future timestamp → quarantine
     notes: str = ""
 
 
@@ -120,8 +127,13 @@ class B1Scenario:
 def quote_to_event(nq, is_holding: bool = True):
     """Convert NormalizedQuote to EventRecord.
 
-    Transmits action_eligible → signal_eligible constraint:
-      action_eligible=false → priority=P3 → _is_signal_eligible()=False.
+    Uses the 4-tier action eligibility model:
+      effective_action_eligible = validation_passed ∧ fresh_for_session
+                                 ∧ session_action_allowed
+
+    If effective_action_eligible=False → priority=P3 → _is_signal_eligible()=False.
+
+    Returns (event, quarantined, quarantine_reason).
     """
     from serenity_v2.event_record import (
         EventRecord, SourceInfo, TimestampSet, EventPayload,
@@ -149,9 +161,53 @@ def quote_to_event(nq, is_holding: bool = True):
 
     abs_pct = abs(change_pct)
 
-    # 若 NormalizedQuote 验证未通过 → 事件不可执行
+    # 隔离检查: 未来时间戳 → 不入正常事件流
+    if not nq.validation_passed:
+        quarantine_reason = "validation_failed"
+        if "future_timestamp" in nq.validation_errors:
+            quarantine_reason = "future_timestamp"
+        # 创建事件但标记为隔离
+        event = EventRecord(
+            symbol=nq.symbol,
+            event_type="price_anomaly",
+            headline=f"{nq.name}({nq.symbol}) 涨跌{change_pct:+.2f}%",
+            summary=f"现价{nq.price:.2f}, 涨跌{change_pct:+.2f}%",
+            source=SourceInfo(
+                name="Sina实时行情", level="A",
+                url=f"https://hq.sinajs.cn/list={nq.symbol}",
+                publish_time=nq.source_timestamp or ts,
+            ),
+            timestamps=TimestampSet(
+                event_time=nq.source_timestamp or ts,
+                publish_time=nq.source_timestamp or ts,
+                collected_at=ts,
+                verified_at=ts,
+                expires_at="",
+            ),
+            payload=EventPayload(data={
+                "price": nq.price,
+                "change_pct": change_pct,
+                "volume": nq.volume,
+                "amount": nq.amount,
+                "turnover_rate": 0.0,
+            }),
+            related=RelatedInfo(direct_symbols=[nq.symbol]),
+            impact=ImpactAssessment(
+                direction=direction, strength=strength, horizon="intraday",
+            ),
+            verification=VerificationResult(
+                status="pending", method="none",
+            ),
+            account_relevance=AccountRelevance(is_holding=is_holding),
+            action_eligible=False,
+            signal_eligible=False,
+            priority="P3",
+        )
+        return event, True, quarantine_reason
+
+    # 使用 effective_action_eligible
     effective_action_eligible = (
-        nq.action_eligible and nq.validation_status == "valid"
+        nq.effective_action_eligible and nq.validation_status == "valid"
     )
 
     event = EventRecord(
@@ -194,7 +250,7 @@ def quote_to_event(nq, is_holding: bool = True):
                   else "P3"),
     )
     event.event_id = EventStore()._generate_id(event)
-    return event
+    return event, False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +302,7 @@ class B1Runner:
 
     def run_fixture(self, scenario: B1Scenario) -> dict:
         from serenity_v2.clock import set_clock, SimClock
-        from serenity_v2.sina_market import SinaQuoteFetcher, RawQuoteRecord
+        from serenity_v2.sina_market import SinaQuoteFetcher, RawQuoteRecord, store_quarantine
 
         set_clock(SimClock(scenario.sim_clock_iso))
 
@@ -275,10 +331,22 @@ class B1Runner:
         nq = fetcher.normalize(raw_record, business_time=scenario.sim_clock_iso)
 
         is_holding = True
-        event = quote_to_event(nq, is_holding=is_holding) if nq else None
+        event, quarantined, quarantine_reason = (
+            quote_to_event(nq, is_holding=is_holding) if nq else (None, False, "")
+        )
+
         ingested_event = None
-        if event:
+        if event and not quarantined:
             ingested_event = self.intel.ingest(event)
+        elif event and quarantined:
+            # 隔离: 存入隔离表，不进入正常事件流
+            self.store.quarantine_event(
+                event, quarantine_reason,
+                validation_errors=nq.validation_errors if nq else [],
+                normalized_at=nq.normalized_at if nq else "",
+            )
+            # 同时存入 sina 隔离表
+            store_quarantine(self.tmp_db, nq, quarantine_reason)
 
         signals = self.desk.process_events(market_data=None)
 
@@ -287,12 +355,17 @@ class B1Runner:
             "sim_clock": scenario.sim_clock_iso,
             "symbol": scenario.symbol,
             "raw_payload_hash": raw_hash,
+            "quarantined": quarantined,
+            "quarantine_reason": quarantine_reason,
             "normalized": {
                 "validation_status": nq.validation_status if nq else "N/A",
                 "validation_errors": nq.validation_errors if nq else [],
+                "validation_passed": nq.validation_passed if nq else None,
+                "fresh_for_session": nq.fresh_for_session if nq else None,
+                "session_action_allowed": nq.session_action_allowed if nq else None,
+                "effective_action_eligible": nq.effective_action_eligible if nq else None,
                 "stale_for_trading": nq.stale_for_trading if nq else None,
                 "acceptable_as_postmarket_snapshot": nq.acceptable_as_postmarket_snapshot if nq else None,
-                "action_eligible": nq.action_eligible if nq else None,
                 "data_age_ms": nq.data_age_ms if nq else None,
             } if nq else None,
             "event_id": ingested_event.event_id if ingested_event else None,
@@ -314,6 +387,8 @@ class B1Runner:
                 "effective_level": sig.effective_signal_level,
                 "effective_action": sig.effective_trade_action,
                 "normalization_reason": sig.normalization_reason,
+                "primary_normalization_reason": getattr(sig, 'primary_normalization_reason', ""),
+                "secondary_normalization_reasons": getattr(sig, 'secondary_normalization_reasons', []),
                 "action_suppressed": sig.action_suppressed,
                 "suppression_reason": sig.suppression_reason,
                 "session_approximation": sig.session_approximation,
@@ -342,6 +417,10 @@ class B1Runner:
                     if sig.get("event_id") == r["event_id"]
                 ]
                 r["signal_count"] = len(r["signals"])
+            else:
+                # Quarantined or no event → no signals for this scenario
+                r["signals"] = []
+                r["signal_count"] = 0
             # Recompute lineage after filtering
             r["lineage_complete"] = (
                 len(r["signals"]) > 0
@@ -354,18 +433,28 @@ class B1Runner:
     def verify_invariants(self, results):
         report = {"total_scenarios": len(results), "violations": [], "checks": {}}
 
-        # action_eligible=false → no ACTION
+        # effective_action_eligible=false → no ACTION
         action_from_ineligible = 0
         for r in results:
             n = r.get("normalized")
-            if n and n.get("action_eligible") is False:
+            if n and n.get("effective_action_eligible") is False:
                 for sig in r.get("signals", []):
                     if sig.get("signal_level") == "ACTION":
                         action_from_ineligible += 1
                         report["violations"].append(
-                            f"action_eligible=false → ACTION: {r['scenario']}"
+                            f"effective_action_eligible=false → ACTION: {r['scenario']}"
                         )
         report["checks"]["action_from_ineligible"] = action_from_ineligible
+
+        # quarantined → no event ingested (no event_id in normal table)
+        quarantined_with_event = 0
+        for r in results:
+            if r.get("quarantined") and r.get("event_id"):
+                quarantined_with_event += 1
+                report["violations"].append(
+                    f"quarantined but event in normal table: {r['scenario']}"
+                )
+        report["checks"]["quarantined_with_normal_event"] = quarantined_with_event
 
         # action_suppressed → no ACTION
         suppressed_actions = 0
@@ -374,6 +463,29 @@ class B1Runner:
                 if sig.get("action_suppressed") and sig.get("signal_level") == "ACTION":
                     suppressed_actions += 1
         report["checks"]["suppressed_but_action"] = suppressed_actions
+
+        # 候选ACTION审计方程: 候选ACTION = 生效ACTION + ACTION降级 + ACTION拒绝
+        candidate_actions = 0
+        effective_actions = 0
+        action_downgrades = 0
+        action_rejected = 0
+        for r in results:
+            for sig in r.get("signals", []):
+                if sig.get("candidate_level") == "ACTION":
+                    candidate_actions += 1
+                if sig.get("effective_level") == "ACTION":
+                    effective_actions += 1
+                prim = sig.get("primary_normalization_reason", "")
+                sec = sig.get("secondary_normalization_reasons", [])
+                if sig.get("candidate_level") == "ACTION" and sig.get("effective_level") != "ACTION":
+                    action_downgrades += 1
+                # rejection = candidate was ACTION but normalized away
+                if "GATE_DOWNGRADE" in prim or "session_suppressed" in prim:
+                    action_rejected += 1
+        report["checks"]["candidate_actions"] = candidate_actions
+        report["checks"]["effective_actions"] = effective_actions
+        report["checks"]["action_downgrades"] = action_downgrades
+        report["checks"]["action_rejected"] = action_rejected
 
         # SELL/REDUCE ≤ available_shares
         from serenity_v2.account_baseline import get_baseline
@@ -430,7 +542,10 @@ B1_SCENARIOS = [
         symbol="600487", price=57.80, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="09:35:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=True,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="DECISION",
@@ -442,7 +557,10 @@ B1_SCENARIOS = [
         symbol="000988", price=108.00, prev_close=113.51,
         volume=300000, src_date="2026-07-23", src_time="09:36:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=True,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="ACTION",
@@ -454,11 +572,14 @@ B1_SCENARIOS = [
         symbol="600487", price=57.80, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="09:35:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=False,
+        expected_validation_passed=True,
+        expected_fresh_for_session=False,  # stale
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=True,
         expected_signal_level="",
-        notes="源09:35 当前09:42 差7分 → action_eligible=false → 无信号",
+        notes="源09:35 当前09:42 差7分 → effective=false → 无信号",
     ),
     B1Scenario(
         label="04_开盘集合竞价_可撤单",
@@ -466,12 +587,15 @@ B1_SCENARIOS = [
         symbol="600487", price=57.80, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="09:18:00",
         expected_market_session="OPENING_AUCTION_CANCELABLE",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=False,  # 非连续竞价
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
-        expected_signal_level="DECISION",
-        expected_action_suppressed=False,  # 权重规范化先于时段抑制
-        notes="集合竞价+仓位>30%→先降DECISION, 候选ACTION被保留在审计链",
+        expected_signal_level="",  # effective=false → P3 → 不入信号台
+        expected_action_suppressed=False,
+        notes="集合竞价+effective=false → priority=P3 → 不入信号台 → 无信号",
     ),
     B1Scenario(
         label="05_开盘撮合_近似区间",
@@ -479,13 +603,17 @@ B1_SCENARIOS = [
         symbol="600487", price=57.80, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="09:25:00",
         expected_market_session="OPENING_MATCH_EVENT",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=False,  # 非连续竞价
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
-        expected_signal_level="DECISION",
-        expected_action_suppressed=False,  # 权重规范化先于时段抑制
-        expected_session_approximation=True,
-        notes="9:25撮合 → session_approximation=true, 候选ACTION保留审计链",
+        expected_signal_level="",  # effective=false → P3 → 不入信号台
+        expected_action_suppressed=False,
+        expected_session_approximation=False,  # 无信号输出, 近似标记无载体
+        should_produce_signal=False,
+        notes="9:25撮合+effective=false → priority=P3 → 不入信号台",
     ),
     B1Scenario(
         label="06_午间休市",
@@ -493,12 +621,15 @@ B1_SCENARIOS = [
         symbol="000988", price=108.00, prev_close=113.51,
         volume=300000, src_date="2026-07-23", src_time="11:59:00",
         expected_market_session="LUNCH_BREAK",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=False,  # 非连续竞价
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
-        expected_signal_level="DECISION",
-        expected_action_suppressed=True,  # SELL→ACTION+SELL有效, 时段抑制
-        notes="午休 → ACTION被时段抑制为DECISION",
+        expected_signal_level="",  # effective=false → P3 → 不入信号台
+        expected_action_suppressed=False,
+        notes="午休+effective=false → priority=P3 → 不入信号台",
     ),
     B1Scenario(
         label="07_收盘集合竞价",
@@ -506,12 +637,14 @@ B1_SCENARIOS = [
         symbol="600176", price=40.50, prev_close=38.70,
         volume=2000000, src_date="2026-07-23", src_time="14:57:00",
         expected_market_session="CLOSING_AUCTION",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=False,  # 非连续竞价
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
-        expected_signal_level="DECISION",
-        expected_action_suppressed=False,  # 仓位>30%→HOLD, 权重规范化先于时段抑制
-        notes="收盘集合竞价+仓位>30%→先降DECISION",
+        expected_signal_level="",  # effective=false → P3 → 不入信号台
+        notes="收盘竞价+effective=false → priority=P3 → 不入信号台",
     ),
     B1Scenario(
         label="08_当日盘后快照",
@@ -519,11 +652,14 @@ B1_SCENARIOS = [
         symbol="600487", price=55.67, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="15:00:00",
         expected_market_session="POSTMARKET",
-        expected_action_eligible=False,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,  # 同日快照视为"新鲜"
+        expected_session_action_allowed=False,  # 盘后
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=True,
         expected_stale_for_trading=True,
         expected_signal_level="",
-        notes="盘后同日快照 → 可归档不可行动 → 无信号",
+        notes="盘后同日快照 → effective=false → 无信号",
     ),
     B1Scenario(
         label="09_超过24小时过期",
@@ -531,7 +667,10 @@ B1_SCENARIOS = [
         symbol="600487", price=55.67, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="09:35:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=False,
+        expected_validation_passed=True,
+        expected_fresh_for_session=False,  # >24h stale
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=True,
         expected_signal_level="",
@@ -543,12 +682,16 @@ B1_SCENARIOS = [
         symbol="600487", price=55.67, prev_close=55.12,
         volume=2000000, src_date="2026-07-23", src_time="10:00:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=False,  # future_timestamp
+        expected_fresh_for_session=False,  # 未来数据不新鲜
+        expected_session_action_allowed=True,  # 时段允许但数据无效
+        expected_effective_action_eligible=False,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="",
-        notes="源时间未来 → validation错误 → action_eligible=false → 无信号",
+        notes="源时间未来 → validation失败 → quarantine → 无信号 → 无event",
         should_produce_event=False,
+        expected_quarantined=True,
     ),
     B1Scenario(
         label="11_价格异动_成交量不变",
@@ -556,7 +699,10 @@ B1_SCENARIOS = [
         symbol="600176", price=40.50, prev_close=38.70,
         volume=1500000, src_date="2026-07-23", src_time="09:37:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=True,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="DECISION",
@@ -568,7 +714,10 @@ B1_SCENARIOS = [
         symbol="600176", price=38.70, prev_close=38.70,
         volume=5000000, src_date="2026-07-23", src_time="09:38:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=True,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="",
@@ -580,7 +729,10 @@ B1_SCENARIOS = [
         symbol="600487", price=55.50, prev_close=55.12,
         volume=1000000, src_date="2026-07-23", src_time="10:00:00",
         expected_market_session="CONTINUOUS_AM",
-        expected_action_eligible=True,
+        expected_validation_passed=True,
+        expected_fresh_for_session=True,
+        expected_session_action_allowed=True,
+        expected_effective_action_eligible=True,
         expected_acceptable_postmarket=False,
         expected_stale_for_trading=False,
         expected_signal_level="",
@@ -648,14 +800,26 @@ class TestPhaseB1:
             print(f"  sim_clock: {scenario.sim_clock_iso}")
             print(f"  session: expected={scenario.expected_market_session} "
                   f"actual={sig.get('market_session', 'N/A')}")
-            print(f"  action_eligible: expected={scenario.expected_action_eligible} "
-                  f"actual={nq.get('action_eligible')}")
+            print(f"  validation_passed: expected={scenario.expected_validation_passed} "
+                  f"actual={nq.get('validation_passed')}")
+            print(f"  fresh_for_session: expected={scenario.expected_fresh_for_session} "
+                  f"actual={nq.get('fresh_for_session')}")
+            print(f"  session_action_allowed: expected={scenario.expected_session_action_allowed} "
+                  f"actual={nq.get('session_action_allowed')}")
+            print(f"  effective_action_eligible: expected={scenario.expected_effective_action_eligible} "
+                  f"actual={nq.get('effective_action_eligible')}")
             print(f"  stale_for_trading: expected={scenario.expected_stale_for_trading} "
                   f"actual={nq.get('stale_for_trading')}")
             print(f"  pm_snapshot: expected={scenario.expected_acceptable_postmarket} "
                   f"actual={nq.get('acceptable_as_postmarket_snapshot')}")
+            print(f"  quarantined: expected={scenario.expected_quarantined} "
+                  f"actual={result.get('quarantined', False)}")
             print(f"  signal_level: expected={scenario.expected_signal_level} "
                   f"actual={sig.get('signal_level', 'N/A')}")
+            if sig.get("primary_normalization_reason"):
+                print(f"  1ry_norm: {sig['primary_normalization_reason']}")
+            if sig.get("secondary_normalization_reasons"):
+                print(f"  2ry_norm: {sig['secondary_normalization_reasons']}")
             if sig.get("normalization_reason"):
                 print(f"  normalization: {sig['normalization_reason']}")
             if sig.get("action_suppressed"):
@@ -665,13 +829,24 @@ class TestPhaseB1:
             print(f"  event_priority: {result.get('event_priority', 'N/A')}")
             print(f"  signals_count: {result['signal_count']}")
 
-            # Verify expectations
-            assert nq.get("action_eligible") == scenario.expected_action_eligible, \
-                f"{scenario.label}: action_eligible mismatch"
+            # —— Verify 4-tier eligibility ——
+            assert nq.get("validation_passed") == scenario.expected_validation_passed, \
+                f"{scenario.label}: validation_passed mismatch"
+            assert nq.get("fresh_for_session") == scenario.expected_fresh_for_session, \
+                f"{scenario.label}: fresh_for_session mismatch"
+            assert nq.get("session_action_allowed") == scenario.expected_session_action_allowed, \
+                f"{scenario.label}: session_action_allowed mismatch"
+            assert nq.get("effective_action_eligible") == scenario.expected_effective_action_eligible, \
+                f"{scenario.label}: effective_action_eligible mismatch"
+
             assert nq.get("stale_for_trading") == scenario.expected_stale_for_trading, \
                 f"{scenario.label}: stale_for_trading mismatch"
             assert nq.get("acceptable_as_postmarket_snapshot") == scenario.expected_acceptable_postmarket, \
                 f"{scenario.label}: pm_snapshot mismatch"
+
+            # quarantine
+            assert result.get("quarantined", False) == scenario.expected_quarantined, \
+                f"{scenario.label}: quarantined mismatch"
 
             if scenario.expected_signal_level:
                 assert sig.get("signal_level") == scenario.expected_signal_level, \
@@ -685,7 +860,7 @@ class TestPhaseB1:
                 assert sig.get("action_suppressed") is True, \
                     f"{scenario.label}: expected action_suppressed=True"
 
-            if scenario.expected_session_approximation:
+            if scenario.expected_session_approximation and sig:
                 assert sig.get("session_approximation") is True, \
                     f"{scenario.label}: expected session_approximation=True"
 
@@ -735,10 +910,11 @@ class TestPhaseB1:
             if s.get("signal_level") == "ACTION"
             and s.get("market_session") not in ("CONTINUOUS_AM", "CONTINUOUS_PM")
         )
+        quarantined_count = sum(1 for r in results if r.get("quarantined"))
         stale_actions = 0
         for r in results:
             n = r.get("normalized") or {}
-            if not n.get("action_eligible", True):
+            if not n.get("effective_action_eligible", True):
                 for s in r.get("signals", []):
                     if s.get("signal_level") == "ACTION":
                         stale_actions += 1
@@ -750,6 +926,7 @@ class TestPhaseB1:
         print(f"  DECISION: {decision_signals}")
         print(f"  INFO/WATCH: {info_signals}")
         print(f"  时段抑制: {suppressed}")
+        print(f"  隔离区: {quarantined_count}")
         print(f"  ─────")
         print(f"  非连续竞价ACTION: {non_cont_actions}")
         print(f"  过期数据ACTION: {stale_actions}")
@@ -789,7 +966,11 @@ class TestPhaseB1:
             "trade_actions": [s["trade_action"] for r in results1 for s in r.get("signals", [])],
             "normalization_reasons": [s["normalization_reason"] for r in results1 for s in r.get("signals", [])],
             "suppression_reasons": [s["suppression_reason"] for r in results1 for s in r.get("signals", [])],
-            "action_eligible": [(r.get("normalized") or {}).get("action_eligible") for r in results1],
+            "effective_action_eligible": [(r.get("normalized") or {}).get("effective_action_eligible") for r in results1],
+            "validation_passed": [(r.get("normalized") or {}).get("validation_passed") for r in results1],
+            "fresh_for_session": [(r.get("normalized") or {}).get("fresh_for_session") for r in results1],
+            "session_action_allowed": [(r.get("normalized") or {}).get("session_action_allowed") for r in results1],
+            "quarantined": [r.get("quarantined") for r in results1],
         }
 
         tmp_db2 = Path(self.tmpdir) / "shadow2.db"
@@ -803,7 +984,11 @@ class TestPhaseB1:
             "trade_actions": [s["trade_action"] for r in results2 for s in r.get("signals", [])],
             "normalization_reasons": [s["normalization_reason"] for r in results2 for s in r.get("signals", [])],
             "suppression_reasons": [s["suppression_reason"] for r in results2 for s in r.get("signals", [])],
-            "action_eligible": [(r.get("normalized") or {}).get("action_eligible") for r in results2],
+            "effective_action_eligible": [(r.get("normalized") or {}).get("effective_action_eligible") for r in results2],
+            "validation_passed": [(r.get("normalized") or {}).get("validation_passed") for r in results2],
+            "fresh_for_session": [(r.get("normalized") or {}).get("fresh_for_session") for r in results2],
+            "session_action_allowed": [(r.get("normalized") or {}).get("session_action_allowed") for r in results2],
+            "quarantined": [r.get("quarantined") for r in results2],
         }
 
         print("\n确定性回放对比")
@@ -830,10 +1015,13 @@ class TestPhaseB1:
             symbol="600487", price=57.80, prev_close=55.12,
             volume=2000000, src_date="2026-07-23", src_time="09:35:00",
             expected_market_session="CONTINUOUS_AM",
-            expected_action_eligible=True,
+            expected_validation_passed=True,
+            expected_fresh_for_session=True,
+            expected_session_action_allowed=True,
+            expected_effective_action_eligible=True,
             expected_acceptable_postmarket=False,
             expected_stale_for_trading=False,
-            expected_signal_level="ACTION",
+            expected_signal_level="DECISION",
         )
 
         r1 = runner.run_fixture(scenario)
@@ -860,10 +1048,13 @@ class TestPhaseB1:
             symbol="600487", price=57.90, prev_close=55.12,
             volume=2500000, src_date="2026-07-23", src_time="09:40:00",
             expected_market_session="CONTINUOUS_AM",
-            expected_action_eligible=True,
+            expected_validation_passed=True,
+            expected_fresh_for_session=True,
+            expected_session_action_allowed=True,
+            expected_effective_action_eligible=True,
             expected_acceptable_postmarket=False,
             expected_stale_for_trading=False,
-            expected_signal_level="ACTION",
+            expected_signal_level="DECISION",
         )
         r_new = runner.run_fixture(new_s)
 
@@ -873,10 +1064,13 @@ class TestPhaseB1:
             symbol="600487", price=57.80, prev_close=55.12,
             volume=2000000, src_date="2026-07-23", src_time="09:35:00",
             expected_market_session="CONTINUOUS_AM",
-            expected_action_eligible=True,
+            expected_validation_passed=True,
+            expected_fresh_for_session=True,
+            expected_session_action_allowed=True,
+            expected_effective_action_eligible=True,
             expected_acceptable_postmarket=False,
             expected_stale_for_trading=False,
-            expected_signal_level="ACTION",
+            expected_signal_level="DECISION",
         )
         r_old = runner.run_fixture(old_s)
 

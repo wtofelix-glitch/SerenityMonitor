@@ -138,6 +138,25 @@ class EventRecord:
 # DB_PATH 不再有模块级默认值。由 SerenityEnv 注入。
 # EventStore 必须显式传入 db_path 参数。
 
+CREATE_QUARANTINE_TABLE = """
+CREATE TABLE IF NOT EXISTS serenity_event_quarantine (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    event_type TEXT DEFAULT 'price_anomaly',
+    headline TEXT DEFAULT '',
+    summary TEXT DEFAULT '',
+    quarantine_reason TEXT NOT NULL,
+    source_name TEXT DEFAULT '',
+    source_level TEXT DEFAULT 'C',
+    collected_at TEXT DEFAULT '',
+    normalized_at TEXT DEFAULT '',
+    validation_errors TEXT DEFAULT '[]',
+    raw_payload_hash TEXT DEFAULT '',
+    payload_json TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+)
+"""
+
 CREATE_EVENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS serenity_events (
     event_id TEXT PRIMARY KEY,
@@ -226,6 +245,7 @@ class EventStore:
         conn = self._get_conn()
         try:
             conn.execute(CREATE_EVENTS_TABLE)
+            conn.execute(CREATE_QUARANTINE_TABLE)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_serenity_events_symbol "
                 "ON serenity_events(symbol)"
@@ -355,6 +375,38 @@ class EventStore:
             ).fetchall()
 
             return [self._row_to_event(r) for r in rows]
+        finally:
+            conn.close()
+
+    def quarantine_event(
+        self, event: EventRecord, reason: str,
+        validation_errors: list | None = None,
+        normalized_at: str = "",
+    ) -> int:
+        """将异常事件存入隔离区（不入正常事件流）。返回隔离记录 id。"""
+        conn = self._get_conn()
+        try:
+            import json
+            cursor = conn.execute(
+                """INSERT INTO serenity_event_quarantine
+                (symbol, event_type, headline, summary, quarantine_reason,
+                 source_name, source_level, collected_at, normalized_at,
+                 validation_errors, raw_payload_hash, payload_json)
+                VALUES (?, ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        ?, ?, ?)""",
+                (
+                    event.symbol, event.event_type,
+                    event.headline, event.summary, reason,
+                    event.source.name, event.source.level,
+                    event.timestamps.collected_at, normalized_at,
+                    json.dumps(validation_errors or [], ensure_ascii=False),
+                    event.raw_content_hash,
+                    json.dumps(event.payload.data, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return cursor.lastrowid or 0
         finally:
             conn.close()
 
