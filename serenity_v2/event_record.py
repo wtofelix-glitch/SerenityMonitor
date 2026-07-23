@@ -126,7 +126,8 @@ class EventRecord:
     account_relevance: AccountRelevance = field(default_factory=AccountRelevance)
 
     signal_eligible: bool = False
-    priority: str = "P3"           # P0 / P1 / P2 / P3
+    action_eligible: bool = True     # 源数据是否可用于生成交易动作
+    priority: str = "P3"             # P0 / P1 / P2 / P3
     raw_content_hash: str = ""
 
 

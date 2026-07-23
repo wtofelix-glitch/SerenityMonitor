@@ -227,10 +227,12 @@ class SinaQuoteFetcher:
 
     def normalize(self, raw: RawQuoteRecord,
                   business_time: str | None = None) -> NormalizedQuote | None:
+        from .clock import get_clock
+        now = get_clock().now()
         nq = NormalizedQuote(
             symbol=raw.symbol, source="sina_realtime",
             collected_at=raw.collected_at,
-            normalized_at=datetime.now(tz=CST).isoformat(timespec="milliseconds"),
+            normalized_at=now.isoformat(timespec="milliseconds"),
             business_time=business_time or "",
             raw_payload_hash=raw.raw_payload_hash)
 
@@ -298,9 +300,10 @@ class SinaQuoteFetcher:
 
         # —— 时间戳检查 ——
         if nq.source_timestamp:
+            from .clock import get_clock
             try:
                 src_dt = datetime.fromisoformat(nq.source_timestamp)
-                if src_dt > datetime.now(tz=CST) + timedelta(minutes=5):
+                if src_dt > get_clock().now() + timedelta(minutes=5):
                     errors.append("future_timestamp")
                     self.metrics.future_timestamp_count += 1
             except (ValueError, TypeError):
@@ -311,26 +314,46 @@ class SinaQuoteFetcher:
         from .clock import get_clock
         session = get_clock().market_session()
 
+        # 交易时段（含集合竞价、午休、收盘竞价）：数据可能是新鲜的
+        TRADING_SESSIONS = {
+            "OPENING_AUCTION_CANCELABLE", "OPENING_AUCTION_NO_CANCEL",
+            "OPENING_MATCH_EVENT", "PRE_OPEN_PAUSE",
+            "CONTINUOUS_AM", "LUNCH_BREAK",
+            "CONTINUOUS_PM", "CLOSING_AUCTION",
+        }
+        # 盘后/关闭时段：数据只可能是快照
+        SNAPSHOT_SESSIONS = {"POSTMARKET", "CLOSED"}
+
         # 默认：数据新鲜，可用于交易决策
         nq.stale_for_trading = False
         nq.acceptable_as_postmarket_snapshot = False
         nq.action_eligible = True
 
         if session in ("CONTINUOUS_AM", "CONTINUOUS_PM"):
-            # 交易时段：严格 5 分钟过期
+            # 连续竞价时段：严格 5 分钟过期
             if nq.data_age_ms > 300_000:
                 nq.stale_for_trading = True
                 nq.action_eligible = False
                 errors.append("stale_data")
                 self.metrics.stale_count += 1
+
+        elif session in TRADING_SESSIONS:
+            # 其他交易时段（集合竞价/午休/收盘竞价）：宽松 15 分钟
+            if nq.data_age_ms > 900_000:
+                nq.stale_for_trading = True
+                nq.action_eligible = False
+                errors.append("stale_data")
+                self.metrics.stale_count += 1
+
         elif nq.data_age_ms > 86_400_000:
             # 超过 24h：任何场景都不可用
             nq.stale_for_trading = True
             nq.action_eligible = False
             errors.append("stale_data_overnight")
             self.metrics.stale_count += 1
+
         else:
-            # 非交易时段，数据 < 24h
+            # 盘后/关闭时段 (POSTMARKET / CLOSED)，数据 < 24h
             # 判断是否同日快照
             if nq.source_timestamp:
                 try:

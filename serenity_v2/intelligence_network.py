@@ -318,6 +318,10 @@ class IntelligenceNetwork:
 
     def _is_signal_eligible(self, event: EventRecord) -> bool:
         """判定事件是否可以进入信号台处理。"""
+        # 源数据不可执行 → 禁止进入信号台
+        if not event.action_eligible:
+            return False
+
         # 已验证或自验证的事件可进入信号台
         if event.verification.status not in ("verified", "self_verified"):
             return False
