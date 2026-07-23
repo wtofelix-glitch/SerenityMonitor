@@ -220,6 +220,7 @@ class B2Runner:
         返回 (ok, details_dict, violations)。任一检查失败 → ok=False。
         """
         from .env import get_env
+        from .clock import get_clock, RealClock, SimClock
         violations: list[str] = []
 
         try:
@@ -227,13 +228,25 @@ class B2Runner:
         except RuntimeError:
             return False, {}, ["环境未初始化，请先调用 serenity_v2.env.set_env()"]
 
+        clock = get_clock()
+        clock_mode = "REAL" if isinstance(clock, RealClock) else (
+            "SIM" if isinstance(clock, SimClock) else "UNKNOWN"
+        )
+
         details = {
+            "clock_mode": clock_mode,
+            "timezone": "Asia/Shanghai",
             "environment": env.mode,
             "db": str(env.db_path.resolve()),
             "push_adapter": "disabled" if env.push_adapter is None else "PRESENT ⚠",
             "trade_adapter": "disabled" if env.broker_adapter is None else "PRESENT ⚠",
             "account_state_mode": "FIXTURE",
+            "account_state_stale": "true",
         }
+
+        # 0. 时钟必须为真实时钟
+        if clock_mode != "REAL":
+            violations.append(f"时钟模式为 {clock_mode}，盘中运行必须使用 RealClock")
 
         # 1. 必须为影子模式
         if env.mode != "shadow":
@@ -267,8 +280,6 @@ class B2Runner:
         for k, v in details.items():
             icon = "✅" if "⚠" not in str(v) else "⚠️"
             print(f"  {icon} {k}: {v}")
-        print(f"  {'✅' if ok else '❌'} account_state_mode: FIXTURE "
-              f"(快照 as_of 7月22日, stale=true)")
         print(f"  {'✅' if ok else '❌'} production DB SHA-256: "
               f"{list(self.metrics.prod_file_hash_before.values())[0][:16] if self.metrics.prod_file_hash_before else 'N/A'}...")
         print(f"{'='*60}")
@@ -309,6 +320,36 @@ class B2Runner:
             return False, session, f"当前时段 {session} 不在允许列表"
         return True, session, ""
 
+    def _check_session_remaining(self) -> tuple:
+        """检查当前连续竞价时段剩余时间是否足够运行。
+
+        返回 (ok, remaining_seconds, reason)。
+        """
+        from .clock import get_clock
+        clock = get_clock()
+        now = clock.now()
+
+        # 时段结束时间（CST）
+        session_end_times = {
+            "CONTINUOUS_AM": now.replace(hour=11, minute=30, second=0, microsecond=0),
+            "CONTINUOUS_PM": now.replace(hour=14, minute=57, second=0, microsecond=0),
+        }
+
+        session = clock.market_session()
+        if session not in session_end_times:
+            return False, 0, f"当前时段 {session} 不支持剩余时间计算"
+
+        end = session_end_times[session]
+        remaining = (end - now).total_seconds()
+
+        if remaining < self.duration:
+            return False, remaining, (
+                f"连续竞价剩余 {remaining:.0f}s 不足 {self.duration}s 窗口，"
+                f"时段 {session} 结束于 {end.strftime('%H:%M')}"
+            )
+
+        return True, remaining, ""
+
     def _auto_stop(self, reason: str):
         if not self.metrics.auto_stop_triggered:
             self.metrics.auto_stop_triggered = True
@@ -321,6 +362,13 @@ class B2Runner:
         self.metrics.signals_total += 1
         cand = sig.candidate_signal_level
         eff = sig.effective_signal_level
+
+        # 注入 FIXTURE 账户上下文标签（B2 影子链路永远不应用于实盘）
+        tags = sig.execution_tags or []
+        for tag in ("ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE"):
+            if tag not in tags:
+                tags.append(tag)
+        sig.execution_tags = tags
 
         if cand == "ACTION":
             self.metrics.candidate_ACTION += 1
@@ -355,10 +403,12 @@ class B2Runner:
             "execution_tags": sig.execution_tags,
         })
 
-        tags = sig.execution_tags or []
-        if "SHADOW_ONLY" not in tags or "NOT_FOR_EXECUTION" not in tags:
+        required_tags = {"SHADOW_ONLY", "NOT_FOR_EXECUTION",
+                         "ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE"}
+        missing = required_tags - set(tags)
+        if missing:
             self.metrics.violations.append(
-                f"缺少安全标签: {sig.signal_id} tags={tags}"
+                f"缺少安全标签: {sig.signal_id} missing={missing} tags={tags}"
             )
 
     def run(self):
@@ -379,6 +429,15 @@ class B2Runner:
             print(f"❌ 时段检查失败: {why}")
             return self.metrics
 
+        # ── 剩余时间检查 ──
+        rem_ok, remaining, rem_why = self._check_session_remaining()
+        if not rem_ok:
+            self.metrics.status = "ERROR"
+            self.metrics.violations.append(f"窗口不足: {rem_why}")
+            logger.error(f"B2 窗口不足: {rem_why}")
+            print(f"❌ 窗口不足: {rem_why}")
+            return self.metrics
+
         self.metrics.status = "RUNNING"
         self.metrics.started_at = datetime.now(tz=CST).isoformat(timespec="seconds")
 
@@ -397,12 +456,14 @@ class B2Runner:
         print(f"{'='*70}")
         print(f"  run_id:         {self.metrics.run_id}")
         print(f"  session:        {session}")
+        print(f"  session_remains:{remaining:.0f}s")
         print(f"  duration:       {self.duration}s ({self.duration//60}min)")
         print(f"  interval:       {self.interval}s")
         print(f"  symbols:        {symbols}")
         print(f"  shadow DB:      {self.shadow_db}")
         print(f"  safe windows:   CONTINUOUS_AM 09:30-11:30 / "
               f"CONTINUOUS_PM 13:00-14:57")
+        print(f"  account:        FIXTURE (快照 as_of 7月22日, stale=true)")
         print(f"{'='*70}\n")
 
         try:
