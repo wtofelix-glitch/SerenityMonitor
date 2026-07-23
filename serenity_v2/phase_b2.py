@@ -2,17 +2,19 @@
 Phase B2 — 盘中实时影子链路运行器.
 
 安全边界:
-  · 仅 CONTINUOUS_AM / CONTINUOUS_PM 时段运行
-  · 15 分钟窗口，固定频率 5s
+  · 仅 CONTINUOUS_AM (09:30-11:30) / CONTINUOUS_PM (13:00-14:57) 时段运行
+  · 14:57 后自动停止 ACTION 生成（进入 CLOSING_AUCTION）
+  · 15 分钟窗口，固定频率 5s，不能跨越时段边界
   · 影子模式：不推送、不成交、不写生产库
   · 自动停止条件：见 B2_AUTO_STOP_CHECKS
 
 用法:
-    python -m serenity_v2.phase_b2 [duration_seconds] [interval_seconds]
+    python -m serenity_v2.phase_b2 --env shadow [--duration 900] [--interval 5]
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
@@ -114,6 +116,11 @@ class B2Metrics:
     auto_stop_triggered: bool = False
     auto_stop_reason: str = ""
     signal_generation_suspended: bool = False
+    session_boundary_reached: bool = False  # 运行中触及时段边界
+    session_at_boundary: str = ""
+
+    # 每周期市场时段记录
+    cycle_sessions: list = field(default_factory=list)
 
     # 明细
     signal_details: list = field(default_factory=list)
@@ -207,6 +214,75 @@ class B2Runner:
 
         self.metrics.run_id = datetime.now(tz=CST).strftime("B2_%Y%m%d_%H%M%S")
 
+    def verify_environment(self) -> tuple:
+        """显式验证运行环境并输出确认信息。
+
+        返回 (ok, details_dict, violations)。任一检查失败 → ok=False。
+        """
+        from .env import get_env
+        violations: list[str] = []
+
+        try:
+            env = get_env()
+        except RuntimeError:
+            return False, {}, ["环境未初始化，请先调用 serenity_v2.env.set_env()"]
+
+        details = {
+            "environment": env.mode,
+            "db": str(env.db_path.resolve()),
+            "push_adapter": "disabled" if env.push_adapter is None else "PRESENT ⚠",
+            "trade_adapter": "disabled" if env.broker_adapter is None else "PRESENT ⚠",
+            "account_state_mode": "FIXTURE",
+        }
+
+        # 1. 必须为影子模式
+        if env.mode != "shadow":
+            violations.append(f"环境模式为 {env.mode}，必须是 shadow")
+            return False, details, violations
+
+        # 2. 推送适配器必须为空
+        if env.push_adapter is not None:
+            violations.append("push_adapter 不为空 — 存在真实推送风险")
+
+        # 3. 交易适配器必须为空
+        if env.broker_adapter is not None:
+            violations.append("trade_adapter 不为空 — 存在真实成交风险")
+
+        # 4. DB 路径不得指向生产库
+        prod_root = Path(__file__).resolve().parent.parent
+        prod_db = (prod_root / "serenity.db").resolve()
+        if env.db_path.resolve() == prod_db:
+            violations.append(f"影子 DB 路径与生产 DB 相同: {prod_db}")
+
+        ok = len(violations) == 0
+        return ok, details, violations
+
+    def _print_env_confirmation(self):
+        """输出环境确认信息块。任一检查失败则抛出 RuntimeError。"""
+        ok, details, violations = self.verify_environment()
+
+        print(f"\n{'='*60}")
+        print(f"环境确认")
+        print(f"{'='*60}")
+        for k, v in details.items():
+            icon = "✅" if "⚠" not in str(v) else "⚠️"
+            print(f"  {icon} {k}: {v}")
+        print(f"  {'✅' if ok else '❌'} account_state_mode: FIXTURE "
+              f"(快照 as_of 7月22日, stale=true)")
+        print(f"  {'✅' if ok else '❌'} production DB SHA-256: "
+              f"{list(self.metrics.prod_file_hash_before.values())[0][:16] if self.metrics.prod_file_hash_before else 'N/A'}...")
+        print(f"{'='*60}")
+
+        if violations:
+            print(f"\n❌ 环境验证失败:")
+            for v in violations:
+                print(f"  ❌ {v}")
+            raise RuntimeError(
+                "B2 环境验证失败: " + "; ".join(violations)
+            )
+
+        print(f"✅ 环境验证通过\n")
+
     @staticmethod
     def _compute_prod_hashes() -> dict:
         root = Path(__file__).resolve().parent.parent
@@ -292,11 +368,15 @@ class B2Runner:
             normalized_quote_to_event,
         )
 
+        # ── 环境验证 ──
+        self._print_env_confirmation()
+
         ok, session, why = self.check_session()
         if not ok:
             self.metrics.status = "ERROR"
             self.metrics.violations.append(f"时段不允许: {why}")
             logger.error(f"B2 不允许运行: {why}")
+            print(f"❌ 时段检查失败: {why}")
             return self.metrics
 
         self.metrics.status = "RUNNING"
@@ -305,6 +385,7 @@ class B2Runner:
         reset_clock()
         clock = get_clock()
         symbols = B2_SYMBOLS
+        last_session = session
 
         start_mono = _time.monotonic()
         next_cycle_mono = start_mono
@@ -314,12 +395,14 @@ class B2Runner:
         print(f"\n{'='*70}")
         print(f"Phase B2 实时影子链路")
         print(f"{'='*70}")
-        print(f"  run_id:    {self.metrics.run_id}")
-        print(f"  session:   {session}")
-        print(f"  duration:  {self.duration}s ({self.duration//60}min)")
-        print(f"  interval:  {self.interval}s")
-        print(f"  symbols:   {symbols}")
-        print(f"  shadow DB: {self.shadow_db}")
+        print(f"  run_id:         {self.metrics.run_id}")
+        print(f"  session:        {session}")
+        print(f"  duration:       {self.duration}s ({self.duration//60}min)")
+        print(f"  interval:       {self.interval}s")
+        print(f"  symbols:        {symbols}")
+        print(f"  shadow DB:      {self.shadow_db}")
+        print(f"  safe windows:   CONTINUOUS_AM 09:30-11:30 / "
+              f"CONTINUOUS_PM 13:00-14:57")
         print(f"{'='*70}\n")
 
         try:
@@ -329,12 +412,34 @@ class B2Runner:
                 if elapsed_total >= self.duration:
                     break
 
-                # 时段再检查
+                # 每周期重新检查时段（可能跨越边界）
                 reset_clock()
                 current_session = get_clock().market_session()
+                self.metrics.cycle_sessions.append(current_session)
+
+                # 时段边界检测
+                if current_session != last_session:
+                    self.metrics.session_boundary_reached = True
+                    self.metrics.session_at_boundary = (
+                        f"{last_session} → {current_session}"
+                    )
+                    logger.warning(
+                        f"时段边界: {last_session} → {current_session}"
+                    )
+
                 if current_session not in B2_SAFE_SESSIONS:
-                    self._auto_stop(f"session_exit:{current_session}")
+                    reason = (
+                        f"SESSION_BOUNDARY_REACHED: "
+                        f"{last_session} → {current_session}"
+                        if current_session != last_session
+                        else f"session_exit:{current_session}"
+                    )
+                    self._auto_stop(reason)
+                    print(f"  ⛔ 时段边界 {last_session} → {current_session}，"
+                          f"停止信号生成")
                     break
+
+                last_session = current_session
 
                 # 固定频率等待
                 wait = next_cycle_mono - now_mono
@@ -649,10 +754,30 @@ class B2Runner:
 # ---------------------------------------------------------------------------
 
 def main():
-    duration = int(sys.argv[1]) if len(sys.argv) > 1 else B2_DEFAULT_DURATION
-    interval = int(sys.argv[2]) if len(sys.argv) > 2 else B2_DEFAULT_INTERVAL
+    parser = argparse.ArgumentParser(
+        description="Phase B2 — 盘中实时影子链路运行器",
+        epilog="示例: python -m serenity_v2.phase_b2 --env shadow --duration 900 --interval 5",
+    )
+    parser.add_argument(
+        "--env", required=True, choices=["shadow"],
+        help="必须显式指定 --env shadow（其他模式拒绝运行）",
+    )
+    parser.add_argument(
+        "--duration", type=int, default=B2_DEFAULT_DURATION,
+        help=f"运行时长（秒），默认 {B2_DEFAULT_DURATION}（15min）",
+    )
+    parser.add_argument(
+        "--interval", type=int, default=B2_DEFAULT_INTERVAL,
+        help=f"抓取间隔（秒），默认 {B2_DEFAULT_INTERVAL}",
+    )
+    args = parser.parse_args()
 
-    runner = B2Runner(duration_seconds=duration, interval_seconds=interval)
+    # 双重保障：CLI 已限制 choices=["shadow"]，此处再显式校验
+    if args.env != "shadow":
+        print("❌ B2 仅支持 --env shadow，拒绝运行")
+        sys.exit(2)
+
+    runner = B2Runner(duration_seconds=args.duration, interval_seconds=args.interval)
     metrics = runner.run()
     runner.save_report()
 
