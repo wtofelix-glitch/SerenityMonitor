@@ -608,6 +608,127 @@ def store_quarantine(db_path: Path, nq: NormalizedQuote, reason: str) -> int:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# 生产桥接: NormalizedQuote → EventRecord
+# ---------------------------------------------------------------------------
+
+def normalized_quote_to_event(
+    nq: NormalizedQuote, is_holding: bool = True,
+) -> tuple:
+    """NormalizedQuote → EventRecord（生产级桥接）。
+
+    使用四级可行动性模型：
+      effective_action_eligible = validation_passed ∧ fresh_for_session
+                                 ∧ session_action_allowed
+
+    返回 (event, quarantined, quarantine_reason)。
+    未来时间戳或其他校验失败 → quarantined=True。
+    """
+    from .event_record import (
+        EventRecord, SourceInfo, TimestampSet, EventPayload,
+        RelatedInfo, ImpactAssessment, VerificationResult, AccountRelevance,
+        EventStore,
+    )
+    from .clock import get_clock
+    from datetime import timedelta
+
+    clock = get_clock()
+    now = clock.now()
+    ts = now.isoformat(timespec="seconds")
+
+    prev = nq.previous_close if nq.previous_close > 0 else nq.price
+    change_pct = round((nq.price - prev) / prev * 100, 2)
+
+    if change_pct > 4:
+        direction = "bullish"
+        strength = "high" if change_pct > 7 else "medium"
+    elif change_pct < -4:
+        direction = "bearish"
+        strength = "high" if abs(change_pct) > 7 else "medium"
+    else:
+        direction = "neutral"
+        strength = "low"
+
+    abs_pct = abs(change_pct)
+
+    # 隔离检查: 校验未通过 → 不入正常事件流
+    if not nq.validation_passed:
+        quarantine_reason = "validation_failed"
+        if "future_timestamp" in nq.validation_errors:
+            quarantine_reason = "future_timestamp"
+        event = EventRecord(
+            symbol=nq.symbol, event_type="price_anomaly",
+            headline=f"{nq.name}({nq.symbol}) 涨跌{change_pct:+.2f}%",
+            summary=f"现价{nq.price:.2f}, 涨跌{change_pct:+.2f}%",
+            source=SourceInfo(
+                name="Sina实时行情", level="A",
+                url=f"https://hq.sinajs.cn/list={nq.symbol}",
+                publish_time=nq.source_timestamp or ts,
+            ),
+            timestamps=TimestampSet(
+                event_time=nq.source_timestamp or ts,
+                publish_time=nq.source_timestamp or ts,
+                collected_at=ts, verified_at=ts, expires_at="",
+            ),
+            payload=EventPayload(data={
+                "price": nq.price, "change_pct": change_pct,
+                "volume": nq.volume, "amount": nq.amount,
+                "turnover_rate": 0.0,
+            }),
+            related=RelatedInfo(direct_symbols=[nq.symbol]),
+            impact=ImpactAssessment(
+                direction=direction, strength=strength, horizon="intraday",
+            ),
+            verification=VerificationResult(status="pending", method="none"),
+            account_relevance=AccountRelevance(is_holding=is_holding),
+            action_eligible=False, signal_eligible=False, priority="P3",
+        )
+        return event, True, quarantine_reason
+
+    # 使用 effective_action_eligible
+    effective_action_eligible = (
+        nq.effective_action_eligible and nq.validation_status == "valid"
+    )
+
+    event = EventRecord(
+        symbol=nq.symbol, event_type="price_anomaly",
+        headline=f"{nq.name}({nq.symbol}) 涨跌{change_pct:+.2f}%",
+        summary=f"现价{nq.price:.2f}, 涨跌{change_pct:+.2f}%, "
+                f"成交额{nq.amount/1e8:.2f}亿",
+        source=SourceInfo(
+            name="Sina实时行情", level="A",
+            url=f"https://hq.sinajs.cn/list={nq.symbol}",
+            publish_time=nq.source_timestamp or ts,
+        ),
+        timestamps=TimestampSet(
+            event_time=nq.source_timestamp or ts,
+            publish_time=nq.source_timestamp or ts,
+            collected_at=ts, verified_at=ts,
+            expires_at=(now + timedelta(minutes=30)).isoformat(timespec="seconds"),
+        ),
+        payload=EventPayload(data={
+            "price": nq.price, "change_pct": change_pct,
+            "volume": nq.volume, "amount": nq.amount,
+            "turnover_rate": 0.0,
+        }),
+        related=RelatedInfo(direct_symbols=[nq.symbol]),
+        impact=ImpactAssessment(
+            direction=direction, strength=strength, horizon="intraday",
+        ),
+        verification=VerificationResult(
+            status="self_verified", method="single_source",
+            sources_used=1, latency_seconds=0,
+        ),
+        account_relevance=AccountRelevance(is_holding=is_holding),
+        action_eligible=effective_action_eligible,
+        signal_eligible=effective_action_eligible and is_holding and abs_pct > 4,
+        priority=("P1" if (effective_action_eligible and is_holding and abs_pct > 4)
+                  else "P3"),
+    )
+    event.event_id = EventStore()._generate_id(event)
+    return event, False, ""
+
+
 def store_metrics_snapshot(db_path: Path, metrics: SmokeMetrics) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
