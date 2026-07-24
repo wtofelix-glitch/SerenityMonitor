@@ -566,3 +566,196 @@ class TestOldTabRegression:
         from dash import html
         card = dash_dashboard._error_card("test error")
         assert isinstance(card, html.Div)
+
+
+# ══════════════════════════════════════════════════════════════
+# AC-15: 计时不变量 (Review Item 1)
+# ══════════════════════════════════════════════════════════════
+
+class TestTimingInvariant:
+    """AC-15: 全周期计时不变量 cycle_ms >= http_ms"""
+
+    def test_timing_invariant_on_viewmodel(self):
+        vm = _provider().load("sample_report_ok.json")
+        ti = vm.timing_invariant
+        assert ti.checked_cycles == 57
+        # Fixture has 1 real violation: cycle 20 http=196ms > cycle=191ms
+        assert ti.violations == 1
+        assert ti.status == "FAIL"
+        assert ti.violating_sequences == [20]
+
+    def test_timing_invariant_in_tab(self):
+        result = render_b2_tab(
+            report_path="sample_report_ok.json",
+            report_root=str(FIXTURES),
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "TIMING_INVARIANT" in html_str
+        assert "cycle_ms" in html_str or "violations=0" in html_str
+
+    def test_timing_invariant_detects_violation(self):
+        """A report with cycle_ms < http_ms should show FAIL."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+            dir=str(FIXTURES),
+        ) as f:
+            json.dump({
+                "schema_version": "b2-report/1.0-implicit",
+                "run_id": "timing_violation_test",
+                "status": "COMPLETED",
+                "started_at": "2026-01-01T00:00:00",
+                "duration_seconds": 0,
+                "cycles_planned": 2, "cycles_completed": 2,
+                "cycles_failed": 0, "cycles_skipped": 0, "not_due_cycles": 0,
+                "raw_received": 0, "normalized_accepted": 0,
+                "normalized_rejected": 0, "quarantined": 0,
+                "events_created": 0, "events_deduplicated": 0,
+                "events_not_triggered": 0, "event_processing_failed": 0,
+                "signals_total": 0,
+                "candidate_ACTION": 0, "effective_ACTION": 0,
+                "ACTION_downgraded": 0, "ACTION_rejected": 0,
+                "ledger_claimed": 0, "ledger_completed": 0,
+                "ledger_completed_no_signal": 0, "ledger_failed_count": 0,
+                "ledger_in_progress": 0, "ledger_already_processed": 0,
+                "total_failures": 0,
+                "cycle_records": [
+                    {"cycle_sequence": 1, "status": "COMPLETED",
+                     "http_duration_ms": 500, "cycle_duration_ms": 300,
+                     "signals_created": 0, "primary_failure_type": ""},
+                    {"cycle_sequence": 2, "status": "COMPLETED",
+                     "http_duration_ms": 100, "cycle_duration_ms": 200,
+                     "signals_created": 0, "primary_failure_type": ""},
+                ],
+            }, f)
+            tmp_path = f.name
+
+        try:
+            vm = _provider().load(os.path.basename(tmp_path))
+            assert vm.report_status == ReportStatus.OK
+            ti = vm.timing_invariant
+            assert ti.checked_cycles == 2
+            assert ti.violations == 1
+            assert ti.status == "FAIL"
+            assert ti.violating_sequences == [1]
+        finally:
+            os.unlink(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════
+# AC-16: reported_passed=UNKNOWN (Review Item 2)
+# ══════════════════════════════════════════════════════════════
+
+class TestReportedPassedNull:
+    """AC-16: reported_passed=None 时不产生伪造 mismatch"""
+
+    def test_reported_passed_none_produces_no_mismatch(self):
+        eq = AuditEquation(
+            name="test",
+            reported_passed=None,
+            recalculated_passed=True,
+        )
+        assert eq.mismatch is False
+
+    def test_reported_passed_none_with_false_recalc(self):
+        eq = AuditEquation(
+            name="test",
+            reported_passed=None,
+            recalculated_passed=False,
+        )
+        assert eq.mismatch is False
+
+    def test_mismatch_still_works_when_reported_is_known(self):
+        eq = AuditEquation(
+            name="test",
+            reported_passed=True,
+            recalculated_passed=False,
+        )
+        assert eq.mismatch is True
+
+    def test_report_missing_audit_key_produces_unknown(self):
+        """When the report JSON lacks an audit_*_ok key, reported_passed=None."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+            dir=str(FIXTURES),
+        ) as f:
+            json.dump({
+                "schema_version": "b2-report/1.0-implicit",
+                "run_id": "no_audit_keys_test",
+                "status": "COMPLETED",
+                "started_at": "2026-01-01T00:00:00",
+                "duration_seconds": 0,
+                "cycles_planned": 10, "cycles_completed": 8,
+                "cycles_failed": 2, "cycles_skipped": 0, "not_due_cycles": 0,
+                "raw_received": 0, "normalized_accepted": 0,
+                "normalized_rejected": 0, "quarantined": 0,
+                "events_created": 0, "events_deduplicated": 0,
+                "events_not_triggered": 0, "event_processing_failed": 0,
+                "signals_total": 0,
+                "candidate_ACTION": 0, "effective_ACTION": 0,
+                "ACTION_downgraded": 0, "ACTION_rejected": 0,
+                "ledger_claimed": 0, "ledger_completed": 0,
+                "ledger_completed_no_signal": 0, "ledger_failed_count": 0,
+                "ledger_in_progress": 0, "ledger_already_processed": 0,
+                "total_failures": 0,
+                # NOTE: no audit_*_ok keys at all
+            }, f)
+            tmp_path = f.name
+
+        try:
+            vm = _provider().load(os.path.basename(tmp_path))
+            assert vm.report_status == ReportStatus.OK
+            # All 8 equations should have reported_passed=None
+            for eq in vm.audit_equations:
+                assert eq.reported_passed is None, \
+                    f"{eq.name}: expected None, got {eq.reported_passed}"
+                assert eq.mismatch is False, \
+                    f"{eq.name}: mismatch should be False when reported is None"
+            # has_any_mismatch should be False
+            assert vm.has_any_mismatch is False
+            # all_audit_passed should reflect recalculated values
+            # (scheduling: 10=8+2+0 → True, started: 10=8+2 → True)
+            assert vm.all_audit_passed is True
+        finally:
+            os.unlink(tmp_path)
+
+    def test_tab_shows_unknown_for_missing_reported(self):
+        """Tab should display UNKNOWN when reported_passed is None."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False,
+            dir=str(FIXTURES),
+        ) as f:
+            json.dump({
+                "schema_version": "b2-report/1.0-implicit",
+                "run_id": "unknown_test",
+                "status": "COMPLETED",
+                "started_at": "2026-01-01T00:00:00",
+                "duration_seconds": 0,
+                "cycles_planned": 5, "cycles_completed": 5,
+                "cycles_failed": 0, "cycles_skipped": 0, "not_due_cycles": 0,
+                "raw_received": 0, "normalized_accepted": 0,
+                "normalized_rejected": 0, "quarantined": 0,
+                "events_created": 0, "events_deduplicated": 0,
+                "events_not_triggered": 0, "event_processing_failed": 0,
+                "signals_total": 0,
+                "candidate_ACTION": 0, "effective_ACTION": 0,
+                "ACTION_downgraded": 0, "ACTION_rejected": 0,
+                "ledger_claimed": 0, "ledger_completed": 0,
+                "ledger_completed_no_signal": 0, "ledger_failed_count": 0,
+                "ledger_in_progress": 0, "ledger_already_processed": 0,
+                "total_failures": 0,
+                # No audit keys
+            }, f)
+            tmp_path = f.name
+
+        try:
+            result = render_b2_tab(
+                report_path=os.path.basename(tmp_path),
+                report_root=str(FIXTURES),
+            )
+            html_str = str(getattr(result, "children", ""))
+            assert "UNKNOWN" in html_str
+        finally:
+            os.unlink(tmp_path)

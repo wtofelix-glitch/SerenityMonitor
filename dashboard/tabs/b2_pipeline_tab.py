@@ -235,9 +235,19 @@ def _render_audit_equations(vm: B2DashboardViewModel) -> html.Div:
 
     rows = []
     for eq in vm.audit_equations:
+        # reported_passed: True/False/None (UNKNOWN when not in report)
+        reported_str: str
+        if eq.reported_passed is None:
+            reported_str = "UNKNOWN"
+        else:
+            reported_str = "PASS" if eq.reported_passed else "FAIL"
+
         if eq.mismatch:
             icon = "⚠️"
             color = THEME["red"]
+        elif eq.reported_passed is None:
+            icon = "❓"
+            color = THEME["yellow"]
         elif eq.recalculated_passed:
             icon = "✅"
             color = THEME["green"]
@@ -245,7 +255,6 @@ def _render_audit_equations(vm: B2DashboardViewModel) -> html.Div:
             icon = "❌"
             color = THEME["red"]
 
-        # Build operands string
         ops_str = "  ".join(f"{k}={v}" for k, v in eq.operands.items())
         rows.append(html.Tr([
             html.Td(icon, style={"width": "30px", "textAlign": "center"}),
@@ -255,12 +264,39 @@ def _render_audit_equations(vm: B2DashboardViewModel) -> html.Div:
                                           "fontFamily": THEME["font_mono"]}),
             html.Td(ops_str, style={"color": color, "fontSize": "11px",
                                      "fontFamily": THEME["font_mono"]}),
+            html.Td(reported_str, style={"color": THEME["text_dim"], "fontSize": "9px",
+                                         "fontFamily": THEME["font_mono"],
+                                         "textAlign": "center"}),
             html.Td("⚠ MISMATCH" if eq.mismatch else "",
                     style={"color": THEME["red"], "fontSize": "10px", "fontWeight": "600"}),
         ]))
 
+    # Timing invariant row
+    ti = vm.timing_invariant
+    ti_icon = "✅" if ti.status == "PASS" else "❌"
+    ti_color = THEME["green"] if ti.status == "PASS" else THEME["red"]
+    ti_ops = f"checked={ti.checked_cycles} violations={ti.violations}"
+    ti_detail = ""
+    if ti.violating_sequences:
+        ti_detail = f"seq: {','.join(str(s) for s in ti.violating_sequences[:10])}"
+
+    timing_row = html.Tr([
+        html.Td(ti_icon, style={"width": "30px", "textAlign": "center"}),
+        html.Td("TIMING_INVARIANT", style={"color": THEME["text"], "fontWeight": "500",
+                                           "fontFamily": THEME["font_mono"], "fontSize": "11px"}),
+        html.Td("cycle_ms >= http_ms ∀ cycles", style={"color": THEME["text_dim"], "fontSize": "11px",
+                                                        "fontFamily": THEME["font_mono"]}),
+        html.Td(ti_ops, style={"color": ti_color, "fontSize": "11px",
+                               "fontFamily": THEME["font_mono"]}),
+        html.Td(ti.status, style={"color": ti_color, "fontSize": "9px",
+                                  "fontFamily": THEME["font_mono"], "textAlign": "center",
+                                  "fontWeight": "600"}),
+        html.Td(ti_detail, style={"color": THEME["red"] if ti.violations else THEME["text_dim"],
+                                  "fontSize": "9px", "fontFamily": THEME["font_mono"]}),
+    ])
+
     return html.Div([
-        html.Div("📐 审计方程 (独立复算)", style={
+        html.Div("📐 审计方程 (独立复算) + 计时不变量", style={
             "fontWeight": "600", "fontSize": "13px", "color": THEME["text"],
             "marginBottom": "10px", "paddingBottom": "8px",
             "borderBottom": f"1px solid {THEME['border']}"}),
@@ -270,9 +306,10 @@ def _render_audit_equations(vm: B2DashboardViewModel) -> html.Div:
                 html.Th("名称", style={"textAlign": "left", "color": THEME["text_dim"], "fontSize": "10px"}),
                 html.Th("方程", style={"textAlign": "left", "color": THEME["text_dim"], "fontSize": "10px"}),
                 html.Th("操作数", style={"textAlign": "left", "color": THEME["text_dim"], "fontSize": "10px"}),
+                html.Th("报告", style={"textAlign": "center", "color": THEME["text_dim"], "fontSize": "10px", "width": "50px"}),
                 html.Th("", style={"width": "80px"}),
             ])),
-            html.Tbody(rows),
+            html.Tbody(rows + [timing_row]),
         ], style={"width": "100%", "borderCollapse": "collapse"}),
     ], style=CARD_STYLE)
 

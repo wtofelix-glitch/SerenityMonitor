@@ -43,15 +43,28 @@ class ReportStatus(Enum):
 
 @dataclass
 class AuditEquation:
+    """审计方程 — reported_passed 可为 None 表示报告未包含此检查。"""
     name: str = ""
     expression: str = ""
-    reported_passed: bool = True
+    reported_passed: bool | None = None
     recalculated_passed: bool = True
     operands: dict = field(default_factory=dict)
 
     @property
     def mismatch(self) -> bool:
+        """reported=None 时不产生 mismatch（无可比较对象）。"""
+        if self.reported_passed is None:
+            return False
         return self.reported_passed != self.recalculated_passed
+
+
+@dataclass
+class TimingInvariant:
+    """全周期计时不变量: 每个 cycle_duration_ms >= http_duration_ms。"""
+    checked_cycles: int = 0
+    violations: int = 0
+    status: str = "PASS"  # PASS | FAIL
+    violating_sequences: list = field(default_factory=list)
 
 
 @dataclass
@@ -132,6 +145,7 @@ class B2DashboardViewModel:
     safety_guard_failed: int = 0
 
     audit_equations: list = field(default_factory=list)
+    timing_invariant: TimingInvariant = field(default_factory=TimingInvariant)
     cycle_count: int = 0
     cycle_records_summary: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
@@ -337,32 +351,35 @@ class B2ReportProvider:
         eqs = []
 
         def _add(name, expr, reported_ok, recalc, ops):
+            """reported_ok=None → reported_passed=None (UNKNOWN, 不产生 mismatch)。"""
+            rp = None if reported_ok is None else bool(reported_ok)
             eqs.append(AuditEquation(
                 name=name, expression=expr,
-                reported_passed=bool(reported_ok),
+                reported_passed=rp,
                 recalculated_passed=recalc,
                 operands=ops))
 
+        # 8 arithmetic audit equations — reported_passed=None if key missing
         _add("scheduling", "planned = started + skipped + not_due",
-             data.get("audit_scheduling_ok", True),
+             data.get("audit_scheduling_ok"),
              vm.cycles_planned == vm.cycles_started + vm.cycles_skipped + vm.not_due_cycles,
              {"planned": vm.cycles_planned, "started": vm.cycles_started,
               "skipped": vm.cycles_skipped, "not_due": vm.not_due_cycles})
 
         _add("started", "started = completed + aborted",
-             data.get("audit_started_ok", True),
+             data.get("audit_started_ok"),
              vm.cycles_started == vm.cycles_completed + vm.cycles_aborted,
              {"started": vm.cycles_started, "completed": vm.cycles_completed,
               "aborted": vm.cycles_aborted})
 
         _add("data", "raw = accepted + rejected + quarantined",
-             data.get("audit_data_ok", True),
+             data.get("audit_data_ok"),
              vm.raw_received == vm.normalized_accepted + vm.normalized_rejected + vm.quarantined,
              {"raw": vm.raw_received, "accepted": vm.normalized_accepted,
               "rejected": vm.normalized_rejected, "quarantined": vm.quarantined})
 
         _add("event", "accepted = created + dedup + not_triggered + proc_failed",
-             data.get("audit_event_ok", True),
+             data.get("audit_event_ok"),
              vm.normalized_accepted == (vm.events_created + vm.events_deduplicated +
                                         vm.events_not_triggered + vm.event_processing_failed),
              {"accepted": vm.normalized_accepted, "created": vm.events_created,
@@ -370,19 +387,19 @@ class B2ReportProvider:
               "proc_failed": vm.event_processing_failed})
 
         _add("ACTION", "candidate = effective + downgraded + rejected",
-             data.get("audit_action_ok", True),
+             data.get("audit_action_ok"),
              vm.candidate_ACTION == vm.effective_ACTION + vm.ACTION_downgraded + vm.ACTION_rejected,
              {"candidate": vm.candidate_ACTION, "effective": vm.effective_ACTION,
               "downgraded": vm.ACTION_downgraded, "rejected": vm.ACTION_rejected})
 
         _add("ledger", "claimed = completed + failed + in_progress",
-             data.get("audit_ledger_ok", True),
+             data.get("audit_ledger_ok"),
              vm.ledger_claimed == vm.ledger_completed + vm.ledger_failed + vm.ledger_in_progress,
              {"claimed": vm.ledger_claimed, "completed": vm.ledger_completed,
               "failed": vm.ledger_failed, "in_progress": vm.ledger_in_progress})
 
         _add("COMPLETED", "COMPLETED = WITH_SIGNAL + NO_SIGNAL",
-             data.get("audit_completed_breakdown_ok", True),
+             data.get("audit_completed_breakdown_ok"),
              vm.ledger_completed == vm.ledger_completed_with_signal + vm.ledger_completed_no_signal,
              {"COMPLETED": vm.ledger_completed,
               "WITH_SIGNAL": vm.ledger_completed_with_signal,
@@ -393,9 +410,26 @@ class B2ReportProvider:
                 vm.signal_failed + vm.ledger_failed_count + vm.report_failed +
                 vm.scheduler_failed + vm.session_check_failed + vm.safety_guard_failed)
         _add("failure_sum", "total_failures = sum(failure_types)",
-             data.get("audit_failure_sum_ok", True),
+             data.get("audit_failure_sum_ok"),
              vm.total_failures == fsum,
              {"total": vm.total_failures, "sum_of_types": fsum})
+
+        # 9th check: cross-cycle timing invariant
+        cycle_records = data.get("cycle_records", data.get("cycle_records_summary", []))
+        checked = 0
+        violating_seqs: list = []
+        for cr in cycle_records:
+            http_ms = cr.get("http_duration_ms", cr.get("http_ms", 0))
+            cycle_ms = cr.get("cycle_duration_ms", cr.get("cycle_ms", 0))
+            checked += 1
+            if cycle_ms < http_ms:
+                violating_seqs.append(cr.get("cycle_sequence", cr.get("seq", 0)))
+        vm.timing_invariant = TimingInvariant(
+            checked_cycles=checked,
+            violations=len(violating_seqs),
+            status="PASS" if len(violating_seqs) == 0 else "FAIL",
+            violating_sequences=violating_seqs,
+        )
 
         return eqs
 
