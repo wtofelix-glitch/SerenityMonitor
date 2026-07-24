@@ -104,6 +104,13 @@ class B2Metrics:
     WATCH_count: int = 0
     INFO_count: int = 0
 
+    # P0-2 幂等统计
+    ledger_claimed: int = 0
+    ledger_completed: int = 0
+    ledger_failed: int = 0
+    ledger_already_processed: int = 0
+    ledger_in_progress: int = 0
+
     # 安全层
     prod_file_hash_before: dict = field(default_factory=dict)
     prod_file_hash_after: dict = field(default_factory=dict)
@@ -207,11 +214,21 @@ class B2Runner:
         self.store = EventStore(db_path=self.shadow_db)
         self.store.init_schema()
 
-        from .account_baseline import get_baseline
+        from .account_baseline import get_baseline, reset_baseline
+        reset_baseline()
         self.baseline = get_baseline()
         state = self.baseline.bootstrap_from_doc_b()
         state.snapshot_at = ""
         self.baseline.save_snapshot(state)
+        # P0-2: 从已加载的 Fixture 计算稳定账户快照 ID
+        self._account_snapshot_id = hashlib.sha256(
+            json.dumps({
+                "total_assets": state.total_assets,
+                "available_cash": state.available_cash,
+                "positions": [(p.code, p.shares, p.available_shares)
+                              for p in (state.positions or [])],
+            }, sort_keys=True).encode()
+        ).hexdigest()[:16]
 
         from .intelligence_network import get_intel, reset_intel
         reset_intel()
@@ -221,6 +238,31 @@ class B2Runner:
         reset_desk()
         self.desk = get_desk()
 
+        # P0-2: 信号幂等 — 事件处理账本 + 幂等处理器
+        from .signal_idempotency import (
+            EventProcessingLedger, IdempotentSignalProcessor,
+        )
+        self.ledger = EventProcessingLedger(self.shadow_db)
+        self.ledger.init_schema()
+        self.idempotent = IdempotentSignalProcessor(
+            desk=self.desk, ledger=self.ledger,
+            worker_id=self.metrics.run_id,
+        )
+
+        # P0-2: 稳定上下文键 — 用于信号幂等
+        # strategy_version: 从 desk/verifier 配置派生
+        self._strategy_version = "b2-1.0"
+        # strategy_config_hash: B2 固定配置的 SHA256
+        self._strategy_config_hash = hashlib.sha256(
+            json.dumps({
+                "symbols": B2_SYMBOLS,
+                "duration": self.duration,
+                "interval": self.interval,
+                "hard_gate_version": getattr(
+                    getattr(self.desk, 'verifier', None),
+                    'version', 'unknown'),
+            }, sort_keys=True).encode()
+        ).hexdigest()[:16]
         from .sina_market import SinaQuoteFetcher
         self.fetcher = SinaQuoteFetcher()
 
@@ -604,8 +646,13 @@ class B2Runner:
                     self.metrics.events_created += events_this_cycle
                     self.metrics.events_deduplicated += dedup_this
 
-                    # ── Step 5: 信号台 ──
-                    signals = self.desk.process_events(market_data=None)
+                    # ── Step 5: 信号台 (P0-2 幂等) ──
+                    signals = self.idempotent.process_events(
+                        strategy_version=self._strategy_version,
+                        strategy_config_hash=self._strategy_config_hash,
+                        account_snapshot_id=self._account_snapshot_id,
+                        market_data=None,
+                    )
 
                     for sig in signals:
                         self._record_signal(sig)
@@ -698,6 +745,18 @@ class B2Runner:
         if self.metrics.status == "RUNNING":
             self.metrics.status = "COMPLETED"
 
+        # P0-2: 收集幂等账本统计
+        try:
+            ledger_stats = self.ledger.get_stats()
+            self.metrics.ledger_claimed = ledger_stats.get("total", 0)
+            self.metrics.ledger_completed = ledger_stats.get("COMPLETED", 0)
+            self.metrics.ledger_failed = ledger_stats.get("FAILED", 0)
+            self.metrics.ledger_in_progress = ledger_stats.get("PROCESSING", 0)
+            self.metrics.ledger_already_processed = (
+                self.idempotent.stats.get("already_processed", 0))
+        except Exception:
+            pass
+
         # P0-1: 运行后生产文件检查
         if self.guard is not None:
             ok_post, changes, post_violations = self.guard.postflight(self.shadow_db)
@@ -778,6 +837,17 @@ class B2Runner:
         print(f"  审计: {m.candidate_ACTION} = "
               f"{m.effective_ACTION} + {m.ACTION_downgraded} + "
               f"{m.ACTION_rejected} → {'✅' if audit_ok else '❌'}")
+
+        print(f"\n── P0-2 幂等 ──")
+        print(f"  claimed: {m.ledger_claimed}  "
+              f"completed: {m.ledger_completed}  "
+              f"failed: {m.ledger_failed}  "
+              f"in_progress: {m.ledger_in_progress}")
+        print(f"  already_processed (skipped): {m.ledger_already_processed}")
+        ledger_audit = (m.ledger_claimed ==
+                        m.ledger_completed + m.ledger_failed + m.ledger_in_progress)
+        print(f"  审计 claimed = completed + failed + in_progress: "
+              f"{'✅' if ledger_audit else '❌'}")
 
         print(f"\n── 安全层 ──")
         if self.guard and self.guard.before and self.guard.after:

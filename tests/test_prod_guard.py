@@ -91,6 +91,10 @@ class TestT01_RejectEmptyProtectedPath:
 
     def test_b2runner_no_protected_db_env_rejects(self):
         """B2Runner 不传 protected_prod_db → verify_environment 返回 guard 未配置。"""
+        from serenity_v2.env import reset_env
+        from serenity_v2.account_baseline import reset_baseline
+        reset_env()
+        reset_baseline()
         from serenity_v2.phase_b2 import B2Runner
 
         runner = B2Runner(duration_seconds=1, interval_seconds=1,
@@ -768,6 +772,10 @@ class TestIntegrationB2RunnerWithGuard:
 
     def test_b2runner_guard_preflight_independent(self, tmp_path):
         """B2Runner.guard.preflight() 独立调用成功（不计时钟模式）。"""
+        from serenity_v2.env import reset_env
+        from serenity_v2.account_baseline import reset_baseline
+        reset_env()
+        reset_baseline()
         from serenity_v2.phase_b2 import B2Runner
         from serenity_v2.clock import reset_clock
 
