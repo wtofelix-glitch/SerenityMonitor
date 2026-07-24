@@ -49,3 +49,4 @@ xcrun_db
 launchd.log
 launchd.log.old
 *.log.old
+.shadow_state.json
