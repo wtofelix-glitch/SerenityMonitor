@@ -57,6 +57,20 @@ class AuditEquation:
             return False
         return self.reported_passed != self.recalculated_passed
 
+    @property
+    def comparison(self) -> str:
+        """UNKNOWN | MATCH | MISMATCH — 报告值与复算值的比较状态。"""
+        if self.reported_passed is None:
+            return "UNKNOWN"
+        if self.reported_passed == self.recalculated_passed:
+            return "MATCH"
+        return "MISMATCH"
+
+    @property
+    def primary_passed(self) -> bool:
+        """主状态 = 复算结果。UNKNOWN 时仍以复算为准。"""
+        return self.recalculated_passed
+
 
 @dataclass
 class TimingInvariant:

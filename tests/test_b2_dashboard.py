@@ -759,3 +759,81 @@ class TestReportedPassedNull:
             assert "UNKNOWN" in html_str
         finally:
             os.unlink(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════
+# AC-17: 双维度展示 (Review Round 2)
+# ══════════════════════════════════════════════════════════════
+
+class TestAuditComparisonSemantics:
+    """Primary = recalculated; Comparison = UNKNOWN/MATCH/MISMATCH."""
+
+    # ── comparison property ──
+
+    def test_comparison_unknown_when_reported_none(self):
+        eq = AuditEquation(reported_passed=None, recalculated_passed=True)
+        assert eq.comparison == "UNKNOWN"
+        assert eq.mismatch is False
+
+    def test_comparison_match_when_both_true(self):
+        eq = AuditEquation(reported_passed=True, recalculated_passed=True)
+        assert eq.comparison == "MATCH"
+        assert eq.mismatch is False
+
+    def test_comparison_match_when_both_false(self):
+        eq = AuditEquation(reported_passed=False, recalculated_passed=False)
+        assert eq.comparison == "MATCH"
+        assert eq.mismatch is False
+
+    def test_comparison_mismatch_when_reported_true_recalc_false(self):
+        eq = AuditEquation(reported_passed=True, recalculated_passed=False)
+        assert eq.comparison == "MISMATCH"
+        assert eq.mismatch is True
+
+    def test_comparison_mismatch_when_reported_false_recalc_true(self):
+        eq = AuditEquation(reported_passed=False, recalculated_passed=True)
+        assert eq.comparison == "MISMATCH"
+        assert eq.mismatch is True
+
+    # ── primary_passed = recalculated (ground truth) ──
+
+    def test_primary_passed_true_when_recalc_true(self):
+        eq = AuditEquation(reported_passed=None, recalculated_passed=True)
+        assert eq.primary_passed is True
+
+    def test_primary_passed_false_when_recalc_false(self):
+        eq = AuditEquation(reported_passed=None, recalculated_passed=False)
+        assert eq.primary_passed is False
+        # NOT mismatch — primary is recalculated, comparison is UNKNOWN
+
+    def test_unknown_does_not_hide_recalc_fail(self):
+        """reported=None + recalc=False → FAIL (not hidden behind UNKNOWN)."""
+        eq = AuditEquation(reported_passed=None, recalculated_passed=False)
+        assert eq.primary_passed is False      # FAIL
+        assert eq.comparison == "UNKNOWN"      # no report to compare
+        assert eq.mismatch is False            # not a mismatch (nothing to compare against)
+
+    # ── ViewModel integration ──
+
+    def test_viewmodel_all_audit_passed_uses_primary(self):
+        """all_audit_passed is based on recalculated, not reported."""
+        vm = _provider().load("sample_report_ok.json")
+        # Fixture: all 8 equations recalc-pass, all reported=ok → all_audit_passed=True
+        assert vm.all_audit_passed is True
+        for eq in vm.audit_equations:
+            assert eq.primary_passed is True
+            assert eq.comparison == "MATCH"
+
+    def test_tab_shows_primary_and_comparison_columns(self):
+        result = render_b2_tab(
+            report_path="sample_report_ok.json",
+            report_root=str(FIXTURES),
+        )
+        html_str = str(getattr(result, "children", ""))
+        # Primary column header
+        assert "主状态" in html_str
+        # Comparison column header
+        assert "比较" in html_str
+        # Values
+        assert "PASS" in html_str
+        assert "MATCH" in html_str
