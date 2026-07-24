@@ -1,0 +1,50 @@
+{
+  "fixture_version": "1.0.0",
+  "fixture_id": "p0-3-three-basket-20260722",
+  "description": "Serenity 2.0 P0-3 Fixture: 三票固定持仓快照, 数据来源金融街证券截图 2026-07-22 15:00",
+  "account_snapshot_as_of": "2026-07-22T15:00:00+08:00",
+  "cash": 21392.07,
+  "total_assets": 249578.07,
+  "position_market_value": 228186.00,
+  "positions": [
+    {
+      "code": "600487",
+      "name": "亨通光电",
+      "market": "sh",
+      "shares": 1500,
+      "available_shares": 1500,
+      "unsettled_buy_shares": 0,
+      "cost_basis": 55.23,
+      "current_price": 55.12,
+      "market_value": 82680.00,
+      "pnl": -227.29,
+      "pnl_pct": -0.20
+    },
+    {
+      "code": "600176",
+      "name": "中国巨石",
+      "market": "sh",
+      "shares": 2000,
+      "available_shares": 2000,
+      "unsettled_buy_shares": 0,
+      "cost_basis": 38.71,
+      "current_price": 38.70,
+      "market_value": 77400.00,
+      "pnl": -77.02,
+      "pnl_pct": -0.03
+    },
+    {
+      "code": "000988",
+      "name": "华工科技",
+      "market": "sz",
+      "shares": 600,
+      "available_shares": 600,
+      "unsettled_buy_shares": 0,
+      "cost_basis": 122.716,
+      "current_price": 113.51,
+      "market_value": 68106.00,
+      "pnl": -5574.01,
+      "pnl_pct": -7.50
+    }
+  ]
+}

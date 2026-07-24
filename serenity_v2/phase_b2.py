@@ -54,8 +54,82 @@ B2_FORBIDDEN_SESSIONS = {
 # ---------------------------------------------------------------------------
 
 @dataclass
+class CycleRecord:
+    """P0-4: 每周期完整计时和结果数据。"""
+
+    cycle_sequence: int = 0
+
+    # ── 壁钟时间戳 (CST ISO) ──
+    scheduled_at: str = ""
+    cycle_started_at: str = ""
+    request_started_at: str = ""
+    response_received_at: str = ""
+    normalization_completed_at: str = ""
+    events_completed_at: str = ""
+    signals_completed_at: str = ""
+    cycle_completed_at: str = ""
+
+    # ── 单调时钟 (time.monotonic, 用于精确间隔) ──
+    scheduled_mono: float = 0.0
+    cycle_started_mono: float = 0.0
+    request_started_mono: float = 0.0
+    response_received_mono: float = 0.0
+    normalization_completed_mono: float = 0.0
+    events_completed_mono: float = 0.0
+    signals_completed_mono: float = 0.0
+    cycle_completed_mono: float = 0.0
+
+    # ── 计算间隔 (ms) ──
+    schedule_delay_ms: float = 0.0
+    http_duration_ms: float = 0.0
+    normalization_duration_ms: float = 0.0
+    event_duration_ms: float = 0.0
+    signal_duration_ms: float = 0.0
+    cycle_duration_ms: float = 0.0
+
+    # ── 结果 ──
+    status: str = "PENDING"  # COMPLETED / FAILED / SKIPPED / ABORTED
+    primary_failure_type: str = ""
+    secondary_failure_types: list = field(default_factory=list)
+
+    # ── 计数 ──
+    http_responses: int = 0
+    raw_quote_records: int = 0
+    normalized_accepted: int = 0
+    normalized_rejected: int = 0
+    quarantined: int = 0
+    events_created: int = 0
+    events_deduplicated: int = 0
+    signals_created: int = 0
+    signals_skipped: int = 0
+
+    # ── 拒绝明细 ──
+    rejections: list = field(default_factory=list)
+
+    # ── 验证 ──
+    def validate_timing_invariants(self) -> list[str]:
+        violations = []
+        if self.request_started_mono > 0 and self.cycle_started_mono > 0:
+            if self.request_started_mono < self.cycle_started_mono:
+                violations.append("cycle_started > request_started")
+        if self.response_received_mono > 0 and self.request_started_mono > 0:
+            if self.response_received_mono < self.request_started_mono:
+                violations.append("request_started > response_received")
+        if self.cycle_completed_mono > 0 and self.response_received_mono > 0:
+            if self.cycle_completed_mono < self.response_received_mono:
+                violations.append("response_received > cycle_completed")
+        if self.cycle_duration_ms > 0 and self.http_duration_ms > 0:
+            if self.cycle_duration_ms < self.http_duration_ms - 0.5:
+                violations.append(
+                    f"cycle_duration({self.cycle_duration_ms:.1f}ms) "
+                    f"< http_duration({self.http_duration_ms:.1f}ms)"
+                )
+        return violations
+
+
+@dataclass
 class B2Metrics:
-    """Phase B2 综合指标。"""
+    """Phase B2 综合指标 (P0-4 扩展)。"""
 
     run_id: str = ""
     started_at: str = ""
@@ -63,22 +137,32 @@ class B2Metrics:
     duration_seconds: float = 0
     status: str = "PENDING"
 
-    # 调度层
+    # ── 调度层 (P0-4 扩展) ──
     cycles_planned: int = 0
+    cycles_started: int = 0
     cycles_completed: int = 0
     cycles_skipped: int = 0
+    cycles_aborted: int = 0
     cycles_overlapped: int = 0
     cycles_failed: int = 0
+    not_due_cycles: int = 0
 
-    # HTTP + 周期计时
+    # ── HTTP + 周期计时 ──
     requests_total: int = 0
     requests_success: int = 0
     requests_failed: int = 0
     http_response_times_ms: list = field(default_factory=list)
     cycle_times_ms: list = field(default_factory=list)
+    schedule_delay_ms_values: list = field(default_factory=list)
+    normalization_duration_ms_values: list = field(default_factory=list)
+    event_duration_ms_values: list = field(default_factory=list)
+    signal_duration_ms_values: list = field(default_factory=list)
+    raw_http_attempt_times_ms: list = field(default_factory=list)
 
-    # 行情层
-    raw_received: int = 0
+    # ── 行情层 ──
+    http_responses: int = 0
+    raw_received: int = 0          # 保留兼容名 = raw_quote_records
+    raw_quote_records: int = 0
     raw_stored: int = 0
     raw_duplicates: int = 0
     normalized_accepted: int = 0
@@ -89,13 +173,18 @@ class B2Metrics:
     quarantine_details: list = field(default_factory=list)
     data_age_ms_values: list = field(default_factory=list)
 
-    # 事件层
+    # ── 事件层 (P0-4 扩展) ──
     events_created: int = 0
     events_deduplicated: int = 0
     events_quarantined: int = 0
+    events_not_triggered: int = 0
+    event_processing_failed: int = 0
 
-    # 信号层
+    # ── 信号层 (P0-4 扩展) ──
     signals_total: int = 0
+    signals_created_unique: int = 0
+    signals_skipped_idempotent: int = 0
+    signals_no_decision: int = 0
     candidate_ACTION: int = 0
     effective_ACTION: int = 0
     ACTION_downgraded: int = 0
@@ -104,14 +193,30 @@ class B2Metrics:
     WATCH_count: int = 0
     INFO_count: int = 0
 
-    # P0-2 幂等统计
+    # ── P0-4 失败类型拆分 ──
+    scheduler_failed: int = 0
+    session_check_failed: int = 0
+    fetch_failed: int = 0
+    http_failed: int = 0
+    parse_failed: int = 0
+    validation_failed: int = 0
+    normalization_failed: int = 0
+    quarantine_failed: int = 0
+    event_failed: int = 0
+    signal_failed: int = 0
+    ledger_failed: int = 0
+    report_failed: int = 0
+    safety_guard_failed: int = 0
+    total_failures: int = 0
+
+    # ── P0-2 幂等统计 ──
     ledger_claimed: int = 0
     ledger_completed: int = 0
-    ledger_failed: int = 0
+    ledger_failed_count: int = 0
     ledger_already_processed: int = 0
     ledger_in_progress: int = 0
 
-    # 安全层
+    # ── 安全层 ──
     prod_file_hash_before: dict = field(default_factory=dict)
     prod_file_hash_after: dict = field(default_factory=dict)
     real_push_count: int = 0
@@ -119,17 +224,20 @@ class B2Metrics:
     account_modifications: int = 0
     non_whitelist_network: int = 0
 
-    # 自动停止
+    # ── 自动停止 ──
     auto_stop_triggered: bool = False
     auto_stop_reason: str = ""
     signal_generation_suspended: bool = False
-    session_boundary_reached: bool = False  # 运行中触及时段边界
+    session_boundary_reached: bool = False
     session_at_boundary: str = ""
 
-    # 每周期市场时段记录
+    # ── 每周期市场时段记录 ──
     cycle_sessions: list = field(default_factory=list)
 
-    # 明细
+    # ── 每周期明细 (P0-4) ──
+    cycle_records: list = field(default_factory=list)
+
+    # ── 明细 ──
     signal_details: list = field(default_factory=list)
     violations: list = field(default_factory=list)
 
@@ -225,21 +333,30 @@ class B2Runner:
         self.store = EventStore(db_path=self.shadow_db)
         self.store.init_schema()
 
+        # P0-3: 从 Fixture JSON 加载账户上下文
+        from .account_fixture import (
+            load_and_set_fixture, to_account_state,
+            FIXTURE_SIGNAL_TAGS,
+        )
         from .account_baseline import get_baseline, reset_baseline
         reset_baseline()
         self.baseline = get_baseline()
-        state = self.baseline.bootstrap_from_doc_b()
+
+        fixture_path = self.shadow_dir.parent / "b2" / "account_fixture.json"
+        if not fixture_path.exists():
+            fixture_path = ROOT / "shadow_data" / "b2" / "account_fixture.json"
+        if not fixture_path.exists():
+            fixture_path = ROOT / "tests" / "fixtures" / "b2" / "account_fixture_20260722.json"
+        self._fixture = load_and_set_fixture(fixture_path)
+
+        state = to_account_state(self._fixture)
         state.snapshot_at = ""
         self.baseline.save_snapshot(state)
-        # P0-2: 从已加载的 Fixture 计算稳定账户快照 ID
-        self._account_snapshot_id = hashlib.sha256(
-            json.dumps({
-                "total_assets": state.total_assets,
-                "available_cash": state.available_cash,
-                "positions": [(p.code, p.shares, p.available_shares)
-                              for p in (state.positions or [])],
-            }, sort_keys=True).encode()
-        ).hexdigest()[:16]
+
+        # P0-3: account_snapshot_id 使用完整 SHA-256 (64 hex, 用于幂等键)
+        # 短 ID 用于显示 (16 hex)
+        self._account_snapshot_id = self._fixture.snapshot_id_full
+        self._account_snapshot_id_short = self._fixture.snapshot_id
 
         from .intelligence_network import get_intel, reset_intel
         reset_intel()
@@ -308,6 +425,13 @@ class B2Runner:
             "trade_adapter": "disabled" if env.broker_adapter is None else "PRESENT ⚠",
             "account_state_mode": "FIXTURE",
             "account_state_stale": "true",
+            "account_snapshot_id": self._account_snapshot_id,
+            "account_snapshot_as_of": (
+                self._fixture.snapshot_as_of if hasattr(self, '_fixture') else "N/A"
+            ),
+            "fixture_file_hash": (
+                self._fixture.file_hash[:16] + "..." if hasattr(self, '_fixture') else "N/A"
+            ),
         }
 
         # 0. 时钟必须为真实时钟
@@ -417,12 +541,13 @@ class B2Runner:
 
     def _record_signal(self, sig) -> None:
         self.metrics.signals_total += 1
+        self.metrics.signals_created_unique += 1
         cand = sig.candidate_signal_level
         eff = sig.effective_signal_level
 
         # 注入 FIXTURE 账户上下文标签（B2 影子链路永远不应用于实盘）
         tags = sig.execution_tags or []
-        for tag in ("ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE"):
+        for tag in ("ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE", "NOT_FOR_EXECUTION"):
             if tag not in tags:
                 tags.append(tag)
         sig.execution_tags = tags
@@ -443,6 +568,8 @@ class B2Runner:
             self.metrics.WATCH_count += 1
         elif eff == "INFO":
             self.metrics.INFO_count += 1
+        elif eff in ("HOLD", "NONE", ""):
+            self.metrics.signals_no_decision += 1
 
         self.metrics.signal_details.append({
             "signal_id": sig.signal_id,
@@ -521,6 +648,8 @@ class B2Runner:
         print(f"  safe windows:   CONTINUOUS_AM 09:30-11:30 / "
               f"CONTINUOUS_PM 13:00-14:57")
         print(f"  account:        FIXTURE (快照 as_of 7月22日, stale=true)")
+        print(f"  snapshot_id:    {self._account_snapshot_id}")
+        print(f"  fixture:        {getattr(self._fixture, 'fixture_id', 'N/A')}")
         print(f"{'='*70}\n")
 
         try:
@@ -570,8 +699,28 @@ class B2Runner:
                 cycle += 1
                 self._cycle_count = cycle
                 scheduled_mono = next_cycle_mono
+                self.metrics.cycles_started += 1
+
+                # ── P0-4: 每周期计时 ──
+                cycle_started_mono = _time.monotonic()
+                cycle_started_dt = datetime.now(tz=CST)
+                schedule_delay_ms = (cycle_started_mono - scheduled_mono) * 1000.0
+                self.metrics.schedule_delay_ms_values.append(max(0, schedule_delay_ms))
+
+                cr = CycleRecord(cycle_sequence=cycle)
+                cr.scheduled_mono = scheduled_mono
+                # scheduled_at 由 start_mono + (cycle-1)*interval 推导
+                from datetime import timedelta
+                run_start_dt = datetime.fromisoformat(self.metrics.started_at)
+                cr.scheduled_at = (run_start_dt + timedelta(seconds=(cycle - 1) * self.interval)).isoformat(timespec="milliseconds")
+                cr.cycle_started_mono = cycle_started_mono
+                cr.cycle_started_at = cycle_started_dt.isoformat(timespec="milliseconds")
+                cr.schedule_delay_ms = max(0, schedule_delay_ms)
+
                 request_start_mono = _time.monotonic()
                 request_start_dt = datetime.now(tz=CST)
+                cr.request_started_mono = request_start_mono
+                cr.request_started_at = request_start_dt.isoformat(timespec="milliseconds")
 
                 bt = clock.now().isoformat(timespec="seconds")
                 print(f"\n[{cycle:03d}] {request_start_dt.strftime('%H:%M:%S')} "
@@ -583,12 +732,25 @@ class B2Runner:
                     request_end_mono = _time.monotonic()
                     http_time_ms = (request_end_mono - request_start_mono) * 1000.0
 
+                    cr.response_received_mono = request_end_mono
+                    cr.response_received_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.http_duration_ms = http_time_ms
+
                     self.metrics.requests_total += 1
+                    self.metrics.http_responses += 1
                     self.metrics.http_response_times_ms.append(http_time_ms)
+                    self.metrics.raw_http_attempt_times_ms.append(http_time_ms)
 
                     if not raw_records:
                         self._consecutive_failures += 1
                         self.metrics.requests_failed += 1
+                        self.metrics.fetch_failed += 1
+                        cr.status = "FAILED"
+                        cr.primary_failure_type = "fetch_failed"
+                        cr.cycle_completed_mono = _time.monotonic()
+                        cr.cycle_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                        cr.cycle_duration_ms = (cr.cycle_completed_mono - cycle_started_mono) * 1000.0
+                        self.metrics.cycle_records.append(cr)
                         print(f"❌ 无数据")
                         if self._consecutive_failures >= B2_MAX_CONSECUTIVE_FAILURES:
                             self._auto_stop(f"连续 {B2_MAX_CONSECUTIVE_FAILURES} 次无数据")
@@ -616,15 +778,36 @@ class B2Runner:
                                 self.metrics.data_age_ms_values.append(nq.data_age_ms)
 
                     ns = store_normalized(self.shadow_db, norms)
+                    cr.raw_quote_records = len(raw_records)
+                    cr.normalized_accepted = sum(1 for nq in norms if nq.validation_status == "valid")
+                    cr.normalized_rejected = sum(1 for nq in norms if nq.validation_status != "valid")
+
                     for nq in norms:
                         if nq.validation_status == "valid":
                             self.metrics.normalized_accepted += 1
                         else:
                             self.metrics.normalized_rejected += 1
+                            cr.rejections.append({
+                                "symbol": nq.symbol,
+                                "source_timestamp": getattr(nq, 'source_timestamp', ''),
+                                "collected_at": cr.cycle_started_at,
+                                "validation_reason": "; ".join(nq.validation_errors),
+                                "raw_payload_sha256": hashlib.sha256(
+                                    str(getattr(nq, 'raw_payload', '')).encode()
+                                ).hexdigest()[:16] if hasattr(nq, 'raw_payload') else "",
+                                "cycle_sequence": cycle,
+                            })
                         if nq.stale_for_trading:
                             self.metrics.stale_count += 1
                         if "future_timestamp" in nq.validation_errors:
                             self.metrics.future_timestamp_count += 1
+
+                    # P0-4: 标准化完成时间
+                    cr.normalization_completed_mono = _time.monotonic()
+                    cr.normalization_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.normalization_duration_ms = (
+                        cr.normalization_completed_mono - cr.response_received_mono) * 1000.0
+                    self.metrics.normalization_duration_ms_values.append(cr.normalization_duration_ms)
 
                     rejected = len(norms) - ns
 
@@ -658,6 +841,18 @@ class B2Runner:
                     dedup_this = max(0, len(norms) - quarantined_this_cycle - events_this_cycle)
                     self.metrics.events_created += events_this_cycle
                     self.metrics.events_deduplicated += dedup_this
+                    self.metrics.events_not_triggered += max(0, len(norms) - quarantined_this_cycle - events_this_cycle - dedup_this)
+
+                    cr.events_created = events_this_cycle
+                    cr.events_deduplicated = dedup_this
+                    cr.quarantined = quarantined_this_cycle
+
+                    # P0-4: 事件处理完成时间
+                    cr.events_completed_mono = _time.monotonic()
+                    cr.events_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.event_duration_ms = (
+                        cr.events_completed_mono - cr.normalization_completed_mono) * 1000.0
+                    self.metrics.event_duration_ms_values.append(cr.event_duration_ms)
 
                     # ── Step 5: 信号台 (P0-2 幂等) ──
                     signals = self.idempotent.process_events(
@@ -670,10 +865,28 @@ class B2Runner:
                     for sig in signals:
                         self._record_signal(sig)
 
+                    # P0-4: 信号处理完成时间
+                    cr.signals_completed_mono = _time.monotonic()
+                    cr.signals_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.signal_duration_ms = (
+                        cr.signals_completed_mono - cr.events_completed_mono) * 1000.0
+                    self.metrics.signal_duration_ms_values.append(cr.signal_duration_ms)
+                    cr.signals_created = len(signals)
+                    cr.signals_skipped = self.idempotent.stats.get("already_processed", 0)
+                    cr.http_responses = 1
+
                     # ── Step 6: 周期计时 ──
                     cycle_end_mono = _time.monotonic()
                     cycle_time_ms = (cycle_end_mono - request_start_mono) * 1000.0
                     self.metrics.cycle_times_ms.append(cycle_time_ms)
+
+                    # P0-4: 周期完成
+                    cr.cycle_completed_mono = cycle_end_mono
+                    cr.cycle_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.cycle_duration_ms = (cycle_end_mono - cycle_started_mono) * 1000.0
+                    cr.status = "COMPLETED"
+                    self.metrics.cycle_records.append(cr)
+                    self.metrics.cycles_completed += 1
 
                     # 自停: 行情年龄超标
                     for nq in norms:
@@ -726,7 +939,36 @@ class B2Runner:
 
                 except Exception as e:
                     self.metrics.cycles_failed += 1
+                    self.metrics.cycles_aborted += 1
                     self._consecutive_failures += 1
+                    # P0-4: 失败类型分类
+                    err_msg = str(e).lower()
+                    if "parse" in err_msg or "json" in err_msg or "decode" in err_msg:
+                        self.metrics.parse_failed += 1
+                        cr.primary_failure_type = "parse_failed"
+                    elif "fetch" in err_msg or "http" in err_msg or "timeout" in err_msg:
+                        self.metrics.http_failed += 1
+                        cr.primary_failure_type = "http_failed"
+                    elif "validate" in err_msg or "valid" in err_msg:
+                        self.metrics.validation_failed += 1
+                        cr.primary_failure_type = "validation_failed"
+                    elif "quarantine" in err_msg:
+                        self.metrics.quarantine_failed += 1
+                        cr.primary_failure_type = "quarantine_failed"
+                    elif "event" in err_msg:
+                        self.metrics.event_failed += 1
+                        cr.primary_failure_type = "event_failed"
+                    elif "signal" in err_msg or "ledger" in err_msg:
+                        self.metrics.signal_failed += 1
+                        cr.primary_failure_type = "signal_failed"
+                    else:
+                        self.metrics.signal_failed += 1
+                        cr.primary_failure_type = "signal_failed"
+                    cr.status = "FAILED"
+                    cr.cycle_completed_mono = _time.monotonic()
+                    cr.cycle_completed_at = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+                    cr.cycle_duration_ms = (cr.cycle_completed_mono - cycle_started_mono) * 1000.0
+                    self.metrics.cycle_records.append(cr)
                     logger.error(f"周期 {cycle} 异常: {e}", exc_info=True)
                     print(f"❌ 异常: {e}")
                     if self._consecutive_failures >= B2_MAX_CONSECUTIVE_FAILURES:
@@ -752,38 +994,53 @@ class B2Runner:
             self.metrics.auto_stop_reason = "user_interrupt"
 
         # 收尾
-        self.metrics.cycles_completed = cycle
+        # 不覆盖 cycles_completed — 已在循环中逐周期计入
+        self.metrics.cycles_planned = max(1, self.duration // self.interval)
         self.metrics.ended_at = datetime.now(tz=CST).isoformat(timespec="seconds")
         self.metrics.duration_seconds = _time.monotonic() - start_mono
         if self.metrics.status == "RUNNING":
             self.metrics.status = "COMPLETED"
+
+        # P0-4: 计算总失败数 = 所有互斥失败类型之和
+        self.metrics.total_failures = (
+            self.metrics.scheduler_failed + self.metrics.session_check_failed
+            + self.metrics.fetch_failed + self.metrics.http_failed
+            + self.metrics.parse_failed + self.metrics.validation_failed
+            + self.metrics.normalization_failed + self.metrics.quarantine_failed
+            + self.metrics.event_failed + self.metrics.signal_failed
+            + self.metrics.ledger_failed + self.metrics.report_failed
+            + self.metrics.safety_guard_failed
+        )
 
         # P0-2: 收集幂等账本统计
         try:
             ledger_stats = self.ledger.get_stats()
             self.metrics.ledger_claimed = ledger_stats.get("total", 0)
             self.metrics.ledger_completed = ledger_stats.get("COMPLETED", 0)
-            self.metrics.ledger_failed = ledger_stats.get("FAILED", 0)
+            self.metrics.ledger_failed_count = ledger_stats.get("FAILED", 0)
             self.metrics.ledger_in_progress = ledger_stats.get("PROCESSING", 0)
             self.metrics.ledger_already_processed = (
                 self.idempotent.stats.get("already_processed", 0))
         except Exception:
-            pass
+            self.metrics.report_failed += 1
 
         # P0-1: 运行后生产文件检查
         if self.guard is not None:
-            ok_post, changes, post_violations = self.guard.postflight(self.shadow_db)
-            if changes:
-                logger.warning(f"生产文件变化: {changes}")
-                for ch in changes:
-                    self.metrics.violations.append(f"生产文件: {ch}")
-            if post_violations:
-                for v in post_violations:
-                    self.metrics.violations.append(v)
-                    self._auto_stop(v)
-            if not ok_post:
-                if self.metrics.status == "COMPLETED":
-                    self.metrics.status = "AUTO_STOPPED"
+            try:
+                ok_post, changes, post_violations = self.guard.postflight(self.shadow_db)
+                if changes:
+                    logger.warning(f"生产文件变化: {changes}")
+                    for ch in changes:
+                        self.metrics.violations.append(f"生产文件: {ch}")
+                if post_violations:
+                    for v in post_violations:
+                        self.metrics.violations.append(v)
+                        self._auto_stop(v)
+                if not ok_post:
+                    if self.metrics.status == "COMPLETED":
+                        self.metrics.status = "AUTO_STOPPED"
+            except Exception:
+                self.metrics.safety_guard_failed += 1
 
         self._print_report()
         return self.metrics
@@ -793,9 +1050,13 @@ class B2Runner:
         http_t = m.http_response_times_ms
         cyc_t = m.cycle_times_ms
         ages = m.data_age_ms_values
+        sched_d = m.schedule_delay_ms_values
+        norm_d = m.normalization_duration_ms_values
+        evt_d = m.event_duration_ms_values
+        sig_d = m.signal_duration_ms_values
 
         print(f"\n{'='*70}")
-        print(f"Phase B2 运行报告")
+        print(f"Phase B2 运行报告 (P0-4)")
         print(f"{'='*70}")
         print(f"  run_id:     {m.run_id}")
         print(f"  status:     {m.status}")
@@ -805,63 +1066,122 @@ class B2Runner:
         if m.auto_stop_triggered:
             print(f"  🚨 自动停止: {m.auto_stop_reason}")
 
-        print(f"\n── 调度层 ──")
-        print(f"  计划: {m.cycles_planned}  完成: {m.cycles_completed}  "
-              f"跳过: {m.cycles_skipped}  重叠: {m.cycles_overlapped}  "
-              f"失败: {m.cycles_failed}")
+        # ── P0-4 调度层 ──
+        print(f"\n── 调度层 (P0-4) ──")
+        print(f"  planned={m.cycles_planned}  started={m.cycles_started}  "
+              f"completed={m.cycles_completed}  skipped={m.cycles_skipped}  "
+              f"aborted={m.cycles_aborted}  failed={m.cycles_failed}  "
+              f"overlapped={m.cycles_overlapped}")
+        sched_audit_1 = m.cycles_planned == m.cycles_started + m.cycles_skipped + m.not_due_cycles
+        sched_audit_2 = m.cycles_started == m.cycles_completed + m.cycles_aborted
+        print(f"  审计 planned=started+skipped+not_due: "
+              f"{m.cycles_planned}={m.cycles_started}+{m.cycles_skipped}+{m.not_due_cycles} "
+              f"→ {'✅' if sched_audit_1 else '❌'}")
+        print(f"  审计 started=completed+aborted: "
+              f"{m.cycles_started}={m.cycles_completed}+{m.cycles_aborted} "
+              f"→ {'✅' if sched_audit_2 else '❌'}")
 
-        print(f"\n── HTTP 层 ──")
-        print(f"  请求: {m.requests_total} (成功 {m.requests_success} / "
-              f"失败 {m.requests_failed})")
+        # ── P0-4 周期计时 ──
+        print(f"\n── 周期计时 (P0-4) ──")
+        print(f"  HTTP responses: {m.http_responses}  "
+              f"请求成功: {m.requests_success} / 失败: {m.requests_failed}")
         if http_t:
-            print(f"  HTTP P50/P95/MAX: {_p50(http_t):.0f}/{_p95(http_t):.0f}/"
-                  f"{max(http_t):.0f}ms")
+            print(f"  HTTP attempt  P50/P95/MAX: {_p50(http_t):.0f}/{_p95(http_t):.0f}/{max(http_t):.0f}ms  (n={len(http_t)})")
+        if sched_d:
+            print(f"  schedule_delay P50/P95/MAX: {_p50(sched_d):.1f}/{_p95(sched_d):.1f}/{max(sched_d):.1f}ms")
+        if norm_d:
+            print(f"  normalization P50/P95/MAX: {_p50(norm_d):.1f}/{_p95(norm_d):.1f}/{max(norm_d):.1f}ms")
+        if evt_d:
+            print(f"  event_proc    P50/P95/MAX: {_p50(evt_d):.1f}/{_p95(evt_d):.1f}/{max(evt_d):.1f}ms")
+        if sig_d:
+            print(f"  signal_proc   P50/P95/MAX: {_p50(sig_d):.1f}/{_p95(sig_d):.1f}/{max(sig_d):.1f}ms")
         if cyc_t:
-            print(f"  Cycle P50/P95/MAX: {_p50(cyc_t):.0f}/{_p95(cyc_t):.0f}/"
-                  f"{max(cyc_t):.0f}ms")
+            print(f"  full_cycle    P50/P95/MAX: {_p50(cyc_t):.0f}/{_p95(cyc_t):.0f}/{max(cyc_t):.0f}ms  (n={len(cyc_t)})")
+        if cyc_t and http_t:
+            for i, (c, h) in enumerate(zip(cyc_t, http_t)):
+                if c < h - 0.5:
+                    print(f"  ❌ cycle[{i}]: cycle({c:.0f}ms) < http({h:.0f}ms) — 违反 cycle_duration >= http_duration")
+                    break
+            else:
+                print(f"  ✅ 所有周期 cycle_duration >= http_duration")
 
+        # ── 行情层 ──
         print(f"\n── 行情层 ──")
         print(f"  raw_received: {m.raw_received}  stored: {m.raw_stored}  "
               f"dup: {m.raw_duplicates}")
         print(f"  norm_accepted: {m.normalized_accepted}  "
-              f"rejected: {m.normalized_rejected}")
-        print(f"  quarantined: {m.quarantined}")
+              f"rejected: {m.normalized_rejected}  quarantined: {m.quarantined}")
+        data_audit = (m.raw_received == m.normalized_accepted + m.normalized_rejected + m.quarantined)
+        print(f"  审计 raw = accepted + rejected + quarantined: "
+              f"{m.raw_received}={m.normalized_accepted}+{m.normalized_rejected}+{m.quarantined} "
+              f"→ {'✅' if data_audit else '❌'}")
         print(f"  stale: {m.stale_count}  future_ts: {m.future_timestamp_count}")
         if ages:
-            print(f"  DataAge P50/P95/MAX: {_p50(ages):.0f}/{_p95(ages):.0f}/"
-                  f"{max(ages):.0f}ms")
+            print(f"  DataAge P50/P95/MAX: {_p50(ages):.0f}/{_p95(ages):.0f}/{max(ages):.0f}ms  (n={len(ages)})")
 
-        print(f"\n── 事件层 ──")
-        print(f"  events_created: {m.events_created}")
-        print(f"  events_deduplicated: {m.events_deduplicated}")
-        print(f"  events_quarantined: {m.events_quarantined}")
+        # ── 事件层 (P0-4) ──
+        print(f"\n── 事件层 (P0-4) ──")
+        print(f"  created: {m.events_created}  deduplicated: {m.events_deduplicated}  "
+              f"quarantined: {m.events_quarantined}  not_triggered: {m.events_not_triggered}  "
+              f"proc_failed: {m.event_processing_failed}")
+        event_audit = (m.normalized_accepted == m.events_created + m.events_deduplicated
+                       + m.events_not_triggered + m.event_processing_failed)
+        print(f"  审计 accepted = created+dedup+not_triggered+proc_failed: "
+              f"{m.normalized_accepted}={m.events_created}+{m.events_deduplicated}"
+              f"+{m.events_not_triggered}+{m.event_processing_failed} "
+              f"→ {'✅' if event_audit else '❌'}")
 
-        print(f"\n── 信号层 ──")
-        print(f"  total: {m.signals_total}  "
-              f"cand_ACTION: {m.candidate_ACTION}  "
-              f"eff_ACTION: {m.effective_ACTION}")
-        print(f"  downgraded: {m.ACTION_downgraded}  "
-              f"rejected: {m.ACTION_rejected}")
-        print(f"  DECISION: {m.DECISION_count}  "
-              f"WATCH: {m.WATCH_count}  INFO: {m.INFO_count}")
+        # ── 信号层 (P0-4) ──
+        print(f"\n── 信号层 (P0-4) ──")
+        print(f"  total: {m.signals_total}  unique: {m.signals_created_unique}  "
+              f"skipped(idempotent): {m.signals_skipped_idempotent}  "
+              f"no_decision: {m.signals_no_decision}")
+        print(f"  cand_ACTION: {m.candidate_ACTION}  eff_ACTION: {m.effective_ACTION}  "
+              f"downgraded: {m.ACTION_downgraded}  rejected: {m.ACTION_rejected}")
+        print(f"  DECISION: {m.DECISION_count}  WATCH: {m.WATCH_count}  INFO: {m.INFO_count}")
+        action_audit = (m.candidate_ACTION == m.effective_ACTION + m.ACTION_downgraded + m.ACTION_rejected)
+        print(f"  审计 candidate = effective + downgraded + rejected: "
+              f"{m.candidate_ACTION}={m.effective_ACTION}+{m.ACTION_downgraded}+{m.ACTION_rejected} "
+              f"→ {'✅' if action_audit else '❌'}")
 
-        audit_ok = (m.candidate_ACTION ==
-                    m.effective_ACTION + m.ACTION_downgraded + m.ACTION_rejected)
-        print(f"  审计: {m.candidate_ACTION} = "
-              f"{m.effective_ACTION} + {m.ACTION_downgraded} + "
-              f"{m.ACTION_rejected} → {'✅' if audit_ok else '❌'}")
-
+        # ── P0-2 幂等 ──
         print(f"\n── P0-2 幂等 ──")
-        print(f"  claimed: {m.ledger_claimed}  "
-              f"completed: {m.ledger_completed}  "
-              f"failed: {m.ledger_failed}  "
-              f"in_progress: {m.ledger_in_progress}")
+        print(f"  claimed: {m.ledger_claimed}  completed: {m.ledger_completed}  "
+              f"failed: {m.ledger_failed_count}  in_progress: {m.ledger_in_progress}")
         print(f"  already_processed (skipped): {m.ledger_already_processed}")
-        ledger_audit = (m.ledger_claimed ==
-                        m.ledger_completed + m.ledger_failed + m.ledger_in_progress)
+        ledger_audit = (m.ledger_claimed == m.ledger_completed + m.ledger_failed_count + m.ledger_in_progress)
         print(f"  审计 claimed = completed + failed + in_progress: "
               f"{'✅' if ledger_audit else '❌'}")
 
+        # ── P0-4 失败分类 ──
+        print(f"\n── P0-4 失败分类 ──")
+        failures = [
+            ("scheduler_failed", m.scheduler_failed),
+            ("session_check_failed", m.session_check_failed),
+            ("fetch_failed", m.fetch_failed),
+            ("http_failed", m.http_failed),
+            ("parse_failed", m.parse_failed),
+            ("validation_failed", m.validation_failed),
+            ("normalization_failed", m.normalization_failed),
+            ("quarantine_failed", m.quarantine_failed),
+            ("event_failed", m.event_failed),
+            ("signal_failed", m.signal_failed),
+            ("ledger_failed", m.ledger_failed),
+            ("report_failed", m.report_failed),
+            ("safety_guard_failed", m.safety_guard_failed),
+        ]
+        nonzero = [(n, c) for n, c in failures if c > 0]
+        if nonzero:
+            for name, count in nonzero:
+                print(f"  {name}: {count}")
+        else:
+            print(f"  (无失败)")
+        fail_sum = sum(c for _, c in failures)
+        fail_audit = m.total_failures == fail_sum
+        print(f"  total_failures: {m.total_failures}  "
+              f"sum(types): {fail_sum} → {'✅' if fail_audit else '❌'}")
+
+        # ── 安全层 ──
         print(f"\n── 安全层 ──")
         if self.guard and self.guard.before and self.guard.after:
             before_main = self.guard.before.main
@@ -899,17 +1219,32 @@ class B2Runner:
     def save_report(self) -> Path:
         report_path = self.shadow_dir / f"{self.metrics.run_id}_report.json"
         data = asdict(self.metrics)
+
+        # P0-4: 保留原始数组以便重算分位数
+        raw_arrays = {}
         for key in list(data.keys()):
             if key.endswith("_times_ms") or key.endswith("_ms_values"):
                 vals = data[key]
+                raw_arrays[key] = vals
                 if vals:
                     data[f"{key}_p50"] = _p50(vals)
                     data[f"{key}_p95"] = _p95(vals)
                     data[f"{key}_max"] = max(vals)
+                    data[f"{key}_n"] = len(vals)
+                else:
+                    data[f"{key}_p50"] = 0
+                    data[f"{key}_p95"] = 0
+                    data[f"{key}_max"] = 0
+                    data[f"{key}_n"] = 0
                 del data[key]
-        # 清理不可序列化字段
-        for k in ("signal_details", "quarantine_details", "violations"):
-            pass  # keep them
+
+        # P0-4: 保留原始周期记录（含重算所需的全部字段）
+        data["_p0_4_raw_cycle_records"] = [
+            asdict(cr) for cr in self.metrics.cycle_records
+        ]
+        data["_p0_4_quantile_method"] = "numpy-style linear interpolation"
+        data["_p0_4_unit"] = "milliseconds"
+
         report_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         logger.info(f"B2 报告已保存: {report_path}")
         return report_path
