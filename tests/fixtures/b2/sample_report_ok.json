@@ -1,0 +1,564 @@
+{
+  "schema_version": "b2-report/1.0-implicit",
+  "run_id": "B2_20260724_093500",
+  "status": "COMPLETED",
+  "started_at": "2026-07-24T09:35:00+08:00",
+  "ended_at": "2026-07-24T09:40:05+08:00",
+  "duration_seconds": 305.0,
+  "source_commit": "149c8ac0",
+  "source_tag": "phase-b2-runner-v9",
+  "environment": "shadow",
+  "market_session": "CONTINUOUS_AM",
+  "_session": "CONTINUOUS_AM",
+  "_commit": "149c8ac0",
+  "_tag": "phase-b2-runner-v9",
+  "cycles_planned": 60,
+  "cycles_started": 58,
+  "cycles_completed": 57,
+  "cycles_failed": 1,
+  "cycles_skipped": 2,
+  "not_due_cycles": 0,
+  "cycles_overlapped": 0,
+  "requests_total": 58,
+  "requests_success": 57,
+  "requests_failed": 1,
+  "http_response_times_ms_p50": 82.5,
+  "http_response_times_ms_p95": 145.2,
+  "http_response_times_ms_max": 312.0,
+  "cycle_times_ms_p50": 251.0,
+  "cycle_times_ms_p95": 410.0,
+  "cycle_times_ms_max": 618.0,
+  "schedule_delay_ms_values_p50": 3.2,
+  "raw_received": 120,
+  "raw_stored": 118,
+  "raw_duplicates": 2,
+  "normalized_accepted": 100,
+  "normalized_rejected": 15,
+  "stale_count": 0,
+  "future_timestamp_count": 0,
+  "quarantined": 5,
+  "data_age_ms_values_p50": 2100.0,
+  "data_age_ms_values_p95": 4800.0,
+  "events_created": 85,
+  "events_deduplicated": 10,
+  "events_not_triggered": 5,
+  "events_quarantined": 0,
+  "event_processing_failed": 0,
+  "signals_total": 42,
+  "signals_created_unique": 42,
+  "signals_skipped_idempotent": 0,
+  "signals_no_decision": 0,
+  "candidate_ACTION": 12,
+  "effective_ACTION": 8,
+  "ACTION_downgraded": 3,
+  "ACTION_rejected": 1,
+  "DECISION_count": 4,
+  "WATCH_count": 15,
+  "INFO_count": 10,
+  "ledger_claimed": 38,
+  "ledger_completed": 38,
+  "ledger_completed_no_signal": 7,
+  "ledger_failed_count": 0,
+  "ledger_in_progress": 0,
+  "ledger_already_processed": 0,
+  "real_push_count": 0,
+  "real_trade_count": 0,
+  "account_modifications": 0,
+  "production_file_changes": false,
+  "missing_safety_tags": 0,
+  "non_whitelist_network": 0,
+  "total_failures": 2,
+  "fetch_failed": 0,
+  "http_failed": 1,
+  "parse_failed": 1,
+  "validation_failed": 0,
+  "normalization_failed": 0,
+  "quarantine_failed": 0,
+  "event_failed": 0,
+  "signal_failed": 0,
+  "report_failed": 0,
+  "scheduler_failed": 0,
+  "session_check_failed": 0,
+  "safety_guard_failed": 0,
+  "audit_scheduling_ok": true,
+  "audit_started_ok": true,
+  "audit_data_ok": true,
+  "audit_event_ok": true,
+  "audit_action_ok": true,
+  "audit_ledger_ok": true,
+  "audit_completed_breakdown_ok": true,
+  "audit_failure_sum_ok": true,
+  "audit_timing_ok": true,
+  "auto_stop_triggered": false,
+  "auto_stop_reason": "",
+  "signal_generation_suspended": false,
+  "session_boundary_reached": false,
+  "session_at_boundary": "",
+  "cycle_records": [
+    {
+      "cycle_sequence": 1,
+      "status": "COMPLETED",
+      "http_duration_ms": 93,
+      "cycle_duration_ms": 309,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 2,
+      "status": "COMPLETED",
+      "http_duration_ms": 90,
+      "cycle_duration_ms": 471,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 3,
+      "status": "COMPLETED",
+      "http_duration_ms": 94,
+      "cycle_duration_ms": 221,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 4,
+      "status": "COMPLETED",
+      "http_duration_ms": 180,
+      "cycle_duration_ms": 246,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 5,
+      "status": "COMPLETED",
+      "http_duration_ms": 183,
+      "cycle_duration_ms": 500,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 6,
+      "status": "COMPLETED",
+      "http_duration_ms": 159,
+      "cycle_duration_ms": 232,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 7,
+      "status": "COMPLETED",
+      "http_duration_ms": 187,
+      "cycle_duration_ms": 233,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 8,
+      "status": "COMPLETED",
+      "http_duration_ms": 166,
+      "cycle_duration_ms": 214,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 9,
+      "status": "COMPLETED",
+      "http_duration_ms": 77,
+      "cycle_duration_ms": 431,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 10,
+      "status": "COMPLETED",
+      "http_duration_ms": 120,
+      "cycle_duration_ms": 407,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 11,
+      "status": "COMPLETED",
+      "http_duration_ms": 130,
+      "cycle_duration_ms": 289,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 12,
+      "status": "COMPLETED",
+      "http_duration_ms": 165,
+      "cycle_duration_ms": 354,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 13,
+      "status": "COMPLETED",
+      "http_duration_ms": 107,
+      "cycle_duration_ms": 475,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 14,
+      "status": "COMPLETED",
+      "http_duration_ms": 155,
+      "cycle_duration_ms": 435,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 15,
+      "status": "COMPLETED",
+      "http_duration_ms": 125,
+      "cycle_duration_ms": 307,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 16,
+      "status": "COMPLETED",
+      "http_duration_ms": 65,
+      "cycle_duration_ms": 387,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 17,
+      "status": "COMPLETED",
+      "http_duration_ms": 126,
+      "cycle_duration_ms": 347,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 18,
+      "status": "COMPLETED",
+      "http_duration_ms": 72,
+      "cycle_duration_ms": 424,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 19,
+      "status": "COMPLETED",
+      "http_duration_ms": 79,
+      "cycle_duration_ms": 293,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 20,
+      "status": "COMPLETED",
+      "http_duration_ms": 196,
+      "cycle_duration_ms": 191,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 21,
+      "status": "COMPLETED",
+      "http_duration_ms": 164,
+      "cycle_duration_ms": 283,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 22,
+      "status": "COMPLETED",
+      "http_duration_ms": 108,
+      "cycle_duration_ms": 257,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 23,
+      "status": "COMPLETED",
+      "http_duration_ms": 153,
+      "cycle_duration_ms": 312,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 24,
+      "status": "COMPLETED",
+      "http_duration_ms": 126,
+      "cycle_duration_ms": 395,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 25,
+      "status": "COMPLETED",
+      "http_duration_ms": 70,
+      "cycle_duration_ms": 356,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 26,
+      "status": "COMPLETED",
+      "http_duration_ms": 175,
+      "cycle_duration_ms": 421,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 27,
+      "status": "COMPLETED",
+      "http_duration_ms": 115,
+      "cycle_duration_ms": 470,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 28,
+      "status": "COMPLETED",
+      "http_duration_ms": 163,
+      "cycle_duration_ms": 489,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 29,
+      "status": "COMPLETED",
+      "http_duration_ms": 76,
+      "cycle_duration_ms": 409,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 30,
+      "status": "COMPLETED",
+      "http_duration_ms": 136,
+      "cycle_duration_ms": 357,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 31,
+      "status": "COMPLETED",
+      "http_duration_ms": 69,
+      "cycle_duration_ms": 183,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 32,
+      "status": "COMPLETED",
+      "http_duration_ms": 182,
+      "cycle_duration_ms": 278,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 33,
+      "status": "COMPLETED",
+      "http_duration_ms": 77,
+      "cycle_duration_ms": 348,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 34,
+      "status": "COMPLETED",
+      "http_duration_ms": 85,
+      "cycle_duration_ms": 252,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 35,
+      "status": "COMPLETED",
+      "http_duration_ms": 122,
+      "cycle_duration_ms": 197,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 36,
+      "status": "COMPLETED",
+      "http_duration_ms": 156,
+      "cycle_duration_ms": 208,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 37,
+      "status": "COMPLETED",
+      "http_duration_ms": 138,
+      "cycle_duration_ms": 208,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 38,
+      "status": "COMPLETED",
+      "http_duration_ms": 134,
+      "cycle_duration_ms": 313,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 39,
+      "status": "COMPLETED",
+      "http_duration_ms": 66,
+      "cycle_duration_ms": 460,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 40,
+      "status": "COMPLETED",
+      "http_duration_ms": 81,
+      "cycle_duration_ms": 224,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 41,
+      "status": "COMPLETED",
+      "http_duration_ms": 132,
+      "cycle_duration_ms": 314,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 42,
+      "status": "FAILED",
+      "http_duration_ms": 113,
+      "cycle_duration_ms": 499,
+      "signals_created": 1,
+      "primary_failure_type": "parse_failed"
+    },
+    {
+      "cycle_sequence": 43,
+      "status": "COMPLETED",
+      "http_duration_ms": 143,
+      "cycle_duration_ms": 477,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 44,
+      "status": "COMPLETED",
+      "http_duration_ms": 200,
+      "cycle_duration_ms": 410,
+      "signals_created": 2,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 45,
+      "status": "COMPLETED",
+      "http_duration_ms": 118,
+      "cycle_duration_ms": 426,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 46,
+      "status": "COMPLETED",
+      "http_duration_ms": 92,
+      "cycle_duration_ms": 247,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 47,
+      "status": "COMPLETED",
+      "http_duration_ms": 147,
+      "cycle_duration_ms": 182,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 48,
+      "status": "COMPLETED",
+      "http_duration_ms": 171,
+      "cycle_duration_ms": 494,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 49,
+      "status": "COMPLETED",
+      "http_duration_ms": 73,
+      "cycle_duration_ms": 496,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 50,
+      "status": "COMPLETED",
+      "http_duration_ms": 180,
+      "cycle_duration_ms": 427,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 51,
+      "status": "COMPLETED",
+      "http_duration_ms": 188,
+      "cycle_duration_ms": 440,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 52,
+      "status": "COMPLETED",
+      "http_duration_ms": 120,
+      "cycle_duration_ms": 418,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 53,
+      "status": "COMPLETED",
+      "http_duration_ms": 141,
+      "cycle_duration_ms": 264,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 54,
+      "status": "COMPLETED",
+      "http_duration_ms": 61,
+      "cycle_duration_ms": 379,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 55,
+      "status": "COMPLETED",
+      "http_duration_ms": 104,
+      "cycle_duration_ms": 481,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 56,
+      "status": "COMPLETED",
+      "http_duration_ms": 121,
+      "cycle_duration_ms": 402,
+      "signals_created": 0,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 57,
+      "status": "COMPLETED",
+      "http_duration_ms": 124,
+      "cycle_duration_ms": 378,
+      "signals_created": 1,
+      "primary_failure_type": ""
+    }
+  ],
+  "prod_file_hash_before": {
+    "serenity.db": "34bfdba8edec1ee314119d70f9cb2c03ff4a11898f35771f37191fed6f65d635"
+  },
+  "prod_file_hash_after": {
+    "serenity.db": "34bfdba8edec1ee314119d70f9cb2c03ff4a11898f35771f37191fed6f65d635"
+  },
+  "signal_details": [],
+  "quarantine_details": [],
+  "violations": []
+}

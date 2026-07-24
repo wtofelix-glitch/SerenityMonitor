@@ -30,6 +30,17 @@ import numpy as np
 from serenity_logger import get_logger
 log = get_logger(__name__)
 
+# ── B2 管线看板 feature flag ───────────────────────────────
+# ENABLE_B2_DASHBOARD=true  启用 B2 Tab
+# B2_REPORT_PATH            报告 JSON 文件路径 (相对或绝对)
+# B2_REPORT_ROOT            报告根目录 (路径安全校验用)
+ENABLE_B2_DASHBOARD = os.environ.get("ENABLE_B2_DASHBOARD", "false").lower() == "true"
+B2_REPORT_PATH = os.environ.get("B2_REPORT_PATH", "")
+B2_REPORT_ROOT = os.environ.get(
+    "B2_REPORT_ROOT",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports"),
+)
+
 # ── 数据源 ────────────────────────────────────────────────────
 from db import get_conn
 from config import STOCK_MAP, get_stock_name
@@ -308,6 +319,16 @@ def fetch_latest_scores():
     return [dict(r) for r in rows]
 
 
+# ═══════════════════════════════════════════════════════════════
+# B2 tab (conditionally included)
+# ═══════════════════════════════════════════════════════════════
+
+_b2_tab: list = []
+if ENABLE_B2_DASHBOARD:
+    _b2_tab = [dcc.Tab(label="🏭 B2 管线", value="tab-b2",
+                       style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE)]
+
+
 # =============================================================
 # 布局
 # =============================================================
@@ -359,6 +380,7 @@ app.layout = html.Div(style={
         dcc.Tab(label="⚖️ 权重对比", value="tab-weight", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
         dcc.Tab(label="📈 执行历史", value="tab-exec", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
         dcc.Tab(label="🛡️ 风控状态", value="tab-risk", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+        *_b2_tab,
 
     ]),
 
@@ -388,7 +410,26 @@ def render_tab(tab, _n):
         return _render_exec_tab()
     elif tab == "tab-risk":
         return _render_risk_tab()
+    elif tab == "tab-b2":
+        return _render_b2_tab()
     return html.Div()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# B2 管线 Tab (feature-flag gated, fault-isolated)
+# ═══════════════════════════════════════════════════════════════════
+
+def _render_b2_tab():
+    """B2 管线 Tab — 完全隔离，失败不影响现有 4 个 Tab。"""
+    try:
+        from dashboard.tabs.b2_pipeline_tab import render_b2_tab
+        return render_b2_tab(report_path=B2_REPORT_PATH, report_root=B2_REPORT_ROOT)
+    except ImportError as e:
+        log.warning(f"B2 tab import failed (non-fatal): {e}")
+        return _error_card(f"⚠️ B2 管线模块未安装或导入失败: {e}")
+    except Exception as e:
+        log.exception(f"B2 tab render failed (non-fatal): {e}")
+        return _error_card(f"⚠️ B2 管线 Tab 渲染失败: {e}")
 
 
 # =============================================================
