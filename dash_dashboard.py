@@ -1166,5 +1166,6 @@ def _update_time(_n):
 # =============================================================
 
 if __name__ == "__main__":
-    log.info("🅳 Serenity Dash 看板启动 — http://localhost:8050")
-    app.run(host="0.0.0.0", port=8050, debug=False)
+    port = int(os.environ.get("DASH_PORT", "8050"))
+    log.info(f"🅳 Serenity Dash 看板启动 — http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
