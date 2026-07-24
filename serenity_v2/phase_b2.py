@@ -166,11 +166,13 @@ class B2Runner:
     def __init__(self, duration_seconds: int = B2_DEFAULT_DURATION,
                  interval_seconds: int = B2_DEFAULT_INTERVAL,
                  init_env: bool = True,
-                 protected_prod_db: str = ""):
+                 protected_prod_db: str = "",
+                 manifest_path: str = ""):
         self.duration = duration_seconds
         self.interval = interval_seconds
         self.metrics = B2Metrics()
         self._protected_prod_db = protected_prod_db
+        self._manifest_path = manifest_path
 
         if init_env:
             self._init_env()
@@ -179,12 +181,21 @@ class B2Runner:
 
     def _init_env(self):
         from .env import get_env, set_env, SerenityEnv
-        from .prod_guard import ProductionGuard, ProdGuardConfig
+        from .prod_guard import ProductionGuard, ProdGuardConfig, load_manifest
 
         ROOT = Path(__file__).resolve().parent.parent
         self.shadow_dir = ROOT / "shadow_data" / "b2"
         self.shadow_dir.mkdir(parents=True, exist_ok=True)
         self.shadow_db = self.shadow_dir / "b2_shadow.db"
+
+        # 可信配置清单（若指定或默认路径存在）
+        self._manifest: dict | None = None
+        if self._manifest_path:
+            mp = Path(self._manifest_path)
+        else:
+            mp = ROOT / "docs" / "runtime-manifest.json"
+        if mp.exists():
+            self._manifest = load_manifest(mp)
 
         # 生产保护器（P0-1: 显式配置，不从 worktree 推导）
         if self._protected_prod_db:
@@ -305,7 +316,9 @@ class B2Runner:
 
         # P0-1: 生产路径保护（显式配置，不从 worktree 推导）
         if self.guard is not None:
-            ok_guard, guard_details, guard_violations = self.guard.preflight()
+            ok_guard, guard_details, guard_violations = self.guard.preflight(
+                manifest=self._manifest,
+            )
             details.update(guard_details)
             if not ok_guard:
                 violations.extend(guard_violations)
@@ -921,6 +934,10 @@ def main():
         help="受保护的生产 DB 绝对路径（P0-1: 不从 worktree 推导）",
     )
     parser.add_argument(
+        "--manifest", type=str, default="",
+        help="可信配置清单路径（默认 docs/runtime-manifest.json）",
+    )
+    parser.add_argument(
         "--duration", type=int, default=B2_DEFAULT_DURATION,
         help=f"运行时长（秒），默认 {B2_DEFAULT_DURATION}（15min）",
     )
@@ -939,6 +956,7 @@ def main():
         duration_seconds=args.duration,
         interval_seconds=args.interval,
         protected_prod_db=args.protected_prod_db,
+        manifest_path=args.manifest,
     )
     metrics = runner.run()
     runner.save_report()

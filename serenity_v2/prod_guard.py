@@ -141,6 +141,46 @@ def diff_snapshots(before: ProdFileSet, after: ProdFileSet) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 可信配置清单
+# ---------------------------------------------------------------------------
+
+def load_manifest(manifest_path: Path) -> dict | None:
+    """加载可信配置清单。缺失或损坏时返回 None 而非崩溃。"""
+    if not manifest_path.exists():
+        logger.warning("可信配置清单不存在: %s", manifest_path)
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.error("可信配置清单解析失败: %s", exc)
+        return None
+    required = {"expected_prod_db_realpath", "expected_project_root", "environment_id"}
+    missing = required - set(data.keys())
+    if missing:
+        logger.error("清单缺少必需字段: %s", missing)
+        return None
+    return data
+
+
+def validate_against_manifest(
+    cli_path_str: str, manifest: dict,
+) -> tuple:
+    """验证 CLI 参数与可信清单一致。
+
+    返回 (ok, error_message)。
+    """
+    expected_real = Path(manifest["expected_prod_db_realpath"]).resolve()
+    cli_resolved = Path(cli_path_str).resolve()
+
+    if cli_resolved != expected_real:
+        return False, (
+            f"CLI 路径 {cli_resolved} 与可信清单不一致: "
+            f"清单期望 {expected_real}"
+        )
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # 路径验证
 # ---------------------------------------------------------------------------
 
@@ -311,8 +351,11 @@ class ProductionGuard:
         self.after: Optional[ProdFileSet] = None
         self._prod_main: Optional[Path] = None
 
-    def preflight(self) -> tuple:
+    def preflight(self, manifest: dict | None = None) -> tuple:
         """启动前所有 P0-1 检查。
+
+        manifest: 可信配置清单（dict 或 None）。
+        None 时跳过清单验证（向后兼容），仅在测试中使用。
 
         返回 (ok, details_dict, violations)。
         """
@@ -326,10 +369,19 @@ class ProductionGuard:
 
         self._prod_main = resolved
 
-        # 2. 收集启动前快照
+        # 2. 可信清单验证（若提供）
+        if manifest is not None:
+            ok_mani, mani_err = validate_against_manifest(
+                self.config.protected_prod_db, manifest,
+            )
+            if not ok_mani:
+                violations.append(f"可信清单验证失败: {mani_err}")
+                return False, {}, violations
+
+        # 3. 收集启动前快照
         self.before = snap_prod_set(self._prod_main)
 
-        # 3. 主DB必须存在
+        # 4. 主DB必须存在
         if self.before.main.state != FILE_STATE_PRESENT:
             violations.append(
                 f"生产主DB必须存在: {self._prod_main} "

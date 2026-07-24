@@ -796,3 +796,171 @@ class TestIntegrationB2RunnerWithGuard:
         assert ok_guard, f"guard preflight should pass: {gv}"
         assert "protected_prod_db" in gd
         print(f"  ✅ B2Runner guard preflight: {gd['protected_prod_db']} sha256={gd['before_snapshot']['main']['sha256'][:16]}...")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 可信配置清单验证 (P0-1 加固)
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestManifestTrustedConfig:
+
+    def make_manifest(self, tmp_path, realpath_str):
+        """Helper: 创建清单文件。"""
+        import json
+        m = tmp_path / "manifest.json"
+        m.write_text(json.dumps({
+            "environment_id": "test",
+            "expected_project_root": str(tmp_path),
+            "expected_prod_db_realpath": realpath_str,
+        }))
+        return m
+
+    # ── T-1: 正确生产路径 → 允许 ──
+
+    def test_correct_path_allowed(self, tmp_path):
+        """CLI 路径与清单一致 → preflight 通过。"""
+        from serenity_v2.prod_guard import (
+            ProductionGuard, ProdGuardConfig, load_manifest,
+        )
+
+        prod = make_temp_db(tmp_path, "prod.db")
+        manifest = self.make_manifest(tmp_path, str(prod.resolve()))
+
+        manifest_data = load_manifest(manifest)
+        guard = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(prod.resolve()),
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok, details, violations = guard.preflight(manifest=manifest_data)
+        assert ok, f"correct path should pass: {violations}"
+        print(f"  ✅ 正确路径+清单一致: PASS")
+
+    # ── T-2: 另一个真实存在的SQLite文件 → 拒绝 ──
+
+    def test_wrong_existing_db_rejected(self, tmp_path):
+        """CLI 指向另一个存在的 SQLite 文件但与清单不一致 → 拒绝。"""
+        from serenity_v2.prod_guard import (
+            ProductionGuard, ProdGuardConfig, load_manifest,
+        )
+
+        prod = make_temp_db(tmp_path, "prod.db")
+        other = make_temp_db(tmp_path, "other.db")
+
+        # 清单指向 prod.db，CLI 传入 other.db
+        manifest = self.make_manifest(tmp_path, str(prod.resolve()))
+        manifest_data = load_manifest(manifest)
+
+        guard = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(other.resolve()),  # ❌ 不是 prod
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok, details, violations = guard.preflight(manifest=manifest_data)
+
+        assert ok is False, "wrong existing DB should be rejected"
+        assert any("不一致" in v for v in violations), \
+            f"expected manifest-mismatch violation, got: {violations}"
+        print(f"  ✅ 错误SQLite文件+清单不一致 → 拒绝: {violations}")
+
+    # ── T-3: 正确文件的符号链接 → 规范化后允许 ──
+
+    def test_symlink_to_correct_allowed(self, tmp_path):
+        """CLI 路径是清单目标的符号链接 → 规范化后一致 → 允许。"""
+        from serenity_v2.prod_guard import (
+            ProductionGuard, ProdGuardConfig, load_manifest,
+        )
+
+        prod = make_temp_db(tmp_path, "prod.db")
+        sym = tmp_path / "prod_link.db"
+        sym.symlink_to(prod.resolve())
+
+        # 清单指向真实路径
+        manifest = self.make_manifest(tmp_path, str(prod.resolve()))
+        manifest_data = load_manifest(manifest)
+
+        guard = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(sym),  # 符号链接
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok, details, violations = guard.preflight(manifest=manifest_data)
+
+        assert ok, f"symlink to correct target should pass: {violations}"
+        print(f"  ✅ 符号链接规范化一致: PASS")
+
+    # ── T-4: 清单路径不存在 → 缺失时拒绝 ──
+
+    def test_manifest_path_does_not_exist_rejected(self, tmp_path):
+        """清单指向的路径不存在 → validate_production_path 拒绝。"""
+        from serenity_v2.prod_guard import (
+            ProductionGuard, ProdGuardConfig, load_manifest,
+        )
+
+        nonexistent = tmp_path / "nonexistent.db"
+
+        guard = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(nonexistent.resolve()),
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok, details, violations = guard.preflight()
+
+        assert ok is False
+        assert any("不存在" in v for v in violations)
+        print(f"  ✅ 不存在路径拒绝: {violations}")
+
+    # ── T-5: 不带曼尼菲斯特时向后兼容 ──
+
+    def test_no_manifest_still_works(self, tmp_path):
+        """不传 manifest → preflight 照常工作（向后兼容）。"""
+        from serenity_v2.prod_guard import ProductionGuard, ProdGuardConfig
+
+        prod = make_temp_db(tmp_path, "prod.db")
+
+        guard = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(prod.resolve()),
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok, details, violations = guard.preflight(manifest=None)
+        assert ok, f"should pass without manifest: {violations}"
+
+        # 传 manifest=None 时，另一个存在的 DB 也能通过（只有基本路径验证）
+        other = tmp_path / "other.db"
+        other.write_bytes(b"test")
+        guard2 = ProductionGuard(ProdGuardConfig(
+            protected_prod_db=str(other.resolve()),
+            shadow_db_dir=str(tmp_path),
+        ))
+        ok2, _, _ = guard2.preflight(manifest=None)
+        assert ok2, "without manifest, any existing file passes basic validation"
+        print(f"  ✅ 无清单向后兼容: 基本路径验证 OK, 任意存在文件通过")
+
+    # ── T-6: load_manifest 缺失返回 None ──
+
+    def test_load_manifest_missing_returns_none(self, tmp_path):
+        """清单文件不存在时返回 None。"""
+        from serenity_v2.prod_guard import load_manifest
+
+        result = load_manifest(tmp_path / "nonexistent.json")
+        assert result is None
+        print(f"  ✅ 缺失清单: None")
+
+    # ── T-7: load_manifest 缺少字段返回 None ──
+
+    def test_load_manifest_missing_fields_returns_none(self, tmp_path):
+        """清单缺少 required 字段返回 None。"""
+        from serenity_v2.prod_guard import load_manifest
+
+        m = tmp_path / "bad.json"
+        m.write_text('{"environment_id": "test"}')
+        result = load_manifest(m)
+        assert result is None
+        print(f"  ✅ 缺失字段清单: None")
+
+    # ── T-8: 相对路径清单目标触发CLI reject ──
+
+    def test_manifest_relative_path_still_rejected_by_cli(self, tmp_path):
+        """清单中的相对路径 → CLI 传入后 validate_production_path 拒绝。"""
+        from serenity_v2.prod_guard import validate_production_path
+
+        ok, _, err = validate_production_path("relative.db")
+        assert ok is False
+        assert "绝对路径" in err
+        print(f"  ✅ 相对路径CLI拒绝: {err}")

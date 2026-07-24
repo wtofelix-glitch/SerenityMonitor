@@ -1,0 +1,9 @@
+{
+  "description": "Serenity 2.0 运行时可信配置 — 只读，由运维部署时写入",
+  "version": "1.0.0",
+  "environment_id": "production-main",
+  "expected_project_root": "/Users/mac/workspace/SerenityMonitor",
+  "expected_prod_db_realpath": "/Users/mac/workspace/SerenityMonitor/serenity.db",
+  "created_by": "P0-1 trusted-config",
+  "created_at": "2026-07-24T18:40:00+08:00"
+}
