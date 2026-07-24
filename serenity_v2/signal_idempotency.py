@@ -323,7 +323,7 @@ class IdempotentSignalProcessor:
 
         for event in events:
             event_id = event.event_id
-            strategy_id = getattr(event, 'source', '') or ''
+            strategy_id = getattr(event.source, 'name', '') if hasattr(event, 'source') else ''
 
             # 1. 已处理 -> 跳过
             processed, _ = self.ledger.is_already_processed(
