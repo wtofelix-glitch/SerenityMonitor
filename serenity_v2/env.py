@@ -48,6 +48,9 @@ class SerenityEnv:
     db_path: Path = field(default_factory=lambda: SHADOW_DB_DIR / "shadow.db")
     log_dir: Path = field(default_factory=lambda: SHADOW_LOG_DIR)
 
+    # 生产保护（显式配置，不从 __file__ 推导）
+    protected_prod_db: Optional[Path] = None
+
     # 适配器（影子模式为 None）
     push_adapter: object = None
     broker_adapter: object = None
@@ -86,7 +89,9 @@ class SerenityEnv:
         """
         if self.mode == "shadow":
             resolved_db = self.db_path.resolve()
-            resolved_prod = PRODUCTION_DB_PATH.resolve()
+            # 使用显式配置的生产路径，若无则回退到模块级默认（仅用于兼容）
+            prod_path = self.protected_prod_db or PRODUCTION_DB_PATH
+            resolved_prod = prod_path.resolve()
             if resolved_db == resolved_prod:
                 return False, (
                     f"安全拒绝: 影子DB路径 {resolved_db} 与生产DB {resolved_prod} 相同"
@@ -143,14 +148,22 @@ class SerenityEnv:
         cls,
         db_path: Optional[Path] = None,
         log_dir: Optional[Path] = None,
+        protected_prod_db: Optional[Path | str] = None,
     ) -> "SerenityEnv":
-        """创建影子环境。路径默认指向 shadow_data/ 和 logs/shadow/。"""
+        """创建影子环境。路径默认指向 shadow_data/ 和 logs/shadow/。
+        
+        protected_prod_db: 显式受保护的生产DB绝对路径。
+                          若提供，则用于安全验证而非从 __file__ 推导。
+        """
+        if isinstance(protected_prod_db, str):
+            protected_prod_db = Path(protected_prod_db)
         env = cls(
             mode="shadow",
             db_path=db_path or (SHADOW_DB_DIR / "shadow.db"),
             log_dir=log_dir or SHADOW_LOG_DIR,
             push_adapter=None,
             broker_adapter=None,
+            protected_prod_db=protected_prod_db,
         )
         safe, reason = env.verify_safe()
         if not safe:

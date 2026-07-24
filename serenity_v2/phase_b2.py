@@ -158,24 +158,35 @@ class B2Runner:
 
     def __init__(self, duration_seconds: int = B2_DEFAULT_DURATION,
                  interval_seconds: int = B2_DEFAULT_INTERVAL,
-                 init_env: bool = True):
+                 init_env: bool = True,
+                 protected_prod_db: str = ""):
         self.duration = duration_seconds
         self.interval = interval_seconds
         self.metrics = B2Metrics()
+        self._protected_prod_db = protected_prod_db
 
         if init_env:
             self._init_env()
-        self.metrics.prod_file_hash_before = self._compute_prod_hashes()
         self._consecutive_failures = 0
         self._cycle_count = 0  # track across run()
 
     def _init_env(self):
         from .env import get_env, set_env, SerenityEnv
+        from .prod_guard import ProductionGuard, ProdGuardConfig
 
         ROOT = Path(__file__).resolve().parent.parent
         self.shadow_dir = ROOT / "shadow_data" / "b2"
         self.shadow_dir.mkdir(parents=True, exist_ok=True)
         self.shadow_db = self.shadow_dir / "b2_shadow.db"
+
+        # 生产保护器（P0-1: 显式配置，不从 worktree 推导）
+        if self._protected_prod_db:
+            self.guard = ProductionGuard(ProdGuardConfig(
+                protected_prod_db=self._protected_prod_db,
+                shadow_db_dir=str(self.shadow_dir),
+            ))
+        else:
+            self.guard = None
 
         try:
             get_env()
@@ -183,6 +194,7 @@ class B2Runner:
             set_env(SerenityEnv.shadow(
                 db_path=self.shadow_db,
                 log_dir=self.shadow_dir / "logs",
+                protected_prod_db=self._protected_prod_db or None,
             ))
 
         from .migrations import apply_migrations
@@ -238,6 +250,7 @@ class B2Runner:
             "timezone": "Asia/Shanghai",
             "environment": env.mode,
             "db": str(env.db_path.resolve()),
+            "shadow_db_realpath": str(self.shadow_db.resolve()),
             "push_adapter": "disabled" if env.push_adapter is None else "PRESENT ⚠",
             "trade_adapter": "disabled" if env.broker_adapter is None else "PRESENT ⚠",
             "account_state_mode": "FIXTURE",
@@ -248,27 +261,19 @@ class B2Runner:
         if clock_mode != "REAL":
             violations.append(f"时钟模式为 {clock_mode}，盘中运行必须使用 RealClock")
 
-        # 1. 必须为影子模式
-        if env.mode != "shadow":
-            violations.append(f"环境模式为 {env.mode}，必须是 shadow")
+        # P0-1: 生产路径保护（显式配置，不从 worktree 推导）
+        if self.guard is not None:
+            ok_guard, guard_details, guard_violations = self.guard.preflight()
+            details.update(guard_details)
+            if not ok_guard:
+                violations.extend(guard_violations)
+                return False, details, violations
+        else:
+            violations.append(
+                "P0-1: 未配置 --protected-prod-db，"
+                "拒绝从 worktree 推导生产路径"
+            )
             return False, details, violations
-
-        # 2. 推送适配器必须为空
-        if env.push_adapter is not None:
-            violations.append("push_adapter 不为空 — 存在真实推送风险")
-
-        # 3. 交易适配器必须为空
-        if env.broker_adapter is not None:
-            violations.append("trade_adapter 不为空 — 存在真实成交风险")
-
-        # 4. DB 路径不得指向生产库
-        prod_root = Path(__file__).resolve().parent.parent
-        prod_db = (prod_root / "serenity.db").resolve()
-        if env.db_path.resolve() == prod_db:
-            violations.append(f"影子 DB 路径与生产 DB 相同: {prod_db}")
-
-        ok = len(violations) == 0
-        return ok, details, violations
 
     def _print_env_confirmation(self):
         """输出环境确认信息块。任一检查失败则抛出 RuntimeError。"""
@@ -278,10 +283,17 @@ class B2Runner:
         print(f"环境确认")
         print(f"{'='*60}")
         for k, v in details.items():
+            # 跳过嵌套快照字典（单独展示）
+            if k in ("before_snapshot",):
+                continue
             icon = "✅" if "⚠" not in str(v) else "⚠️"
             print(f"  {icon} {k}: {v}")
-        print(f"  {'✅' if ok else '❌'} production DB SHA-256: "
-              f"{list(self.metrics.prod_file_hash_before.values())[0][:16] if self.metrics.prod_file_hash_before else 'N/A'}...")
+        if ok:
+            prod = self.guard.before.main if self.guard and self.guard.before else None
+            print(f"  ✅ protected_prod_db: {details.get('protected_prod_db', 'N/A')}")
+            if prod and prod.state == "PRESENT":
+                print(f"  ✅ prod_db_sha256: {prod.sha256}")
+                print(f"  ✅ prod_db_inode: {prod.inode} dev={prod.device}")
         print(f"{'='*60}")
 
         if violations:
@@ -294,17 +306,7 @@ class B2Runner:
 
         print(f"✅ 环境验证通过\n")
 
-    @staticmethod
-    def _compute_prod_hashes() -> dict:
-        root = Path(__file__).resolve().parent.parent
-        hashes = {}
-        for suffix in ["", "-shm", "-wal"]:
-            prod = root / f"serenity.db{suffix}"
-            if prod.exists():
-                hashes[f"serenity.db{suffix}"] = hashlib.sha256(
-                    prod.read_bytes()
-                ).hexdigest()
-        return hashes
+    # _compute_prod_hashes 已由 ProductionGuard.preflight()/postflight() 替代 (P0-1)
 
     def check_session(self) -> tuple:
         """检查当前时段是否允许运行（使用当前时钟，不重置）。
@@ -691,15 +693,25 @@ class B2Runner:
 
         # 收尾
         self.metrics.cycles_completed = cycle
-        self.metrics.prod_file_hash_after = self._compute_prod_hashes()
         self.metrics.ended_at = datetime.now(tz=CST).isoformat(timespec="seconds")
         self.metrics.duration_seconds = _time.monotonic() - start_mono
         if self.metrics.status == "RUNNING":
             self.metrics.status = "COMPLETED"
 
-        if self.metrics.prod_file_hash_before != self.metrics.prod_file_hash_after:
-            self.metrics.violations.append("生产文件哈希变化!")
-            self._auto_stop("生产文件哈希变化")
+        # P0-1: 运行后生产文件检查
+        if self.guard is not None:
+            ok_post, changes, post_violations = self.guard.postflight(self.shadow_db)
+            if changes:
+                logger.warning(f"生产文件变化: {changes}")
+                for ch in changes:
+                    self.metrics.violations.append(f"生产文件: {ch}")
+            if post_violations:
+                for v in post_violations:
+                    self.metrics.violations.append(v)
+                    self._auto_stop(v)
+            if not ok_post:
+                if self.metrics.status == "COMPLETED":
+                    self.metrics.status = "AUTO_STOPPED"
 
         self._print_report()
         return self.metrics
@@ -768,8 +780,18 @@ class B2Runner:
               f"{m.ACTION_rejected} → {'✅' if audit_ok else '❌'}")
 
         print(f"\n── 安全层 ──")
-        prod_ok = m.prod_file_hash_before == m.prod_file_hash_after
-        print(f"  生产文件: {'✅ 不变' if prod_ok else '❌ 变化!'}")
+        if self.guard and self.guard.before and self.guard.after:
+            before_main = self.guard.before.main
+            after_main = self.guard.after.main
+            if before_main.state == "PRESENT" and after_main.state == "PRESENT":
+                prod_ok = before_main.sha256 == after_main.sha256
+                print(f"  生产 DB SHA256 前: {before_main.sha256}")
+                print(f"  生产 DB SHA256 后: {after_main.sha256}")
+                print(f"  生产文件: {'✅ 不变' if prod_ok else '❌ 变化!'}")
+            else:
+                print(f"  生产 DB 前: {before_main.state}  后: {after_main.state}")
+        else:
+            print(f"  生产文件: ⚠️ 未配置生产保护")
         print(f"  真实推送: {m.real_push_count}  真实成交: {m.real_trade_count}")
         print(f"  账户修改: {m.account_modifications}")
 
@@ -817,11 +839,16 @@ class B2Runner:
 def main():
     parser = argparse.ArgumentParser(
         description="Phase B2 — 盘中实时影子链路运行器",
-        epilog="示例: python -m serenity_v2.phase_b2 --env shadow --duration 900 --interval 5",
+        epilog="示例: python -m serenity_v2.phase_b2 --env shadow "
+               "--protected-prod-db /path/to/serenity.db --duration 900 --interval 5",
     )
     parser.add_argument(
         "--env", required=True, choices=["shadow"],
         help="必须显式指定 --env shadow（其他模式拒绝运行）",
+    )
+    parser.add_argument(
+        "--protected-prod-db", required=True, type=str,
+        help="受保护的生产 DB 绝对路径（P0-1: 不从 worktree 推导）",
     )
     parser.add_argument(
         "--duration", type=int, default=B2_DEFAULT_DURATION,
@@ -838,7 +865,11 @@ def main():
         print("❌ B2 仅支持 --env shadow，拒绝运行")
         sys.exit(2)
 
-    runner = B2Runner(duration_seconds=args.duration, interval_seconds=args.interval)
+    runner = B2Runner(
+        duration_seconds=args.duration,
+        interval_seconds=args.interval,
+        protected_prod_db=args.protected_prod_db,
+    )
     metrics = runner.run()
     runner.save_report()
 
