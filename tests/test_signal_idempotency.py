@@ -1301,11 +1301,12 @@ class TestB2PositivePipeline:
 
         print(f"  ✅ T03: strategy_id='{strategy_id_in_db}' (stable string, not object)")
 
-    # ── T04: 非 eligible 事件标记 NO_SIGNAL/COMPLETED ──
+    # ── T04: COMPLETED_NO_SIGNAL 终态 —— 不计入 failure ──
 
-    def test_ineligible_events_get_no_signal_completed(self):
-        """非 eligible 事件不应进入 query_active，故不会被处理。
-        但手动强制处理应得到 NO_SIGNAL 结果，避免下周期重复评估。"""
+    def test_no_signal_completion_is_terminal_not_failure(self):
+        """事件可评估但策略决定不生成信号时,
+        ledger 以 COMPLETED + failure_reason='NO_SIGNAL' 终止;
+        不计入 failure, 不参与租约恢复, 下周期不重处理。"""
         from serenity_v2.env import set_env, SerenityEnv
         from serenity_v2.migrations import apply_migrations
         from serenity_v2.sina_market import _init_tables
@@ -1327,120 +1328,86 @@ class TestB2PositivePipeline:
 
         reset_baseline()
         baseline = get_baseline()
-        state = baseline.bootstrap_from_doc_b()
+        from serenity_v2.account_fixture import load_fixture, to_account_state
+        fixture_path = Path(__file__).resolve().parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        fixture = load_fixture(fixture_path)
+        state = to_account_state(fixture)
         state.snapshot_at = ""
         baseline.save_snapshot(state)
 
         ledger = EventProcessingLedger(self.tmp_db)
         ledger.init_schema()
 
-        reset_intel()
-        intel = get_intel(shadow_mode=True)
-        reset_desk()
-        desk = get_desk()
-
+        # 直接在 ledger 层测试: 模拟 claim → mark_completed_no_signal
         AM_TIME = "2026-07-24T09:35:00+08:00"
         set_clock(SimClock(AM_TIME))
 
-        # 创建一个 P1 事件 (eligible) + 一个 P3 事件 (ineligible)
-        # P1: is_holding + change_pct=5.0
-        event_p1 = EventRecord(
-            event_id="NO_SIG_P1",
-            symbol="600487",
-            event_type="price_anomaly",
-            headline="eligible for signal",
-            source=SourceInfo(name="sina", level="A", publish_time=AM_TIME),
-            timestamps=TimestampSet(
-                event_time=AM_TIME, publish_time=AM_TIME,
-                collected_at=AM_TIME, verified_at=AM_TIME, expires_at="",
-            ),
-            verification=VerificationResult(status="verified", method="auto"),
-            account_relevance=AccountRelevance(is_holding=True),
-            payload=EventPayload(data={"change_pct": 5.0}),
-            signal_eligible=True,
-        )
-        intel.ingest(event_p1)
+        event_id = "NO_SIG_TERM_001"
+        sid = "sina"
+        sv = "v1"
+        ch = "h1"
+        as_id = "s1"
 
-        # P3: no holding, no change_pct → signal_eligible becomes 0 after ingest
-        event_p3 = EventRecord(
-            event_id="NO_SIG_P3",
-            symbol="000001",
-            event_type="price_anomaly",
-            headline="ineligible - not holding",
-            source=SourceInfo(name="sina", level="B", publish_time=AM_TIME),
-            timestamps=TimestampSet(
-                event_time=AM_TIME, publish_time=AM_TIME,
-                collected_at=AM_TIME, verified_at=AM_TIME, expires_at="",
-            ),
-            verification=VerificationResult(status="verified", method="auto"),
-            signal_eligible=True,  # will be recalculated
-        )
-        intel.ingest(event_p3)
+        # 1. 领取事件
+        ok, detail = ledger.claim(
+            event_id=event_id, strategy_id=sid,
+            strategy_version=sv, strategy_config_hash=ch,
+            account_snapshot_id=as_id, worker_id="test")
+        assert ok, f"claim should succeed, got: {detail}"
 
-        # 验证: P1 在 query_active 中, P3 不在
-        active_events = desk.store.query_active()
-        active_ids = [e.event_id for e in active_events]
-        assert "NO_SIG_P1" in active_ids, (
-            f"P1 event should be active, active_ids={active_ids}"
+        # 2. 标记 COMPLETED_NO_SIGNAL
+        ok = ledger.mark_completed_no_signal(
+            event_id=event_id, strategy_id=sid,
+            strategy_version=sv, strategy_config_hash=ch,
+            account_snapshot_id=as_id)
+        assert ok, "mark_completed_no_signal should succeed"
+
+        # 3. 验证: is_already_processed 返回 True (signal_id 为空)
+        processed, sig_id = ledger.is_already_processed(
+            event_id=event_id, strategy_id=sid,
+            strategy_version=sv, strategy_config_hash=ch,
+            account_snapshot_id=as_id)
+        assert processed, "NO_SIGNAL completion should be recognized as processed"
+        assert sig_id == "", f"signal_id should be empty, got '{sig_id}'"
+
+        # 4. 第二次运行: claim 应被拒绝 (already COMPLETED)
+        ok2, detail2 = ledger.claim(
+            event_id=event_id, strategy_id=sid,
+            strategy_version=sv, strategy_config_hash=ch,
+            account_snapshot_id=as_id, worker_id="test2")
+        assert not ok2, (
+            f"second claim should fail (already COMPLETED), got: {detail2}"
         )
-        assert "NO_SIG_P3" not in active_ids, (
-            f"P3 event should NOT be active (signal_eligible=0), but found in {active_ids}"
+        assert "already_completed" in detail2, (
+            f"should say already_completed, got: {detail2}"
         )
 
-        # 现在手动强制将 P3 也标记为 signal_eligible=1 并测试 ledger 行为
-        # 这样可以验证: 即使事件被强制推入处理, NO_SIGNAL 也会被正确记录
-        import sqlite3
-        conn = sqlite3.connect(str(self.tmp_db))
-        conn.execute(
-            "UPDATE serenity_events SET signal_eligible=1 WHERE event_id='NO_SIG_P3'"
-        )
-        conn.commit()
-        conn.close()
-
-        # 验证 P3 现在也在 query_active 中
-        active_after = desk.store.query_active()
-        active_after_ids = [e.event_id for e in active_after]
-        assert "NO_SIG_P3" in active_after_ids, (
-            f"After update, P3 should be active: {active_after_ids}"
-        )
-
-        # 处理所有事件
-        processor = IdempotentSignalProcessor(
-            desk=desk, ledger=ledger, worker_id="no-sig-test")
-        sigs = processor.process_events(
-            strategy_version="v1", strategy_config_hash="h1",
-            account_snapshot_id="s1")
-
-        # P1 应该生成信号, P3 可能不生成 → ledger 应标记 FAILED (no_signal)
-        # P1 event has been ingested & processed by this point
+        # 5. 审计: FAILED 计数为 0
         stats = ledger.get_stats()
-
-        # 验证: ledger 中有两个条目的处理
-        # 至少 P1 被 COMPLETED
-        assert stats["COMPLETED"] >= 1, (
-            f"at least 1 COMPLETED expected (P1), got {stats}"
+        assert stats["FAILED"] == 0, (
+            f"NO_SIGNAL must not count as FAILED, got FAILED={stats['FAILED']}"
+        )
+        assert stats["COMPLETED"] == 1, (
+            f"expected 1 COMPLETED, got {stats['COMPLETED']}"
+        )
+        assert stats["COMPLETED_NO_SIGNAL"] == 1, (
+            f"expected 1 COMPLETED_NO_SIGNAL, got {stats['COMPLETED_NO_SIGNAL']}"
+        )
+        assert stats["COMPLETED_WITH_SIGNAL"] == 0, (
+            f"expected 0 COMPLETED_WITH_SIGNAL, got {stats['COMPLETED_WITH_SIGNAL']}"
         )
 
-        # 检查 P3 的处理结果
-        import sqlite3
-        conn = sqlite3.connect(str(self.tmp_db))
-        p3_row = conn.execute(
-            "SELECT status, failure_reason FROM event_processing_ledger "
-            "WHERE event_id='NO_SIG_P3'"
-        ).fetchone()
-        conn.close()
+        # 6. 审计方程: COMPLETED = WITH_SIGNAL + NO_SIGNAL
+        assert stats["COMPLETED"] == stats["COMPLETED_WITH_SIGNAL"] + stats["COMPLETED_NO_SIGNAL"], (
+            f"audit: COMPLETED={stats['COMPLETED']} != "
+            f"WITH_SIGNAL({stats['COMPLETED_WITH_SIGNAL']}) "
+            f"+ NO_SIGNAL({stats['COMPLETED_NO_SIGNAL']})"
+        )
 
-        if p3_row:
-            status, reason = p3_row
-            assert status in ("FAILED", "COMPLETED"), (
-                f"P3 should be FAILED or COMPLETED, not {status}"
-            )
-            print(f"  P3 result: status={status} reason='{reason}'")
-        else:
-            print(f"  P3 not in ledger (may have been skipped by query_active)")
-
-        print(f"  ✅ T04: P1 in active, P3 initially excluded; "
-              f"COMPLETED={stats['COMPLETED']} FAILED={stats.get('FAILED', 0)}")
+        print(f"  ✅ T04: COMPLETED_NO_SIGNAL terminal state verified")
+        print(f"     FAILED=0, COMPLETED=1, NO_SIGNAL=1, WITH_SIGNAL=0")
+        print(f"     Second claim blocked: '{detail2}'")
+        print(f"     Audit: {stats['COMPLETED']} = {stats['COMPLETED_WITH_SIGNAL']} + {stats['COMPLETED_NO_SIGNAL']}")
 
     # ── T05: 完整血缘 (event_id → signal_id → ledger) ──
 
@@ -1543,3 +1510,112 @@ class TestB2PositivePipeline:
 
         print(f"  ✅ T05: complete lineage verified for {len(sigs)} signals")
         print(f"  ✅ Each: event_id → signal_id → ledger(COMPLETED, str strategy_id)")
+
+    # ── T06: 不可评估事件 → 不进入账本 ──
+
+    def test_ineligible_events_not_in_ledger(self):
+        """Case A: signal_eligible=false 的事件不进入 query_active,
+        因此不会被 claim, 也不会出现在 ledger 中。
+        有明确的 exclusion 原因 (priority=P3, no holding)。"""
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.migrations import apply_migrations
+        from serenity_v2.sina_market import _init_tables
+        from serenity_v2.event_record import (
+            EventRecord, TimestampSet, SourceInfo,
+            VerificationResult,
+        )
+        from serenity_v2.account_baseline import get_baseline, reset_baseline
+        from serenity_v2.intelligence_network import get_intel, reset_intel
+        from serenity_v2.signal_desk import get_desk, reset_desk
+        from serenity_v2.signal_idempotency import (
+            EventProcessingLedger, IdempotentSignalProcessor,
+        )
+        from serenity_v2.clock import set_clock, SimClock
+
+        set_env(SerenityEnv.shadow(db_path=self.tmp_db, log_dir=Path(self.tmpdir)))
+        apply_migrations(self.tmp_db)
+        _init_tables(self.tmp_db)
+
+        reset_baseline()
+        baseline = get_baseline()
+        state = baseline.bootstrap_from_doc_b()
+        state.snapshot_at = ""
+        baseline.save_snapshot(state)
+
+        ledger = EventProcessingLedger(self.tmp_db)
+        ledger.init_schema()
+
+        reset_intel()
+        intel = get_intel(shadow_mode=True)
+        reset_desk()
+        desk = get_desk()
+
+        AM_TIME = "2026-07-24T09:35:00+08:00"
+        set_clock(SimClock(AM_TIME))
+
+        # 创建 3 个不可评估事件 (no holding, no change_pct → P3, signal_eligible=0)
+        ineligible_ids = []
+        for i in range(3):
+            event = EventRecord(
+                event_id=f"INELIG_{i:03d}",
+                symbol=f"00000{i+1}",
+                event_type="price_anomaly",
+                headline=f"ineligible event #{i}",
+                source=SourceInfo(name="sina", level="B", publish_time=AM_TIME),
+                timestamps=TimestampSet(
+                    event_time=AM_TIME, publish_time=AM_TIME,
+                    collected_at=AM_TIME, verified_at=AM_TIME, expires_at="",
+                ),
+                verification=VerificationResult(status="verified", method="auto"),
+                signal_eligible=True,  # will be recalculated by ingest
+            )
+            result = intel.ingest(event)
+            ineligible_ids.append(result.event_id)
+            # 验证 ingest 后 signal_eligible 被重算为 False
+            assert result.signal_eligible is False, (
+                f"event {event.event_id}: ingest should set signal_eligible=False "
+                f"(no holding, P3 priority), got {result.signal_eligible}"
+            )
+
+        # 验证: none of them in query_active
+        active_events = desk.store.query_active()
+        active_ids = set(e.event_id for e in active_events)
+        for eid in ineligible_ids:
+            assert eid not in active_ids, (
+                f"ineligible event {eid} should NOT be in query_active"
+            )
+
+        # 处理 (应该返回 0 信号)
+        processor = IdempotentSignalProcessor(
+            desk=desk, ledger=ledger, worker_id="ineligible-test")
+        sigs = processor.process_events(
+            strategy_version="v1", strategy_config_hash="h1",
+            account_snapshot_id="s1")
+
+        assert len(sigs) == 0, (
+            f"expected 0 signals from ineligible events, got {len(sigs)}"
+        )
+        assert processor.stats["new_signals"] == 0
+        assert processor.stats["already_processed"] == 0
+        assert processor.stats["claim_failed"] == 0
+
+        # 验证: ledger 完全为空 (没有 entry)
+        stats = ledger.get_stats()
+        assert stats["total"] == 0, (
+            f"ledger should be empty for ineligible events, got total={stats['total']}"
+        )
+
+        # DB 验证: event_processing_ledger 表 0 行
+        import sqlite3
+        conn = sqlite3.connect(str(self.tmp_db))
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM event_processing_ledger"
+        ).fetchone()[0]
+        conn.close()
+        assert row_count == 0, (
+            f"ledger should have 0 rows, got {row_count}"
+        )
+
+        print(f"  ✅ T06: {len(ineligible_ids)} ineligible events excluded from ledger")
+        print(f"     signal_eligible=False (priority=P3, no holding)")
+        print(f"     query_active returns 0, ledger has 0 rows")

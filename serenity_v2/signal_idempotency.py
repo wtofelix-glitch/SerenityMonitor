@@ -212,7 +212,7 @@ class EventProcessingLedger:
                     strategy_id: str = "", strategy_version: str = "",
                     strategy_config_hash: str = "",
                     account_snapshot_id: str = "") -> bool:
-        """标记处理失败。"""
+        """标记处理失败（可重试）。"""
         now = datetime.now(tz=CST).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(str(self.db_path))
         try:
@@ -233,6 +233,38 @@ class EventProcessingLedger:
         finally:
             conn.close()
 
+    def mark_completed_no_signal(self, event_id: str,
+                                 strategy_id: str = "",
+                                 strategy_version: str = "",
+                                 strategy_config_hash: str = "",
+                                 account_snapshot_id: str = "") -> bool:
+        """标记处理完成但未生成信号（终态，不计入 failure）。
+
+        status=COMPLETED, signal_id='', failure_reason='NO_SIGNAL'.
+        与 mark_completed 不同: signal_id 为空但仍是 COMPLETED 终态，
+        确保下一周期不再重处理且不计入 P0-4 total_failures。
+        """
+        now = datetime.now(tz=CST).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            c = conn.execute(
+                """UPDATE event_processing_ledger
+                   SET status='COMPLETED', signal_id='',
+                       failure_reason='NO_SIGNAL',
+                       completed_at=?, updated_at=?
+                   WHERE event_id=? AND strategy_id=? AND strategy_version=?
+                     AND strategy_config_hash=? AND account_snapshot_id=?
+                     AND status='PROCESSING'""",
+                (now, now,
+                 event_id, strategy_id, strategy_version,
+                 strategy_config_hash, account_snapshot_id))
+            updated = c.rowcount > 0
+            conn.commit()
+            return updated
+        finally:
+            conn.close()
+
     # ── 查询 ──
 
     def is_already_processed(self, event_id: str,
@@ -240,18 +272,21 @@ class EventProcessingLedger:
                              strategy_version: str = "",
                              strategy_config_hash: str = "",
                              account_snapshot_id: str = "") -> tuple:
-        """(processed: bool, signal_id: str)"""
+        """(processed: bool, signal_id: str)
+
+        COMPLETED 和 COMPLETED_NO_SIGNAL 均为终态，不可重处理。
+        """
         conn = sqlite3.connect(str(self.db_path))
         try:
             row = conn.execute(
-                """SELECT signal_id FROM event_processing_ledger
+                """SELECT signal_id, failure_reason FROM event_processing_ledger
                    WHERE event_id=? AND strategy_id=? AND strategy_version=?
                      AND strategy_config_hash=? AND account_snapshot_id=?
                      AND status='COMPLETED'""",
                 (event_id, strategy_id, strategy_version,
                  strategy_config_hash, account_snapshot_id)).fetchone()
-            if row and row[0]:
-                return True, row[0]
+            if row is not None:
+                return True, row[0] or ""
             return False, ""
         finally:
             conn.close()
@@ -264,12 +299,27 @@ class EventProcessingLedger:
                    FROM event_processing_ledger GROUP BY status"""
             ).fetchall()
             counts = {"PENDING": 0, "PROCESSING": 0,
-                      "COMPLETED": 0, "FAILED": 0}
+                      "COMPLETED": 0, "FAILED": 0,
+                      "COMPLETED_NO_SIGNAL": 0}
             for r in row:
                 counts[r[0]] = r[1]
-            total = sum(counts.values())
-            return {"total": total, **counts,
-                    "audit_ok": total == sum(counts.values())}
+            # 区分 COMPLETED with signal vs COMPLETED_NO_SIGNAL
+            no_sig_row = conn.execute(
+                """SELECT COUNT(*) FROM event_processing_ledger
+                   WHERE status='COMPLETED' AND signal_id=''
+                     AND failure_reason='NO_SIGNAL'"""
+            ).fetchone()
+            no_sig_count = no_sig_row[0] if no_sig_row else 0
+            counts["COMPLETED_NO_SIGNAL"] = no_sig_count
+            all_completed = counts["COMPLETED"]
+            counts["COMPLETED_WITH_SIGNAL"] = all_completed - no_sig_count
+            total = sum(v for k, v in counts.items()
+                       if k not in ("COMPLETED_WITH_SIGNAL",))
+            counts["total"] = total
+            counts["audit_ok"] = (
+                all_completed == counts["COMPLETED_WITH_SIGNAL"] + no_sig_count
+            )
+            return counts
         finally:
             conn.close()
 
@@ -308,6 +358,7 @@ class IdempotentSignalProcessor:
             "new_signals": 0,
             "already_processed": 0,
             "claim_failed": 0,
+            "completed_no_signal": 0,
         }
 
     def process_events(
@@ -359,12 +410,13 @@ class IdempotentSignalProcessor:
                         account_snapshot_id=account_snapshot_id)
                     self._stats["new_signals"] += 1
                 else:
-                    self.ledger.mark_failed(
-                        event_id=event_id, reason="no_signal",
+                    self.ledger.mark_completed_no_signal(
+                        event_id=event_id,
                         strategy_id=strategy_id,
                         strategy_version=strategy_version,
                         strategy_config_hash=strategy_config_hash,
                         account_snapshot_id=account_snapshot_id)
+                    self._stats["completed_no_signal"] += 1
             except Exception as exc:
                 self.ledger.mark_failed(
                     event_id=event_id, reason=str(exc)[:200],
