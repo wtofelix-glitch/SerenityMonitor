@@ -560,5 +560,16 @@
   },
   "signal_details": [],
   "quarantine_details": [],
-  "violations": []
+  "violations": [],
+  "_fixture_meta": {
+    "fixture_origin": "SYNTHETIC",
+    "description": "Hand-crafted positive fixture representing a healthy v9 5-min shadow run. All audit equations pass. Used for green-path UI testing.",
+    "expected_dashboard_behavior": [
+      "status displays OK/green",
+      "signals_total 42 (normal count)",
+      "candidate_ACTION > effective_ACTION (gate filtering works)",
+      "audit equations all pass",
+      "no signal storm"
+    ]
+  }
 }
