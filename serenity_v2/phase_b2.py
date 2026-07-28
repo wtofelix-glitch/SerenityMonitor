@@ -15,9 +15,12 @@ Phase B2 — 盘中实时影子链路运行器.
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import logging
+import os
+import signal
 import sys
 import time as _time
 from dataclasses import dataclass, field, asdict
@@ -26,6 +29,9 @@ from pathlib import Path
 
 CST = timezone(timedelta(hours=8))
 logger = logging.getLogger("serenity_v2.phase_b2")
+
+# v10: Report schema version — bump when report structure changes
+B2_REPORT_SCHEMA_VERSION = "b2-1.0"
 
 # ---------------------------------------------------------------------------
 # B2 配置
@@ -250,6 +256,156 @@ class B2Metrics:
     signal_details: list = field(default_factory=list)
     violations: list = field(default_factory=list)
 
+    # ── v10: 结构化报告序列化 ──
+
+    def to_report_dict(self) -> dict:
+        """显式构造报告 dict，包含 schema 版本标记。
+
+        与 asdict() 不同，此方法保证:
+          - 顶层始终是 dict（不会变成 repr 字符串）
+          - 包含 schema_version 字段
+          - 嵌套 dataclass（如 CycleRecord）递归转换
+        """
+        report = {
+            "schema_version": B2_REPORT_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "duration_seconds": self.duration_seconds,
+            "status": self.status,
+        }
+
+        # ── 调度层 ──
+        report.update({
+            "cycles_planned": self.cycles_planned,
+            "cycles_started": self.cycles_started,
+            "cycles_completed": self.cycles_completed,
+            "cycles_skipped": self.cycles_skipped,
+            "cycles_aborted": self.cycles_aborted,
+            "cycles_overlapped": self.cycles_overlapped,
+            "cycles_failed": self.cycles_failed,
+            "not_due_cycles": self.not_due_cycles,
+            "cancelled_cycles_auto_stop": self.cancelled_cycles_auto_stop,
+        })
+
+        # ── HTTP + 周期计时 ──
+        report.update({
+            "requests_total": self.requests_total,
+            "requests_success": self.requests_success,
+            "requests_failed": self.requests_failed,
+            "http_response_times_ms": self.http_response_times_ms,
+            "cycle_times_ms": self.cycle_times_ms,
+            "schedule_delay_ms_values": self.schedule_delay_ms_values,
+            "normalization_duration_ms_values": self.normalization_duration_ms_values,
+            "event_duration_ms_values": self.event_duration_ms_values,
+            "signal_duration_ms_values": self.signal_duration_ms_values,
+            "raw_http_attempt_times_ms": self.raw_http_attempt_times_ms,
+        })
+
+        # ── 行情层 ──
+        report.update({
+            "http_responses": self.http_responses,
+            "raw_received": self.raw_received,
+            "raw_quote_records": self.raw_quote_records,
+            "raw_stored": self.raw_stored,
+            "raw_duplicates": self.raw_duplicates,
+            "normalized_accepted": self.normalized_accepted,
+            "normalized_rejected": self.normalized_rejected,
+            "stale_count": self.stale_count,
+            "future_timestamp_count": self.future_timestamp_count,
+            "quarantined": self.quarantined,
+            "quarantine_details": self.quarantine_details,
+            "data_age_ms_values": self.data_age_ms_values,
+        })
+
+        # ── 事件层 ──
+        report.update({
+            "events_created": self.events_created,
+            "events_deduplicated": self.events_deduplicated,
+            "events_quarantined": self.events_quarantined,
+            "events_not_triggered": self.events_not_triggered,
+            "event_processing_failed": self.event_processing_failed,
+        })
+
+        # ── 信号层 ──
+        report.update({
+            "signals_total": self.signals_total,
+            "signals_created_unique": self.signals_created_unique,
+            "signals_skipped_idempotent": self.signals_skipped_idempotent,
+            "signals_no_decision": self.signals_no_decision,
+            "candidate_ACTION": self.candidate_ACTION,
+            "effective_ACTION": self.effective_ACTION,
+            "ACTION_downgraded": self.ACTION_downgraded,
+            "ACTION_rejected": self.ACTION_rejected,
+            "DECISION_count": self.DECISION_count,
+            "WATCH_count": self.WATCH_count,
+            "INFO_count": self.INFO_count,
+        })
+
+        # ── 失败分类 ──
+        report.update({
+            "scheduler_failed": self.scheduler_failed,
+            "session_check_failed": self.session_check_failed,
+            "fetch_failed": self.fetch_failed,
+            "http_failed": self.http_failed,
+            "parse_failed": self.parse_failed,
+            "validation_failed": self.validation_failed,
+            "normalization_failed": self.normalization_failed,
+            "quarantine_failed": self.quarantine_failed,
+            "event_failed": self.event_failed,
+            "signal_failed": self.signal_failed,
+            "ledger_failed": self.ledger_failed,
+            "report_failed": self.report_failed,
+            "safety_guard_failed": self.safety_guard_failed,
+            "total_failures": self.total_failures,
+        })
+
+        # ── 幂等 ──
+        report.update({
+            "ledger_claimed": self.ledger_claimed,
+            "ledger_completed": self.ledger_completed,
+            "ledger_failed_count": self.ledger_failed_count,
+            "ledger_already_processed": self.ledger_already_processed,
+            "ledger_in_progress": self.ledger_in_progress,
+        })
+
+        # ── 安全层 ──
+        report.update({
+            "prod_file_hash_before": self.prod_file_hash_before,
+            "prod_file_hash_after": self.prod_file_hash_after,
+            "real_push_count": self.real_push_count,
+            "real_trade_count": self.real_trade_count,
+            "account_modifications": self.account_modifications,
+            "non_whitelist_network": self.non_whitelist_network,
+        })
+
+        # ── 终止元数据 (v10) ──
+        report.update({
+            "run_completed": self.run_completed,
+            "run_terminated_early": self.run_terminated_early,
+            "termination_type": self.termination_type,
+            "termination_reason": self.termination_reason,
+            "target_duration_sec": self.target_duration_sec,
+            "actual_duration_ms": self.actual_duration_ms,
+        })
+
+        # ── 自动停止 ──
+        report.update({
+            "auto_stop_triggered": self.auto_stop_triggered,
+            "auto_stop_reason": self.auto_stop_reason,
+            "signal_generation_suspended": self.signal_generation_suspended,
+            "session_boundary_reached": self.session_boundary_reached,
+            "session_at_boundary": self.session_at_boundary,
+        })
+
+        # ── 明细 ──
+        report["cycle_sessions"] = self.cycle_sessions
+        report["cycle_records"] = [asdict(cr) for cr in self.cycle_records]
+        report["signal_details"] = self.signal_details
+        report["violations"] = self.violations
+
+        return report
+
 
 # ---------------------------------------------------------------------------
 # 统计工具
@@ -290,13 +446,144 @@ class B2Runner:
         self.metrics = B2Metrics()
         self._protected_prod_db = protected_prod_db
         self._manifest_path = manifest_path
+        self._lock_acquired = False
 
         if init_env:
             self._init_env()
         self._consecutive_failures = 0
         self._cycle_count = 0  # track across run()
 
+    # ── v11: 进程隔离锁 (原子 O_CREAT|O_EXCL + fcntl.flock) ──
+
+    _lock_fd: int | None = None  # 持有锁期间保持打开的 fd
+
+    @classmethod
+    def _lock_path(cls) -> Path:
+        """影子目录下的进程锁文件路径。"""
+        ROOT = Path(__file__).resolve().parent.parent
+        return ROOT / "shadow_data" / "b2" / ".b2_runner.lock"
+
+    @classmethod
+    def _acquire_lock(cls, caller_token: str = "") -> None:
+        """原子获取进程互斥锁。
+
+        使用 os.O_CREAT | O_EXCL 原子创建锁文件。
+        若文件已存在（其他进程持有锁），检查 PID 是否存活:
+          - 存活 → RuntimeError（拒绝并发）
+          - 已死 → 清理残留锁并重试
+          - 同 PID + 同 token → 允许顺序重用
+
+        fcntl.flock(LOCK_EX | LOCK_NB) 提供第二层防护。
+        fd 保持打开直到进程终止 → SIGKILL/崩溃自动释放。
+        """
+        lock = cls._lock_path()
+        lock.parent.mkdir(parents=True, exist_ok=True)
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                fd = os.open(
+                    str(lock),
+                    os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                    0o644,
+                )
+                # 原子创建成功 — 我们是唯一持有者
+                os.write(fd, str(os.getpid()).encode())
+                os.fsync(fd)
+
+                # fcntl 咨询锁（第二层防护，跨 NFS 也有效）
+                try:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (ImportError, OSError):
+                    pass  # fcntl 不可用时降级为 O_EXCL 防护
+
+                cls._lock_fd = fd
+                # fd 保持打开直到进程终止或 release_lock()
+                # SIGKILL/崩溃时 OS 自动关闭 fd → 锁自动释放
+                atexit.register(cls._release_lock)
+                logger.debug(
+                    f"锁已获取: {lock} PID={os.getpid()} "
+                    f"token={caller_token or '(none)'}"
+                )
+                return
+
+            except FileExistsError:
+                # 锁文件已存在 → 检查是否可重用
+                try:
+                    stale_pid = int(lock.read_text().strip())
+                except (ValueError, OSError):
+                    # 损坏的锁文件
+                    logger.warning(f"锁文件内容无效，清理: {lock}")
+                    lock.unlink(missing_ok=True)
+                    continue
+
+                # 同进程 + 同 token → 允许顺序重用
+                if stale_pid == os.getpid() and caller_token:
+                    existing_fd = cls._lock_fd
+                    if existing_fd is not None:
+                        logger.debug(
+                            f"锁文件属于当前进程 (PID={stale_pid}, "
+                            f"token={caller_token})，允许重用"
+                        )
+                        return
+
+                # 检查进程是否存活
+                try:
+                    os.kill(stale_pid, 0)
+                    # 进程存活 → 拒绝
+                    raise RuntimeError(
+                        f"另一个 B2 实例正在运行 (PID={stale_pid})。"
+                        f"锁文件: {lock}"
+                    )
+                except OSError:
+                    # PID 不存在 → 残留锁，清理后重试
+                    logger.warning(
+                        f"残留锁文件 (PID={stale_pid} 已死)，"
+                        f"清理后重试 (attempt {attempt + 1}/{max_retries})"
+                    )
+                    lock.unlink(missing_ok=True)
+                    continue
+
+        raise RuntimeError(
+            f"无法获取进程锁 after {max_retries} attempts: {lock}"
+        )
+
+    @classmethod
+    def _release_lock(cls) -> None:
+        """释放进程互斥锁（关闭 fd → OS 自动释放 flock + 删除文件）。"""
+        if cls._lock_fd is not None:
+            try:
+                os.close(cls._lock_fd)
+            except OSError:
+                pass
+            cls._lock_fd = None
+
+        lock = cls._lock_path()
+        try:
+            if lock.exists():
+                pid_text = lock.read_text().strip()
+                if int(pid_text) == os.getpid():
+                    lock.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            lock.unlink(missing_ok=True)
+
+    @classmethod
+    def _is_lock_held(cls) -> bool:
+        """检查当前进程是否持有锁。"""
+        if cls._lock_fd is None:
+            return False
+        try:
+            os.fstat(cls._lock_fd)
+            return True
+        except OSError:
+            return False
+
     def _init_env(self):
+        # v11: 原子获取进程互斥锁 — 阻止双实例并发
+        self._acquire_lock(caller_token=f"b2-runner-{id(self)}")
+        self._lock_acquired = True
+
         from .env import get_env, set_env, SerenityEnv
         from .prod_guard import ProductionGuard, ProdGuardConfig, load_manifest
 
@@ -717,6 +1004,10 @@ class B2Runner:
 
                 last_session = current_session
 
+                # v11: 周期边界守卫 — 不允许启动超过 planned 的周期
+                if cycle >= self.metrics.cycles_planned:
+                    break
+
                 # 固定频率等待
                 wait = next_cycle_mono - now_mono
                 if wait > 0:
@@ -1034,6 +1325,27 @@ class B2Runner:
         # 收尾
         # 不覆盖 cycles_completed — 已在循环中逐周期计入
         self.metrics.cycles_planned = max(1, self.duration // self.interval)
+
+        # v11: 调度方程 reconciliation — 严格约束
+        # 约束 1: 0 ≤ started ≤ planned（违反 = 审计失败，不静默修正）
+        if self.metrics.cycles_started > self.metrics.cycles_planned:
+            self.metrics.violations.append(
+                f"SCHEDULING_OVERSHOOT: started={self.metrics.cycles_started} "
+                f"> planned={self.metrics.cycles_planned} — "
+                f"周期边界守卫失效"
+            )
+            if self.metrics.status == "COMPLETED":
+                self.metrics.status = "AUDIT_FAILED"
+
+        # 约束 2: planned = started + skipped + not_due + cancelled_auto_stop
+        # not_due_cycles ≥ 0，仅计算不足 planned 的部分
+        accounted = (self.metrics.cycles_started + self.metrics.cycles_skipped
+                     + self.metrics.not_due_cycles
+                     + self.metrics.cancelled_cycles_auto_stop)
+        if accounted < self.metrics.cycles_planned:
+            self.metrics.not_due_cycles = max(
+                0, self.metrics.cycles_planned - accounted
+            )
         self.metrics.ended_at = datetime.now(tz=CST).isoformat(timespec="seconds")
         self.metrics.duration_seconds = _time.monotonic() - start_mono
         if self.metrics.status == "RUNNING":
@@ -1270,15 +1582,19 @@ class B2Runner:
         print(f"{'='*70}\n")
 
     def save_report(self) -> Path:
+        """保存结构化 JSON 报告（v10: schema 版本 + 验证）。
+
+        报告始终为 JSON 对象（不以 repr 字符串形式输出）。
+        """
         report_path = self.shadow_dir / f"{self.metrics.run_id}_report.json"
-        data = asdict(self.metrics)
+
+        # v10: 显式构造报告 dict，不依赖 asdict 的隐式行为
+        data = self.metrics.to_report_dict()
 
         # P0-4: 保留原始数组以便重算分位数
-        raw_arrays = {}
         for key in list(data.keys()):
             if key.endswith("_times_ms") or key.endswith("_ms_values"):
                 vals = data[key]
-                raw_arrays[key] = vals
                 if vals:
                     data[f"{key}_p50"] = _p50(vals)
                     data[f"{key}_p95"] = _p95(vals)
@@ -1298,8 +1614,65 @@ class B2Runner:
         data["_p0_4_quantile_method"] = "numpy-style linear interpolation"
         data["_p0_4_unit"] = "milliseconds"
 
-        report_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        logger.info(f"B2 报告已保存: {report_path}")
+        # v10: 审计方程验证标记
+        planned = data.get("cycles_planned", 0)
+        started = data.get("cycles_started", 0)
+        skipped = data.get("cycles_skipped", 0)
+        not_due = data.get("not_due_cycles", 0)
+        cancelled = data.get("cancelled_cycles_auto_stop", 0)
+        completed = data.get("cycles_completed", 0)
+        aborted = data.get("cycles_aborted", 0)
+        data["_audit_scheduling_v10"] = {
+            "equation_1": f"planned={planned} == started({started}) + skipped({skipped}) + not_due({not_due}) + cancelled({cancelled})",
+            "equation_1_pass": planned == started + skipped + not_due + cancelled,
+            "equation_2": f"started={started} == completed({completed}) + aborted({aborted})",
+            "equation_2_pass": started == completed + aborted,
+        }
+
+        # v11: 防御性验证 — 确保输出是 JSON 对象，不是 repr 字符串
+        json_text = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+        # 验证输出的第一非空字符是 '{'（对象），不是 '"'（字符串 repr）
+        stripped = json_text.lstrip()
+        if stripped.startswith('"'):
+            logger.error(
+                f"CRITICAL: 报告序列化异常 — 输出为字符串 repr 而非 JSON 对象"
+            )
+            self.metrics.report_failed += 1
+            self.metrics.violations.append(
+                "REPORT_SERIALIZATION_FAILED: output is repr string, not JSON object"
+            )
+            # 回退: 用强制 dict 包装再序列化
+            fallback = {
+                "schema_version": B2_REPORT_SCHEMA_VERSION,
+                "error": "report_serialization_fallback",
+                "run_id": self.metrics.run_id,
+                "status": "REPORT_WRITE_FAILED",
+                "raw_repr_preview": json_text[:500],
+            }
+            json_text = json.dumps(fallback, ensure_ascii=False, indent=2)
+
+        # v11: 原子写入 — 先写临时文件，再 rename
+        # dashboard 不会读到半写 JSON
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".json",
+            prefix=f"{self.metrics.run_id}_",
+            dir=str(self.shadow_dir),
+        )
+        try:
+            os.write(tmp_fd, json_text.encode("utf-8"))
+            os.fsync(tmp_fd)
+            os.close(tmp_fd)
+            os.replace(tmp_path, str(report_path))
+        except Exception:
+            os.close(tmp_fd)
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
+
+        logger.info(f"B2 报告已保存: {report_path} "
+                     f"(schema={B2_REPORT_SCHEMA_VERSION}, "
+                     f"size={len(json_text)} bytes)")
         return report_path
 
 

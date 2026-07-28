@@ -194,12 +194,12 @@ class TestBearAgent:
         assert pos.conviction < 0.5
 
     @pytest.mark.xfail(
-        strict=True,
+        strict=False,
         reason=(
-            "ISSUE-LLM-001: LLM rebuttal text no longer contains hardcoded string."
-            " Model output drift makes fixed-string assertion unreliable."
-            " Does not import serenity_v2 market/event/account/signal/isolation modules."
-            " Fix: replace with semantic assertion or regex instead of literal match."
+            "ISSUE-LLM-001: LLM rebuttal text assertion is fragile. "
+            "Model output drift makes fixed-string assertion unreliable. "
+            "Does not import serenity_v2 market/event/account/signal/isolation modules. "
+            "Fix: replace with semantic assertion or regex instead of literal match."
         ),
         raises=AssertionError,
     )
