@@ -1406,17 +1406,6 @@ class B2Runner:
                     _time.monotonic() - self._run_start_mono
                 ) * 1000
 
-        # P0-4: 计算总失败数 = 所有互斥失败类型之和
-        self.metrics.total_failures = (
-            self.metrics.scheduler_failed + self.metrics.session_check_failed
-            + self.metrics.fetch_failed + self.metrics.http_failed
-            + self.metrics.parse_failed + self.metrics.validation_failed
-            + self.metrics.normalization_failed + self.metrics.quarantine_failed
-            + self.metrics.event_failed + self.metrics.signal_failed
-            + self.metrics.ledger_failed + self.metrics.report_failed
-            + self.metrics.safety_guard_failed
-        )
-
         # P0-2: 收集幂等账本统计
         try:
             ledger_stats = self.ledger.get_stats()
@@ -1450,6 +1439,18 @@ class B2Runner:
                         self.metrics.status = "AUTO_STOPPED"
             except Exception:
                 self.metrics.safety_guard_failed += 1
+
+        # v15: 计算总失败数 — 必须在所有 failure counter 递增之后
+        # （ledger stats 异常→report_failed，postflight 异常→safety_guard_failed）
+        self.metrics.total_failures = (
+            self.metrics.scheduler_failed + self.metrics.session_check_failed
+            + self.metrics.fetch_failed + self.metrics.http_failed
+            + self.metrics.parse_failed + self.metrics.validation_failed
+            + self.metrics.normalization_failed + self.metrics.quarantine_failed
+            + self.metrics.event_failed + self.metrics.signal_failed
+            + self.metrics.ledger_failed + self.metrics.report_failed
+            + self.metrics.safety_guard_failed
+        )
 
         self._print_report()
         return self.metrics

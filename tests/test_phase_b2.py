@@ -1671,3 +1671,287 @@ class TestV14LineageAndSchema:
         assert d["duplicate_signals_created"] == 7
         assert d["signals_skipped_idempotent"] == 3
         assert d["duplicate_signals_created"] != d["signals_skipped_idempotent"]
+
+
+
+class TestV15FailureEquationFinalization:
+    """v15: failure equation — total_failures 在所有 counter 递增之后计算。"""
+
+
+    # ── helpers ──
+    def _make_runner_with_faults(self, ledger_exc=False, postflight_exc=False):
+        """构造一个可注入故障的 B2Runner，用于测试 _finalize 区域的 total_failures。
+
+        因为 _finalize 逻辑内嵌在 run() 收尾段中（非独立方法），
+        我们通过 monkey-patching ledger.get_stats / guard.postflight 来触发异常路径，
+        然后运行短回放并检查报告中的方程是否平衡。
+        """
+        import tempfile, json
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from serenity_v2.clock import set_clock, SimClock
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.migrations import apply_migrations
+        from serenity_v2.sina_market import _init_tables, SinaQuoteFetcher, NormalizedQuote, RawQuoteRecord
+        from serenity_v2.event_record import EventStore
+        from serenity_v2.account_fixture import load_and_set_fixture, to_account_state
+        from serenity_v2.account_baseline import get_baseline, reset_baseline
+        from serenity_v2.intelligence_network import get_intel, reset_intel
+        from serenity_v2.signal_desk import get_desk, reset_desk
+        from serenity_v2.phase_b2 import B2Runner
+        from serenity_v2.signal_idempotency import EventProcessingLedger, IdempotentSignalProcessor
+        from serenity_v2.clock import get_clock
+        import hashlib
+
+        tmpdir = tempfile.mkdtemp(prefix='v15_test_')
+        tmp_db = Path(tmpdir) / 'b2_shadow.db'
+
+        set_clock(SimClock('2026-07-24T09:35:00+08:00'))
+        env = SerenityEnv.shadow(db_path=tmp_db, log_dir=Path(tmpdir))
+        set_env(env)
+        apply_migrations(tmp_db)
+        _init_tables(tmp_db)
+        store = EventStore(db_path=tmp_db)
+        store.init_schema()
+
+        reset_baseline()
+        baseline = get_baseline()
+        fixture_path = Path(__file__).resolve().parent / 'fixtures' / 'b2' / 'account_fixture_20260722.json'
+        fixture = load_and_set_fixture(fixture_path)
+        state = to_account_state(fixture)
+        state.snapshot_at = ''
+        baseline.save_snapshot(state)
+
+        reset_intel()
+        intel = get_intel(shadow_mode=True)
+        reset_desk()
+        desk = get_desk()
+
+        B2Runner._acquire_lock(caller_token='v15-test')
+
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
+        runner._locked = True
+        runner.shadow_dir = Path(tmpdir)
+        runner.shadow_db = tmp_db
+        runner.store = store
+        runner.baseline = baseline
+        runner.intel = intel
+        runner.desk = desk
+        runner._fixture = fixture
+        runner._account_snapshot_id = fixture.snapshot_id_full
+        runner._account_snapshot_id_short = fixture.snapshot_id
+        runner._manifest = None
+
+        mock_guard = MagicMock()
+        mock_guard.preflight.return_value = (True, {'guard': 'mock'}, [])
+        mock_guard.before = None
+        if postflight_exc:
+            mock_guard.postflight.side_effect = RuntimeError('fault-injection: postflight failed')
+        else:
+            mock_guard.postflight.return_value = (True, [], [])
+        runner.guard = mock_guard
+
+        runner.ledger = EventProcessingLedger(tmp_db)
+        runner.ledger.init_schema()  # v15: 必须初始化表，否则 get_stats() 抛异常→report_failed
+        if ledger_exc:
+            runner.ledger.get_stats = MagicMock(side_effect=RuntimeError('fault-injection: ledger stats failed'))
+        runner.idempotent = IdempotentSignalProcessor(desk=desk, ledger=runner.ledger, worker_id='v15-test')
+        runner._strategy_version = '1.0'
+        runner._strategy_config_hash = 'test'
+        runner.metrics.run_id = 'B2_V15_FAULT_TEST'
+        runner._consecutive_failures = 0
+        runner._cycle_count = 0
+
+        fetcher = SinaQuoteFetcher()
+        symbols_list = ['sh600519', 'sh600036', 'sh000001']
+        fetch_count = [0]
+
+        def mock_fetch(syms):
+            fetch_count[0] += 1
+            now = get_clock().now()
+            raws = []
+            for sym in symbols_list:
+                raw_str = json.dumps({'price': 100.0, 'symbol': sym})
+                raw_hash = hashlib.sha256(f'{sym}_{now}_{raw_str}'.encode()).hexdigest()[:32]
+                raws.append(RawQuoteRecord(
+                    symbol=sym, source='sina_realtime',
+                    collected_at=now, raw_payload=raw_str,
+                    raw_payload_hash=raw_hash,
+                    http_status=200, response_time_ms=50.0,
+                ))
+            return raws
+
+        def mock_normalize(raw, business_time=None):
+            return NormalizedQuote(
+                symbol=raw.symbol, name='Test',
+                normalized_at=raw.collected_at,
+                price=57.98, previous_close=57.50,
+                open=57.60, high=58.50, low=57.30,
+                volume=10000, amount=579800.0,
+                validation_status='valid', validation_errors=[],
+                acceptable_as_postmarket_snapshot=False,
+                raw_payload_hash=raw.raw_payload_hash,
+                data_age_ms=2000, effective_action_eligible=True,
+            )
+
+        fetcher.fetch = mock_fetch
+        fetcher.normalize = mock_normalize
+        runner.fetcher = fetcher
+        runner.verify_environment = lambda: (True, {'clock_mode': 'SIM_TEST', 'guard': 'mock'}, [])
+
+        # 保存对 tmpdir 的引用用于清理
+        runner._v15_tmpdir = tmpdir
+        runner._v15_tmp_db = tmp_db
+
+        return runner
+
+    def _all_failure_types(self, m):
+        """Compute sum of all failure categories."""
+        return (m.scheduler_failed + m.session_check_failed +
+                m.fetch_failed + m.http_failed +
+                m.parse_failed + m.validation_failed +
+                m.normalization_failed + m.quarantine_failed +
+                m.event_failed + m.signal_failed +
+                m.ledger_failed + m.report_failed +
+                m.safety_guard_failed)
+
+    # ── test cases ──
+
+
+    def test_no_fault_equation_balanced(self):
+        """v15-01: 无故障 → total_failures=0, sum=0, equation PASS."""
+        import shutil
+        from serenity_v2.phase_b2 import B2Runner
+        runner = self._make_runner_with_faults(ledger_exc=False, postflight_exc=False)
+        result = runner.run()
+        tf = result.total_failures
+        fsum = self._all_failure_types(result)
+        assert tf == 0, f'total_failures should be 0, got {tf}'
+        assert fsum == 0, f'sum(types) should be 0, got {fsum}'
+        assert tf == fsum, f'equation: {tf} != {fsum}'
+        B2Runner._release_lock()
+        shutil.rmtree(runner._v15_tmpdir, ignore_errors=True)
+
+
+    def test_ledger_stats_exception_balanced(self):
+        """v15-02: ledger stats 异常 → report_failed=1, total=1, equation PASS."""
+        import shutil
+        from serenity_v2.phase_b2 import B2Runner
+        runner = self._make_runner_with_faults(ledger_exc=True, postflight_exc=False)
+        result = runner.run()
+        tf = result.total_failures
+        fsum = self._all_failure_types(result)
+        assert result.report_failed == 1, f'report_failed should be 1, got {result.report_failed}'
+        assert tf == 1, f'total_failures should be 1, got {tf}'
+        assert fsum == 1, f'sum(types) should be 1, got {fsum}'
+        assert tf == fsum, f'equation: {tf} != {fsum}'
+        B2Runner._release_lock()
+        shutil.rmtree(runner._v15_tmpdir, ignore_errors=True)
+
+
+    def test_postflight_exception_balanced(self):
+        """v15-03: guard.postflight 异常 → safety_guard_failed=1, total=1, equation PASS."""
+        import shutil
+        from serenity_v2.phase_b2 import B2Runner
+        runner = self._make_runner_with_faults(ledger_exc=False, postflight_exc=True)
+        result = runner.run()
+        tf = result.total_failures
+        fsum = self._all_failure_types(result)
+        assert result.safety_guard_failed == 1, f'safety_guard_failed should be 1, got {result.safety_guard_failed}'
+        assert tf == 1, f'total_failures should be 1, got {tf}'
+        assert fsum == 1, f'sum(types) should be 1, got {fsum}'
+        assert tf == fsum, f'equation: {tf} != {fsum}'
+        B2Runner._release_lock()
+        shutil.rmtree(runner._v15_tmpdir, ignore_errors=True)
+
+
+    def test_both_exceptions_balanced(self):
+        """v15-04: 两者同时异常 → report_failed=1, safety_guard_failed=1, total=2, equation PASS."""
+        import shutil
+        from serenity_v2.phase_b2 import B2Runner
+        runner = self._make_runner_with_faults(ledger_exc=True, postflight_exc=True)
+        result = runner.run()
+        tf = result.total_failures
+        fsum = self._all_failure_types(result)
+        assert result.report_failed == 1, f'report_failed should be 1, got {result.report_failed}'
+        assert result.safety_guard_failed == 1, f'safety_guard_failed should be 1, got {result.safety_guard_failed}'
+        assert tf == 2, f'total_failures should be 2, got {tf}'
+        assert fsum == 2, f'sum(types) should be 2, got {fsum}'
+        assert tf == fsum, f'equation: {tf} != {fsum}'
+        B2Runner._release_lock()
+        shutil.rmtree(runner._v15_tmpdir, ignore_errors=True)
+
+
+    def test_fault_injection_does_not_produce_false_pass(self):
+        """v15-05: 故障注入报告不能伪装成 clean run — 至少有一个 failure counter 非零。
+
+        验证: 任何 fault injection 场景下，report 的 total_failures > 0 或者
+        relevant failure counter > 0，确保故障不会被静默吞掉。
+        """
+        import shutil
+        from serenity_v2.phase_b2 import B2Runner
+        runner = self._make_runner_with_faults(ledger_exc=True, postflight_exc=True)
+        result = runner.run()
+        # 至少一个 counter 非零
+        has_fault = (result.report_failed > 0 or result.safety_guard_failed > 0)
+        assert has_fault, (
+            f'fault injection should produce non-zero failure counters; '
+            f'report_failed={result.report_failed} safety_guard_failed={result.safety_guard_failed}'
+        )
+        # total_failures 也应反映故障
+        assert result.total_failures > 0, (
+            f'fault injection should produce total_failures > 0; got {result.total_failures}'
+        )
+        # 方程仍应平衡
+        fsum = self._all_failure_types(result)
+        assert result.total_failures == fsum, (
+            f'equation unbalanced after fault: {result.total_failures} != {fsum}'
+        )
+        B2Runner._release_lock()
+        shutil.rmtree(runner._v15_tmpdir, ignore_errors=True)
+
+
+    def test_report_dict_has_failure_equation_consistent(self):
+        """v15-06: to_report_dict() 中的 total_failures 与 sum(types) 一致。
+
+        直接构造 B2Metrics 并验证 report dict 中的方程平衡。
+        此测试不经过 runner，纯粹验证 B2Metrics 序列化层的方程。
+        """
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        # 场景 A: 无故障
+        d0 = m.to_report_dict()
+        tf0 = d0['total_failures']
+        fs0 = sum(d0[k] for k in [
+            'scheduler_failed','session_check_failed','fetch_failed','http_failed',
+            'parse_failed','validation_failed','normalization_failed','quarantine_failed',
+            'event_failed','signal_failed','ledger_failed','report_failed','safety_guard_failed'
+        ])
+        assert tf0 == fs0, f'clean: {tf0} != {fs0}'
+
+        # 场景 B: 注入 report_failed=1
+        m2 = B2Metrics()
+        m2.report_failed = 1
+        m2.total_failures = 1  # v15: total 手动设置以模拟最终化后结果
+        d2 = m2.to_report_dict()
+        assert d2['total_failures'] == 1
+        assert d2['report_failed'] == 1
+
+        # 场景 C: 注入 safety_guard_failed=1
+        m3 = B2Metrics()
+        m3.safety_guard_failed = 1
+        m3.total_failures = 1
+        d3 = m3.to_report_dict()
+        assert d3['total_failures'] == 1
+        assert d3['safety_guard_failed'] == 1
+
+        # 场景 D: 两者都有
+        m4 = B2Metrics()
+        m4.report_failed = 1
+        m4.safety_guard_failed = 1
+        m4.total_failures = 2
+        d4 = m4.to_report_dict()
+        assert d4['total_failures'] == 2
+        assert d4['report_failed'] == 1
+        assert d4['safety_guard_failed'] == 1
