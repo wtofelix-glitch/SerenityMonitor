@@ -146,6 +146,7 @@ class B2Metrics:
     cycles_overlapped: int = 0
     cycles_failed: int = 0
     not_due_cycles: int = 0
+    cancelled_cycles_auto_stop: int = 0  # auto-stop 后未执行的计划周期
 
     # ── HTTP + 周期计时 ──
     requests_total: int = 0
@@ -223,6 +224,14 @@ class B2Metrics:
     real_trade_count: int = 0
     account_modifications: int = 0
     non_whitelist_network: int = 0
+
+    # ── 运行终止元数据 (v10) ──
+    run_completed: bool = False
+    run_terminated_early: bool = False
+    termination_type: str = ""          # SAFETY_AUTO_STOP / SESSION_BOUNDARY / USER_INTERRUPT / NORMAL
+    termination_reason: str = ""
+    target_duration_sec: int = 0
+    actual_duration_ms: float = 0
 
     # ── 自动停止 ──
     auto_stop_triggered: bool = False
@@ -454,6 +463,8 @@ class B2Runner:
             )
             return False, details, violations
 
+        return True, details, violations
+
     def _print_env_confirmation(self):
         """输出环境确认信息块。任一检查失败则抛出 RuntimeError。"""
         ok, details, violations = self.verify_environment()
@@ -533,8 +544,24 @@ class B2Runner:
 
     def _auto_stop(self, reason: str):
         if not self.metrics.auto_stop_triggered:
+            import time as _time
             self.metrics.auto_stop_triggered = True
             self.metrics.auto_stop_reason = reason
+            # 统计未执行的剩余计划周期
+            executed = (self.metrics.cycles_started + self.metrics.cycles_skipped
+                        + self.metrics.not_due_cycles)
+            self.metrics.cancelled_cycles_auto_stop = max(
+                0, self.metrics.cycles_planned - executed
+            )
+            # 运行级终止元数据
+            self.metrics.run_completed = False
+            self.metrics.run_terminated_early = True
+            self.metrics.termination_type = "SAFETY_AUTO_STOP"
+            self.metrics.termination_reason = reason
+            if hasattr(self, '_run_start_mono'):
+                self.metrics.actual_duration_ms = (
+                    _time.monotonic() - self._run_start_mono
+                ) * 1000
             self.metrics.signal_generation_suspended = True
             logger.warning(f"B2 自动停止: {reason}")
             print(f"\n🚨 自动停止: {reason}")
@@ -631,9 +658,11 @@ class B2Runner:
         last_session = session
 
         start_mono = _time.monotonic()
+        self._run_start_mono = start_mono
         next_cycle_mono = start_mono
         cycle = 0
         self.metrics.cycles_planned = max(1, self.duration // self.interval)
+        self.metrics.target_duration_sec = self.duration
 
         print(f"\n{'='*70}")
         print(f"Phase B2 实时影子链路")
@@ -992,6 +1021,15 @@ class B2Runner:
             print("\n\n⚠ B2 被用户中断")
             self.metrics.status = "AUTO_STOPPED"
             self.metrics.auto_stop_reason = "user_interrupt"
+            if not self.metrics.run_terminated_early:
+                self.metrics.run_completed = False
+                self.metrics.run_terminated_early = True
+                self.metrics.termination_type = "USER_INTERRUPT"
+                self.metrics.termination_reason = "user_interrupt"
+                if hasattr(self, '_run_start_mono'):
+                    self.metrics.actual_duration_ms = (
+                        _time.monotonic() - self._run_start_mono
+                    ) * 1000
 
         # 收尾
         # 不覆盖 cycles_completed — 已在循环中逐周期计入
@@ -1000,6 +1038,15 @@ class B2Runner:
         self.metrics.duration_seconds = _time.monotonic() - start_mono
         if self.metrics.status == "RUNNING":
             self.metrics.status = "COMPLETED"
+
+        # v10: 运行级终止元数据
+        if not self.metrics.run_terminated_early:
+            self.metrics.run_completed = True
+            self.metrics.termination_type = "NORMAL"
+            if hasattr(self, '_run_start_mono'):
+                self.metrics.actual_duration_ms = (
+                    _time.monotonic() - self._run_start_mono
+                ) * 1000
 
         # P0-4: 计算总失败数 = 所有互斥失败类型之和
         self.metrics.total_failures = (
@@ -1072,10 +1119,16 @@ class B2Runner:
               f"completed={m.cycles_completed}  skipped={m.cycles_skipped}  "
               f"aborted={m.cycles_aborted}  failed={m.cycles_failed}  "
               f"overlapped={m.cycles_overlapped}")
-        sched_audit_1 = m.cycles_planned == m.cycles_started + m.cycles_skipped + m.not_due_cycles
+        if m.cancelled_cycles_auto_stop:
+            print(f"  cancelled_auto_stop={m.cancelled_cycles_auto_stop}")
+        sched_audit_1 = m.cycles_planned == (
+            m.cycles_started + m.cycles_skipped + m.not_due_cycles
+            + m.cancelled_cycles_auto_stop
+        )
         sched_audit_2 = m.cycles_started == m.cycles_completed + m.cycles_aborted
-        print(f"  审计 planned=started+skipped+not_due: "
-              f"{m.cycles_planned}={m.cycles_started}+{m.cycles_skipped}+{m.not_due_cycles} "
+        print(f"  审计 planned=started+skipped+not_due+cancelled_auto_stop: "
+              f"{m.cycles_planned}={m.cycles_started}+{m.cycles_skipped}+"
+              f"{m.not_due_cycles}+{m.cancelled_cycles_auto_stop} "
               f"→ {'✅' if sched_audit_1 else '❌'}")
         print(f"  审计 started=completed+aborted: "
               f"{m.cycles_started}={m.cycles_completed}+{m.cycles_aborted} "
