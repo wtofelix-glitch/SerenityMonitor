@@ -1,0 +1,548 @@
+{
+  "schema_version": "b2-1.1",
+  "run_id": "B2_20260727_140000",
+  "started_at": "2026-07-27T14:00:00+08:00",
+  "ended_at": "2026-07-27T14:04:58+08:00",
+  "duration_seconds": 298.5,
+  "status": "COMPLETED",
+  "cycles_planned": 5,
+  "cycles_started": 5,
+  "cycles_completed": 5,
+  "cycles_skipped": 0,
+  "cycles_aborted": 0,
+  "cycles_overlapped": 0,
+  "cycles_failed": 0,
+  "not_due_cycles": 0,
+  "cancelled_cycles_auto_stop": 0,
+  "requests_total": 5,
+  "requests_success": 5,
+  "requests_failed": 0,
+  "http_responses": 5,
+  "raw_received": 15,
+  "raw_quote_records": 15,
+  "raw_stored": 15,
+  "raw_duplicates": 0,
+  "normalized_accepted": 15,
+  "normalized_rejected": 0,
+  "quarantined": 0,
+  "events_created": 15,
+  "events_deduplicated": 0,
+  "events_not_triggered": 0,
+  "event_processing_failed": 0,
+  "signals_total": 15,
+  "signals_created_unique": 15,
+  "signals_skipped_idempotent": 0,
+  "duplicate_signals_created": 0,
+  "signals_no_decision": 0,
+  "candidate_ACTION": 10,
+  "effective_ACTION": 10,
+  "ACTION_downgraded": 0,
+  "ACTION_rejected": 0,
+  "scheduler_failed": 0,
+  "session_check_failed": 0,
+  "fetch_failed": 0,
+  "http_failed": 0,
+  "parse_failed": 0,
+  "validation_failed": 0,
+  "normalization_failed": 0,
+  "quarantine_failed": 0,
+  "event_failed": 0,
+  "signal_failed": 0,
+  "ledger_failed": 0,
+  "report_failed": 0,
+  "safety_guard_failed": 0,
+  "total_failures": 0,
+  "ledger_claimed": 15,
+  "ledger_completed": 15,
+  "ledger_failed_count": 0,
+  "ledger_already_processed": 0,
+  "ledger_in_progress": 0,
+  "real_pushes": 0,
+  "real_trades": 0,
+  "real_push_count": 0,
+  "real_trade_count": 0,
+  "account_modifications": 0,
+  "non_whitelist_network": 0,
+  "signals_skipped_cooldown": 0,
+  "cooldown_enabled": false,
+  "cooldown_policy_version": "b2-cooldown-v1-draft",
+  "run_completed": true,
+  "terminated_early": false,
+  "run_terminated_early": false,
+  "termination_type": "NORMAL",
+  "termination_reason": "",
+  "cycle_records": [
+    {
+      "cycle_sequence": 1,
+      "status": "completed",
+      "http_duration_ms": 55.0,
+      "cycle_duration_ms": 160.0,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 2,
+      "status": "completed",
+      "http_duration_ms": 58.2,
+      "cycle_duration_ms": 165.3,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 3,
+      "status": "completed",
+      "http_duration_ms": 62.1,
+      "cycle_duration_ms": 170.2,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 4,
+      "status": "completed",
+      "http_duration_ms": 57.8,
+      "cycle_duration_ms": 163.5,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    },
+    {
+      "cycle_sequence": 5,
+      "status": "completed",
+      "http_duration_ms": 60.5,
+      "cycle_duration_ms": 168.9,
+      "signals_created": 3,
+      "primary_failure_type": ""
+    }
+  ],
+  "signal_details": [
+    {
+      "signal_id": "sig-01",
+      "symbol": "600519",
+      "event_id": "evt-01",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.82,
+      "reason": "v14 test signal 1",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-02",
+      "symbol": "000858",
+      "event_id": "evt-02",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.87,
+      "reason": "v14 test signal 2",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-03",
+      "symbol": "300750",
+      "event_id": "evt-03",
+      "candidate_action": "WATCH",
+      "effective_action": "WATCH",
+      "confidence": 0.9199999999999999,
+      "reason": "v14 test signal 3",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-04",
+      "symbol": "601166",
+      "event_id": "evt-04",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.82,
+      "reason": "v14 test signal 4",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-05",
+      "symbol": "000001",
+      "event_id": "evt-05",
+      "candidate_action": "REDUCE",
+      "effective_action": "REDUCE",
+      "confidence": 0.87,
+      "reason": "v14 test signal 5",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-06",
+      "symbol": "600036",
+      "event_id": "evt-06",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.9199999999999999,
+      "reason": "v14 test signal 6",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-07",
+      "symbol": "002415",
+      "event_id": "evt-07",
+      "candidate_action": "WATCH",
+      "effective_action": "WATCH",
+      "confidence": 0.82,
+      "reason": "v14 test signal 7",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-08",
+      "symbol": "300124",
+      "event_id": "evt-08",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.87,
+      "reason": "v14 test signal 8",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-09",
+      "symbol": "688981",
+      "event_id": "evt-09",
+      "candidate_action": "REDUCE",
+      "effective_action": "REDUCE",
+      "confidence": 0.9199999999999999,
+      "reason": "v14 test signal 9",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-10",
+      "symbol": "601318",
+      "event_id": "evt-10",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.82,
+      "reason": "v14 test signal 10",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-11",
+      "symbol": "000333",
+      "event_id": "evt-11",
+      "candidate_action": "WATCH",
+      "effective_action": "WATCH",
+      "confidence": 0.87,
+      "reason": "v14 test signal 11",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-12",
+      "symbol": "600900",
+      "event_id": "evt-12",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.9199999999999999,
+      "reason": "v14 test signal 12",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-13",
+      "symbol": "002594",
+      "event_id": "evt-13",
+      "candidate_action": "REDUCE",
+      "effective_action": "REDUCE",
+      "confidence": 0.82,
+      "reason": "v14 test signal 13",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-14",
+      "symbol": "601012",
+      "event_id": "evt-14",
+      "candidate_action": "ACTION",
+      "effective_action": "ACTION",
+      "confidence": 0.87,
+      "reason": "v14 test signal 14",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    },
+    {
+      "signal_id": "sig-15",
+      "symbol": "300274",
+      "event_id": "evt-15",
+      "candidate_action": "WATCH",
+      "effective_action": "WATCH",
+      "confidence": 0.9199999999999999,
+      "reason": "v14 test signal 15",
+      "market_session": "CONTINUOUS_PM",
+      "environment": "shadow",
+      "strategy_id": "b2-shadow-runner",
+      "strategy_version": "b2-1.0",
+      "strategy_config_hash": "6727a428f39b6f17",
+      "account_snapshot_id": "acct-snap-20260727-140000",
+      "account_snapshot_id_full": "acct-snap-20260727-140000",
+      "signal_rule_version": "b2-1.0",
+      "session": "CONTINUOUS_PM",
+      "safety": {
+        "environment": "shadow",
+        "execution_allowed": false,
+        "tags": [
+          "SHADOW_ONLY",
+          "NOT_FOR_EXECUTION",
+          "ACCOUNT_CONTEXT_FIXTURE",
+          "ACCOUNT_CONTEXT_STALE"
+        ]
+      }
+    }
+  ],
+  "_fixture_metadata": {
+    "fixture_origin": "SYNTHETIC",
+    "source_schema": "b2-1.1",
+    "source_runtime_tag": "phase-b2-runner-v14",
+    "source_runtime_commit": "560308f3",
+    "live_run": false,
+    "all_green": false,
+    "cooldown_enabled": false,
+    "description": "Synthetic v14 fixture with 15 unique symbol-action pairs, full lineage, no signal storm, per-cycle records. NOT a v14 live run sample."
+  }
+}

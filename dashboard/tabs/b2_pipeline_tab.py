@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 
 from dashboard.b2_data_provider import (
     B2ReportProvider, B2DashboardViewModel, ReportStatus,
+    DEFAULT_STALE_SECONDS,
 )
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -74,24 +75,28 @@ FAILURE_NAMES = [
 # 公开入口
 # ══════════════════════════════════════════════════════════════════════════
 
-def render_b2_tab(report_path: str = "", report_root: str = "") -> html.Div:
+def render_b2_tab(report_path: str = "", report_root: str = "",
+                  stale_seconds: int = DEFAULT_STALE_SECONDS) -> html.Div:
     """渲染 B2 管线 Tab。
 
     Args:
         report_path: B2 报告 JSON 路径。空字符串 → 显示 NO_DATA 占位。
         report_root: 报告根目录, 用于路径安全。空字符串 → 禁用加载。
+        stale_seconds: 报告过期阈值 (秒)。默认 300。
     """
     # 数据加载
-    vm = _load_report(report_path, report_root)
+    vm = _load_report(report_path, report_root, stale_seconds)
 
     # 错误状态 → 占位页
     if vm.report_status != ReportStatus.OK:
         return _render_error_page(vm)
 
     return html.Div([
-        _render_banner(),
+        _render_banner(vm),
         _render_run_identity(vm),
+        _render_signal_storm_alert(vm),
         _render_four_cards(vm),
+        _render_lineage_status(vm),
         _render_audit_equations(vm),
         _render_latency_failures(vm),
         _render_cycle_table(vm),
@@ -102,13 +107,14 @@ def render_b2_tab(report_path: str = "", report_root: str = "") -> html.Div:
 # 数据加载 (feature-flag safe)
 # ══════════════════════════════════════════════════════════════════════════
 
-def _load_report(path: str, root: str) -> B2DashboardViewModel:
+def _load_report(path: str, root: str,
+                 stale_seconds: int = DEFAULT_STALE_SECONDS) -> B2DashboardViewModel:
     if not path or not root:
         vm = B2DashboardViewModel()
         vm.report_status = ReportStatus.NO_DATA
         vm.warnings = ["未配置报告路径 (report_path/report_root 为空)"]
         return vm
-    provider = B2ReportProvider(report_root=root)
+    provider = B2ReportProvider(report_root=root, stale_seconds=stale_seconds)
     return provider.load(path)
 
 
@@ -116,9 +122,16 @@ def _load_report(path: str, root: str) -> B2DashboardViewModel:
 # 顶部横幅
 # ══════════════════════════════════════════════════════════════════════════
 
-def _render_banner() -> html.Div:
+def _render_banner(vm: B2DashboardViewModel) -> html.Div:
+    schema_badge = _tag(f"schema:{vm.source_schema}",
+                        THEME["green"] if vm.source_schema == "b2-1.1" else THEME["yellow"])
+    compat_note = ""
+    if vm.compatibility_mode:
+        compat_note = " · COMPAT MODE (b2-1.0 → canonical)"
     return html.Div([
         html.Span("SHADOW OBSERVABILITY  ·  NOT FOR EXECUTION  ·  READ ONLY"),
+        html.Span(f"  {compat_note}", style={"color": THEME["text_dim"], "fontSize": "9px"}),
+        html.Span(schema_badge, style={"marginLeft": "12px"}),
     ], style={**BANNER_STYLE, "color": THEME["yellow"],
               "background": "rgba(210,153,29,0.08)"})
 
@@ -437,6 +450,103 @@ def _render_cycle_table(vm: B2DashboardViewModel) -> html.Div:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# v14: Signal Storm Alert
+# ══════════════════════════════════════════════════════════════════════════
+
+def _render_signal_storm_alert(vm: B2DashboardViewModel) -> html.Div:
+    if not vm.signal_storm_detected:
+        return html.Div()
+
+    storm_rows = []
+    for label, count in vm.signal_storm_per_symbol.items():
+        storm_rows.append(html.Tr([
+            html.Td(label, style={"color": THEME["text"], "fontFamily": THEME["font_mono"],
+                                  "fontSize": "11px"}),
+            html.Td(f"×{count}", style={"color": THEME["red"], "fontWeight": "600",
+                                         "fontFamily": THEME["font_mono"], "fontSize": "11px",
+                                         "textAlign": "right"}),
+        ]))
+
+    cooldown_label = "ENABLED" if vm.cooldown_enabled else "DISABLED"
+    cooldown_color = THEME["green"] if vm.cooldown_enabled else THEME["red"]
+
+    return html.Div([
+        html.Div([
+            html.Span("⚠️ ", style={"fontSize": "16px"}),
+            html.Span("SIGNAL STORM DETECTED", style={
+                "color": THEME["red"], "fontWeight": "700", "fontSize": "14px"}),
+            html.Span(f"  ({vm.cross_event_repeated_recommendations} cross-event repeated)",
+                      style={"color": THEME["text_dim"], "fontSize": "11px",
+                             "fontFamily": THEME["font_mono"]}),
+        ]),
+        html.Div([
+            html.Span(f"cooldown: {cooldown_label}", style={
+                "color": cooldown_color, "fontSize": "11px",
+                "fontFamily": THEME["font_mono"], "fontWeight": "600"}),
+            html.Span(f"  skipped={vm.signals_skipped_cooldown}  policy={vm.cooldown_policy_version or 'none'}",
+                      style={"color": THEME["text_dim"], "fontSize": "10px",
+                             "fontFamily": THEME["font_mono"]}),
+        ], style={"marginTop": "4px"}),
+        html.Table([
+            html.Tbody(storm_rows),
+        ], style={"width": "100%", "maxWidth": "400px", "marginTop": "8px",
+                  "borderCollapse": "collapse"}),
+        html.Div([
+            html.Span(f"historical reprocessing: {vm.historical_reprocessing_attempts}",
+                      style={"color": THEME["yellow"], "fontSize": "10px",
+                             "fontFamily": THEME["font_mono"]}),
+            html.Span(" — lifecycle efficiency warning" if vm.historical_reprocessing_attempts > 1000 else "",
+                      style={"color": THEME["text_dim"], "fontSize": "10px"}),
+        ], style={"marginTop": "4px"}),
+    ], style={**CARD_STYLE, "borderLeft": f"3px solid {THEME['red']}"})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v14: Lineage Status
+# ══════════════════════════════════════════════════════════════════════════
+
+def _render_lineage_status(vm: B2DashboardViewModel) -> html.Div:
+    status_color = {"FULL": THEME["green"], "PARTIAL": THEME["yellow"],
+                    "MISSING": THEME["red"], "UNKNOWN": THEME["text_dim"]}.get(
+        vm.lineage_status, THEME["text_dim"])
+
+    field_rows = []
+    for key, val in vm.lineage_fields_present.items():
+        parts = val.split("/")
+        has = int(parts[0]) if len(parts) == 2 else 0
+        total = int(parts[1]) if len(parts) == 2 else 0
+        color = THEME["green"] if has == total else THEME["red"] if has == 0 else THEME["yellow"]
+        field_rows.append(html.Tr([
+            html.Td(key, style={"color": THEME["text_dim"], "fontFamily": THEME["font_mono"],
+                               "fontSize": "10px"}),
+            html.Td(val, style={"color": color, "fontFamily": THEME["font_mono"],
+                               "fontSize": "10px", "textAlign": "right", "fontWeight": "600"}),
+        ]))
+
+    missing_note = ""
+    if vm.missing_lineage_fields:
+        missing_note = f"missing: {', '.join(vm.missing_lineage_fields)}"
+
+    return html.Div([
+        html.Div([
+            html.Span("🔗 Signal Lineage: ", style={"color": THEME["text"], "fontWeight": "600",
+                                                     "fontSize": "12px"}),
+            html.Span(vm.lineage_status, style={"color": status_color, "fontWeight": "700",
+                                                 "fontSize": "12px"}),
+            html.Span(f"  {missing_note}" if missing_note else "",
+                      style={"color": THEME["yellow"], "fontSize": "10px",
+                             "fontFamily": THEME["font_mono"]}),
+            html.Span("  compat_mode=True" if vm.compatibility_mode else "",
+                      style={"color": THEME["yellow"], "fontSize": "10px",
+                             "fontFamily": THEME["font_mono"]}),
+        ]),
+        html.Table([html.Tbody(field_rows)],
+                   style={"width": "100%", "maxWidth": "500px", "marginTop": "6px",
+                          "borderCollapse": "collapse"}),
+    ], style={**CARD_STYLE, "padding": "10px 16px"}) if field_rows else html.Div()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 错误占位页
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -453,7 +563,7 @@ def _render_error_page(vm: B2DashboardViewModel) -> html.Div:
                                           ("UNKNOWN", str(vm.report_status), THEME["red"]))
 
     return html.Div([
-        _render_banner(),
+        _render_banner(vm),
         html.Div([
             html.Div(label, style={
                 "fontSize": "48px", "fontWeight": "700", "color": color,

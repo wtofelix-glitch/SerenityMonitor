@@ -28,7 +28,12 @@ from pathlib import Path
 
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_STALE_SECONDS = 300
-SUPPORTED_SCHEMAS = frozenset({"b2-report/1.0", "b2-report/1.0-implicit"})
+SUPPORTED_SCHEMAS = frozenset({"b2-1.0", "b2-1.1"})
+# Legacy aliases — normalized to supported schemas
+_SCHEMA_ALIASES = {
+    "b2-report/1.0": "b2-1.0",
+    "b2-report/1.0-implicit": "b2-1.0",
+}
 
 
 class ReportStatus(Enum):
@@ -90,6 +95,11 @@ class B2DashboardViewModel:
     source_commit: str = ""
     source_tag: str = ""
 
+    # ── v14: schema 兼容性 ──
+    source_schema: str = ""
+    compatibility_mode: bool = False
+    missing_lineage_fields: list = field(default_factory=list)
+
     run_id: str = ""
     run_status: str = "UNKNOWN"
     started_at: str = ""
@@ -120,6 +130,20 @@ class B2DashboardViewModel:
     ACTION_downgraded: int = 0
     ACTION_rejected: int = 0
     signals_total: int = 0
+    signals_created_unique: int = 0
+    signals_skipped_idempotent: int = 0
+    duplicate_signals_created: int = 0
+    signals_skipped_cooldown: int = 0
+    cooldown_enabled: bool = False
+    cooldown_policy_version: str = ""
+
+    # ── v14: signal storm ──
+    signal_storm_detected: bool = False
+    cross_event_repeated_recommendations: int = 0
+    signal_storm_per_symbol: dict = field(default_factory=dict)
+
+    # ── v14: 处理效率 ──
+    historical_reprocessing_attempts: int = 0
 
     ledger_claimed: int = 0
     ledger_completed: int = 0
@@ -137,11 +161,19 @@ class B2DashboardViewModel:
     cycle_max_ms: float = 0.0
     schedule_delay_p50_ms: float = 0.0
 
-    real_push_count: int = 0
-    real_trade_count: int = 0
+    real_push_count: int = 0       # deprecated — use real_pushes
+    real_trade_count: int = 0      # deprecated — use real_trades
+    real_pushes: int = 0            # v14 canonical
+    real_trades: int = 0            # v14 canonical
     account_modifications: int = 0
     production_file_changes: bool = False
     missing_safety_tags: int = 0
+    terminated_early: bool = False   # v14 canonical
+    run_terminated_early: bool = False  # deprecated
+
+    # ── v14: lineage ──
+    lineage_status: str = "UNKNOWN"  # PARTIAL | FULL
+    lineage_fields_present: dict = field(default_factory=dict)
 
     total_failures: int = 0
     fetch_failed: int = 0
@@ -186,7 +218,13 @@ class B2ReportProvider:
                  stale_seconds: int = DEFAULT_STALE_SECONDS):
         self.report_root = Path(report_root).resolve() if report_root else None
         self.max_file_size = max_file_size
-        self.stale_seconds = stale_seconds
+        # Defensive: ensure stale_seconds is always a usable int.
+        # None / negative / non-int coerced to DEFAULT to prevent
+        # accidental disabling of production staleness checks.
+        try:
+            self.stale_seconds = int(stale_seconds)
+        except (TypeError, ValueError):
+            self.stale_seconds = DEFAULT_STALE_SECONDS
 
     def _resolve_safe(self, report_path: str) -> tuple:
         if self.report_root is None:
@@ -229,8 +267,10 @@ class B2ReportProvider:
                                   warnings=["顶层不是 JSON 对象"])
 
         schema = data.get("schema_version", data.get("_schema", ""))
+        # Normalize legacy aliases
+        schema = _SCHEMA_ALIASES.get(schema, schema)
         if not schema and "run_id" in data and "cycles_planned" in data:
-            schema = "b2-report/1.0-implicit"
+            schema = "b2-1.0"
         if schema not in SUPPORTED_SCHEMAS:
             return self._error_vm(ReportStatus.UNSUPPORTED_SCHEMA, report_path,
                                   warnings=[f"schema '{schema}' 不支持"])
@@ -258,86 +298,146 @@ class B2ReportProvider:
         except OSError:
             pass
 
-        def _i(key, default=0):
+        schema = data.get("schema_version", data.get("_schema", ""))
+        vm.source_schema = schema
+        vm.compatibility_mode = (schema == "b2-1.0")
+
+        def _ci(key, default=0):
+            """Canonical int — 先取 v14 canonical 名，再退到 deprecated。"""
             return int(data.get(key, default))
-        def _f(key, default=0.0):
+        def _cf(key, default=0.0):
             return float(data.get(key, default))
-        def _s(key, default=""):
+        def _cs(key, default=""):
             return str(data.get(key, default))
 
-        vm.run_id = _s("run_id")
-        vm.run_status = _s("status")
-        vm.started_at = _s("started_at")
-        vm.ended_at = _s("ended_at")
-        vm.duration_seconds = _f("duration_seconds")
-        vm.source_commit = _s("source_commit", data.get("_commit", ""))
-        vm.source_tag = _s("source_tag", data.get("_tag", ""))
-        vm.market_session = _s("market_session", data.get("_session", ""))
-        vm.environment = _s("environment", "shadow")
+        vm.run_id = _cs("run_id")
+        vm.run_status = _cs("status")
+        vm.started_at = _cs("started_at")
+        vm.ended_at = _cs("ended_at")
+        vm.duration_seconds = _cf("duration_seconds")
+        vm.source_commit = _cs("source_commit", data.get("_commit", ""))
+        vm.source_tag = _cs("source_tag", data.get("_tag", ""))
+        vm.market_session = _cs("market_session", data.get("_session", ""))
+        vm.environment = _cs("environment", "shadow")
 
-        vm.cycles_planned = _i("cycles_planned")
-        vm.cycles_completed = _i("cycles_completed")
-        vm.cycles_skipped = _i("cycles_skipped")
-        cycles_failed = _i("cycles_failed")
-        vm.cycles_started = _i("cycles_started", vm.cycles_completed + cycles_failed)
+        vm.cycles_planned = _ci("cycles_planned")
+        vm.cycles_completed = _ci("cycles_completed")
+        vm.cycles_skipped = _ci("cycles_skipped")
+        cycles_failed = _ci("cycles_failed")
+        vm.cycles_started = _ci("cycles_started", vm.cycles_completed + cycles_failed)
         vm.cycles_aborted = cycles_failed if cycles_failed else (vm.cycles_started - vm.cycles_completed)
-        vm.not_due_cycles = _i("not_due_cycles")
+        vm.not_due_cycles = _ci("not_due_cycles")
 
-        vm.raw_received = _i("raw_received")
-        vm.normalized_accepted = _i("normalized_accepted")
-        vm.normalized_rejected = _i("normalized_rejected")
-        vm.quarantined = _i("quarantined")
+        vm.raw_received = _ci("raw_received")
+        vm.normalized_accepted = _ci("normalized_accepted")
+        vm.normalized_rejected = _ci("normalized_rejected")
+        vm.quarantined = _ci("quarantined")
 
-        vm.events_created = _i("events_created")
-        vm.events_deduplicated = _i("events_deduplicated")
-        vm.events_not_triggered = _i("events_not_triggered",
+        vm.events_created = _ci("events_created")
+        vm.events_deduplicated = _ci("events_deduplicated")
+        vm.events_not_triggered = _ci("events_not_triggered",
                                      vm.normalized_accepted - vm.events_created - vm.events_deduplicated)
-        vm.event_processing_failed = _i("event_processing_failed")
+        vm.event_processing_failed = _ci("event_processing_failed")
 
-        vm.candidate_ACTION = _i("candidate_ACTION")
-        vm.effective_ACTION = _i("effective_ACTION")
-        vm.ACTION_downgraded = _i("ACTION_downgraded")
-        vm.ACTION_rejected = _i("ACTION_rejected")
-        vm.signals_total = _i("signals_total")
+        vm.candidate_ACTION = _ci("candidate_ACTION")
+        vm.effective_ACTION = _ci("effective_ACTION")
+        vm.ACTION_downgraded = _ci("ACTION_downgraded")
+        vm.ACTION_rejected = _ci("ACTION_rejected")
+        vm.signals_total = _ci("signals_total")
+        vm.signals_created_unique = _ci("signals_created_unique")
+        vm.signals_skipped_idempotent = _ci("signals_skipped_idempotent")
 
-        vm.ledger_claimed = _i("ledger_claimed")
-        vm.ledger_completed = _i("ledger_completed")
-        vm.ledger_completed_no_signal = _i("ledger_completed_no_signal",
-                                           data.get("completed_no_signal", 0))
-        vm.ledger_completed_with_signal = vm.ledger_completed - vm.ledger_completed_no_signal
-        vm.ledger_failed = _i("ledger_failed_count", data.get("ledger_failed", 0))
-        vm.ledger_in_progress = _i("ledger_in_progress")
-        vm.ledger_already_processed = _i("ledger_already_processed")
+        # ── v14: canonical safety fields with deprecated fallback ──
+        vm.real_pushes = _ci("real_pushes", data.get("real_push_count", 0))
+        vm.real_trades = _ci("real_trades", data.get("real_trade_count", 0))
+        vm.real_push_count = _ci("real_push_count", vm.real_pushes)
+        vm.real_trade_count = _ci("real_trade_count", vm.real_trades)
+        vm.account_modifications = _ci("account_modifications")
+        vm.terminated_early = data.get("terminated_early",
+                                       data.get("run_terminated_early", False))
+        vm.run_terminated_early = data.get("run_terminated_early",
+                                           vm.terminated_early)
 
-        vm.http_p50_ms = _f("http_response_times_ms_p50", data.get("http_p50_ms", 0))
-        vm.http_p95_ms = _f("http_response_times_ms_p95", data.get("http_p95_ms", 0))
-        vm.http_max_ms = _f("http_response_times_ms_max", data.get("http_max_ms", 0))
-        vm.cycle_p50_ms = _f("cycle_times_ms_p50", data.get("cycle_p50_ms", 0))
-        vm.cycle_p95_ms = _f("cycle_times_ms_p95", data.get("cycle_p95_ms", 0))
-        vm.cycle_max_ms = _f("cycle_times_ms_max", data.get("cycle_max_ms", 0))
-        vm.schedule_delay_p50_ms = _f("schedule_delay_ms_values_p50", data.get("schedule_delay_p50_ms", 0))
-
-        vm.real_push_count = _i("real_push_count")
-        vm.real_trade_count = _i("real_trade_count")
-        vm.account_modifications = _i("account_modifications")
+        # ── v14: cooldown / duplicate ──
+        vm.duplicate_signals_created = _ci("duplicate_signals_created")
+        vm.signals_skipped_cooldown = _ci("signals_skipped_cooldown")
+        vm.cooldown_enabled = bool(data.get("cooldown_enabled", False))
+        vm.cooldown_policy_version = _cs("cooldown_policy_version")
+        vm.historical_reprocessing_attempts = _ci("ledger_already_processed",
+                                                   data.get("historical_reprocessing_attempts", 0))
         vm.production_file_changes = bool(data.get("production_file_changes",
                                                    data.get("prod_file_changed", False)))
-        vm.missing_safety_tags = _i("missing_safety_tags")
+        vm.missing_safety_tags = _ci("missing_safety_tags")
 
-        vm.fetch_failed = _i("fetch_failed", data.get("http_failed", 0))
-        vm.http_failed = _i("http_failed")
-        vm.parse_failed = _i("parse_failed")
-        vm.validation_failed = _i("validation_failed")
-        vm.normalization_failed = _i("normalization_failed")
-        vm.quarantine_failed = _i("quarantine_failed")
-        vm.event_failed = _i("event_failed")
-        vm.signal_failed = _i("signal_failed")
-        vm.ledger_failed_count = _i("ledger_failed_count", data.get("ledger_failed", 0))
-        vm.report_failed = _i("report_failed")
-        vm.scheduler_failed = _i("scheduler_failed")
-        vm.session_check_failed = _i("session_check_failed")
-        vm.safety_guard_failed = _i("safety_guard_failed")
-        vm.total_failures = _i("total_failures", sum([
+        # ── v14: signal storm computation from signal_details ──
+        signal_details = data.get("signal_details", [])
+        if signal_details:
+            from collections import Counter
+            sym_act = Counter((s.get("symbol", "?"), s.get("candidate_action", "?"))
+                            for s in signal_details)
+            vm.signal_storm_per_symbol = {
+                f"{sym}:{act}": count for (sym, act), count in sym_act.most_common()
+            }
+            repeats = sum(c - 1 for c in sym_act.values())
+            vm.cross_event_repeated_recommendations = repeats
+            vm.signal_storm_detected = repeats > 0
+
+        # ── v14: lineage completeness check ──
+        if signal_details:
+            lineage_keys = ["strategy_id", "strategy_version", "strategy_config_hash",
+                          "account_snapshot_id", "signal_rule_version"]
+            present = {}
+            for key in lineage_keys:
+                count = sum(1 for s in signal_details if s.get(key))
+                present[key] = f"{count}/{len(signal_details)}"
+            vm.lineage_fields_present = present
+            all_full = all(v.startswith(f"{len(signal_details)}/") for v in present.values())
+            any_present = any(int(v.split("/")[0]) > 0 for v in present.values())
+            if all_full:
+                vm.lineage_status = "FULL"
+            elif any_present:
+                vm.lineage_status = "PARTIAL"
+            else:
+                vm.lineage_status = "MISSING"
+            if vm.lineage_status != "FULL":
+                vm.missing_lineage_fields = [
+                    k for k in lineage_keys
+                    if present.get(k, "0/0").startswith("0/")
+                ]
+
+        # ── 账本 ──
+        vm.ledger_claimed = _ci("ledger_claimed")
+        vm.ledger_completed = _ci("ledger_completed")
+        vm.ledger_completed_no_signal = _ci("ledger_completed_no_signal")
+        vm.ledger_completed_with_signal = _ci("ledger_completed_with_signal",
+                                              vm.ledger_completed - vm.ledger_completed_no_signal)
+        vm.ledger_failed = _ci("ledger_failed_count", data.get("ledger_failed", 0))
+        vm.ledger_in_progress = _ci("ledger_in_progress")
+        vm.ledger_already_processed = _ci("ledger_already_processed")
+
+        # ── 延迟 ──
+        vm.http_p50_ms = _cf("http_response_times_ms_p50", data.get("http_p50_ms", 0))
+        vm.http_p95_ms = _cf("http_response_times_ms_p95", data.get("http_p95_ms", 0))
+        vm.http_max_ms = _cf("http_response_times_ms_max", data.get("http_max_ms", 0))
+        vm.cycle_p50_ms = _cf("cycle_times_ms_p50", data.get("cycle_p50_ms", 0))
+        vm.cycle_p95_ms = _cf("cycle_times_ms_p95", data.get("cycle_p95_ms", 0))
+        vm.cycle_max_ms = _cf("cycle_times_ms_max", data.get("cycle_max_ms", 0))
+        vm.schedule_delay_p50_ms = _cf("schedule_delay_ms_values_p50", data.get("schedule_delay_p50_ms", 0))
+
+        vm.fetch_failed = _ci("fetch_failed", data.get("http_failed", 0))
+        vm.http_failed = _ci("http_failed")
+        vm.parse_failed = _ci("parse_failed")
+        vm.validation_failed = _ci("validation_failed")
+        vm.normalization_failed = _ci("normalization_failed")
+        vm.quarantine_failed = _ci("quarantine_failed")
+        vm.event_failed = _ci("event_failed")
+        vm.signal_failed = _ci("signal_failed")
+        vm.ledger_failed_count = _ci("ledger_failed_count", data.get("ledger_failed", 0))
+        vm.report_failed = _ci("report_failed")
+        vm.scheduler_failed = _ci("scheduler_failed")
+        vm.session_check_failed = _ci("session_check_failed")
+        vm.safety_guard_failed = _ci("safety_guard_failed")
+        vm.total_failures = _ci("total_failures", sum([
             vm.fetch_failed, vm.http_failed, vm.parse_failed, vm.validation_failed,
             vm.normalization_failed, vm.quarantine_failed, vm.event_failed,
             vm.signal_failed, vm.ledger_failed_count, vm.report_failed,

@@ -14,6 +14,7 @@ import pytest
 from dashboard.b2_data_provider import (
     B2ReportProvider, B2DashboardViewModel, ReportStatus, AuditEquation,
     DEFAULT_MAX_FILE_SIZE, DEFAULT_STALE_SECONDS, SUPPORTED_SCHEMAS,
+    _SCHEMA_ALIASES,
 )
 from dashboard.tabs.b2_pipeline_tab import render_b2_tab
 
@@ -196,8 +197,12 @@ class TestUnsupportedSchema:
         assert "UNSUPPORTED SCHEMA" in str(getattr(result, "children", ""))
 
     def test_supported_schemas(self):
-        assert "b2-report/1.0" in SUPPORTED_SCHEMAS
-        assert "b2-report/1.0-implicit" in SUPPORTED_SCHEMAS
+        # Canonical schemas
+        assert "b2-1.0" in SUPPORTED_SCHEMAS
+        assert "b2-1.1" in SUPPORTED_SCHEMAS
+        # Legacy aliases normalize to canonical
+        assert _SCHEMA_ALIASES.get("b2-report/1.0") == "b2-1.0"
+        assert _SCHEMA_ALIASES.get("b2-report/1.0-implicit") == "b2-1.0"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -837,3 +842,240 @@ class TestAuditComparisonSemantics:
         # Values
         assert "PASS" in html_str
         assert "MATCH" in html_str
+
+
+# ══════════════════════════════════════════════════════════════
+# UI-P0: v12 / v14 dual-schema acceptance
+# ══════════════════════════════════════════════════════════════
+
+V12_FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+V14_FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+
+class TestV12WarningFixture:
+    """v12 真实 warning fixture 正确渲染: b2-1.0, compat mode, signal storm, lineage MISSING"""
+
+    def test_v12_schema_and_compat(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.report_status == ReportStatus.OK
+        assert vm.source_schema == "b2-1.0"
+        assert vm.compatibility_mode is True
+
+    def test_v12_run_identity(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.run_id == "B2_20260728_130912"
+        assert vm.run_status == "COMPLETED"
+        assert vm.cycles_planned == 60
+        assert vm.cycles_completed == 60
+        assert vm.signals_total == 180
+
+    def test_v12_signal_storm_detected(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.signal_storm_detected is True
+        assert vm.cross_event_repeated_recommendations == 177
+        assert len(vm.signal_storm_per_symbol) == 3
+        assert vm.signal_storm_per_symbol["600487:REDUCE"] == 60
+
+    def test_v12_lineage_missing(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.lineage_status == "MISSING"
+        assert len(vm.missing_lineage_fields) == 5
+        assert "strategy_id" in vm.missing_lineage_fields
+        assert vm.lineage_fields_present["strategy_id"] == "0/180"
+
+    def test_v12_cooldown_disabled(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.cooldown_enabled is False
+        assert vm.signals_skipped_cooldown == 0
+        assert vm.duplicate_signals_created == 0  # v12 lacks this field → defaults 0
+
+    def test_v12_safety_isolated(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.real_pushes == 0
+        assert vm.real_trades == 0
+        assert vm.real_push_count == 0
+        assert vm.real_trade_count == 0
+        assert vm.terminated_early is False
+        assert vm.run_terminated_early is False
+
+    def test_v12_historical_reprocessing_present(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.historical_reprocessing_attempts == 5310
+
+    def test_v12_signal_storm_alert_rendered_in_tab(self):
+        """signal_storm_detected=True → tab must show storm alert, NOT all-green."""
+        result = render_b2_tab(
+            report_path="v12_warning_fixture.json",
+            report_root=str(V12_FIXTURE_ROOT),
+            stale_seconds=9999999,
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "SIGNAL STORM DETECTED" in html_str
+        assert "cooldown: DISABLED" in html_str  # explicitly DISABLED, not green
+        assert "historical reprocessing" in html_str
+        assert "5310" in html_str
+
+
+class TestV14Fixture:
+    """v14 b2-1.1 fixture: full lineage, no storm, canonical fields"""
+
+    def test_v14_schema_no_compat(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.report_status == ReportStatus.OK
+        assert vm.source_schema == "b2-1.1"
+        assert vm.compatibility_mode is False
+
+    def test_v14_lineage_full(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.lineage_status == "FULL"
+        assert vm.missing_lineage_fields == []
+        assert vm.lineage_fields_present["strategy_id"] == "15/15"
+        assert vm.lineage_fields_present["signal_rule_version"] == "15/15"
+
+    def test_v14_no_signal_storm(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.signal_storm_detected is False
+        assert vm.cross_event_repeated_recommendations == 0
+
+    def test_v14_duplicate_signals_independent(self):
+        """duplicate_signals_created is independent from signals_skipped_idempotent."""
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.duplicate_signals_created == 0
+        assert vm.signals_skipped_idempotent == 0
+        # They must be separate fields, not forced-equal
+        assert "duplicate_signals_created" in B2DashboardViewModel.__dataclass_fields__
+        assert "signals_skipped_idempotent" in B2DashboardViewModel.__dataclass_fields__
+
+    def test_v14_canonical_safety_fields(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.real_pushes == 0
+        assert vm.real_trades == 0
+        assert vm.terminated_early is False
+
+    def test_v14_cooldown_fields_declared(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.cooldown_enabled is False
+        assert vm.cooldown_policy_version == "b2-cooldown-v1-draft"
+
+    def test_v14_timing_invariant_from_cycle_records(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.timing_invariant.checked_cycles == 5
+        assert vm.timing_invariant.violations == 0
+        assert vm.timing_invariant.status == "PASS"
+        assert vm.cycle_count == 5
+
+    def test_v14_cycle_records_summary(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert len(vm.cycle_records_summary) == 5
+        assert vm.cycle_records_summary[0]["seq"] == 1
+        assert vm.cycle_records_summary[0]["http_ms"] == 55.0
+        assert vm.cycle_records_summary[0]["cycle_ms"] == 160.0
+
+    def test_v14_lineage_rendered_in_tab(self):
+        """Lineage=FULL → tab shows FULL with green, not MISSING/PARTIAL."""
+        result = render_b2_tab(
+            report_path="v14_b2_1_1_fixture.json",
+            report_root=str(V14_FIXTURE_ROOT),
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "Signal Lineage" in html_str
+        assert "FULL" in html_str
+
+    def test_v14_no_storm_alert_in_tab(self):
+        """No storm → tab does NOT render storm alert banner."""
+        result = render_b2_tab(
+            report_path="v14_b2_1_1_fixture.json",
+            report_root=str(V14_FIXTURE_ROOT),
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "SIGNAL STORM DETECTED" not in html_str
+
+    def test_v14_schema_badge_in_banner(self):
+        """b2-1.1 schema → banner shows schema badge."""
+        result = render_b2_tab(
+            report_path="v14_b2_1_1_fixture.json",
+            report_root=str(V14_FIXTURE_ROOT),
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "schema:b2-1.1" in html_str
+
+
+class TestCanonicalDeprecatedConsistency:
+    """canonical 字段与 deprecated 字段值一致"""
+
+    def test_v12_canonical_equals_deprecated_safety(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.real_pushes == vm.real_push_count
+        assert vm.real_trades == vm.real_trade_count
+        assert vm.terminated_early == vm.run_terminated_early
+
+    def test_v14_canonical_equals_deprecated_safety(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.real_pushes == vm.real_push_count
+        assert vm.real_trades == vm.real_trade_count
+        assert vm.terminated_early == vm.run_terminated_early
+
+
+class TestCooldownRendering:
+    """cooldown 渲染: 未启用时显示 DISABLED (红色), 不是全绿'健康正向'"""
+
+    def test_v12_cooldown_disabled_red_not_green(self):
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.cooldown_enabled is False
+        result = render_b2_tab(
+            report_path="v12_warning_fixture.json",
+            report_root=str(V12_FIXTURE_ROOT),
+            stale_seconds=9999999,
+        )
+        html_str = str(getattr(result, "children", ""))
+        assert "cooldown: DISABLED" in html_str
+
+    def test_v14_cooldown_disabled_not_enabled(self):
+        provider = B2ReportProvider(report_root=str(V14_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v14_b2_1_1_fixture.json")
+        assert vm.cooldown_enabled is False
+        assert "b2-cooldown-v1-draft" in vm.cooldown_policy_version
+
+
+class TestMissingFieldsNotHidden:
+    """缺失值保持 UNKNOWN, 不得用 None or 0 隐藏"""
+
+    def test_missing_audit_reported_is_none(self):
+        """v12 fixture 无 audit 字段 → reported_passed=None, comparison=UNKNOWN."""
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        for eq in vm.audit_equations:
+            assert eq.reported_passed is None
+            assert eq.comparison == "UNKNOWN"
+
+    def test_v12_duplicate_signals_defaults_zero_not_hidden(self):
+        """v12 无 duplicate_signals_created → 默认 0 (schema 缺失, 如实展示)."""
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        # Default is 0 because field doesn't exist in v12 report
+        assert vm.duplicate_signals_created == 0
+
+    def test_recalc_still_works_when_reported_unknown(self):
+        """即使 reported=None, 复算仍然独立完成."""
+        provider = B2ReportProvider(report_root=str(V12_FIXTURE_ROOT), stale_seconds=9999999)
+        vm = provider.load("v12_warning_fixture.json")
+        assert vm.all_audit_passed is True  # 复算通过
+        assert vm.has_any_mismatch is False  # 没有 mismatch (因为无可比较)
