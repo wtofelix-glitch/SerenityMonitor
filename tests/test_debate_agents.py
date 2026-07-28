@@ -193,16 +193,9 @@ class TestBearAgent:
         pos = agent.debate_round(bullish_reports, round_number=1)
         assert pos.conviction < 0.5
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "ISSUE-LLM-001: LLM rebuttal text assertion is fragile. "
-            "Model output drift makes fixed-string assertion unreliable. "
-            "Does not import serenity_v2 market/event/account/signal/isolation modules. "
-            "Fix: replace with semantic assertion or regex instead of literal match."
-        ),
-        raises=AssertionError,
-    )
+    # NOTE: 曾标记为 strict xfail (ISSUE-LLM-001, LLM 输出漂移)。
+    # 当前 LLM 输出重新包含 "弱势" 字符串，测试稳定通过。
+    # 若再次因 LLM 漂移失败，需用语义断言替代固定字符串匹配。
     def test_rebuttal_in_round2(self, bus, llm, bearish_reports):
         """Round 2 反驳多方"""
         agent = BearAgent(bus, llm, CODE)
