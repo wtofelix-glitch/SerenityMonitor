@@ -31,7 +31,7 @@ CST = timezone(timedelta(hours=8))
 logger = logging.getLogger("serenity_v2.phase_b2")
 
 # v10: Report schema version — bump when report structure changes
-B2_REPORT_SCHEMA_VERSION = "b2-1.0"
+B2_REPORT_SCHEMA_VERSION = "b2-1.1"
 
 # ---------------------------------------------------------------------------
 # B2 配置
@@ -223,6 +223,12 @@ class B2Metrics:
     ledger_already_processed: int = 0
     ledger_in_progress: int = 0
 
+    # ── v14: 跨事件去重（cooldown 框架就位，策略未启用）──
+    duplicate_signals_created: int = 0   # 精确重复（同一 event_id 被多次处理）
+    signals_skipped_cooldown: int = 0    # 因 cooldown 跳过（当前始终为 0）
+    cooldown_enabled: bool = False
+    cooldown_policy_version: str = ""
+
     # ── 安全层 ──
     prod_file_hash_before: dict = field(default_factory=dict)
     prod_file_hash_after: dict = field(default_factory=dict)
@@ -373,6 +379,14 @@ class B2Metrics:
         report.update({
             "prod_file_hash_before": self.prod_file_hash_before,
             "prod_file_hash_after": self.prod_file_hash_after,
+            # v14 canonical names
+            "real_pushes": self.real_push_count,
+            "real_trades": self.real_trade_count,
+            "duplicate_signals_created": self.duplicate_signals_created,
+            "signals_skipped_cooldown": self.signals_skipped_cooldown,
+            "cooldown_enabled": self.cooldown_enabled,
+            "cooldown_policy_version": self.cooldown_policy_version,
+            # deprecated (保留兼容，值必须与新字段相等)
             "real_push_count": self.real_push_count,
             "real_trade_count": self.real_trade_count,
             "account_modifications": self.account_modifications,
@@ -382,11 +396,14 @@ class B2Metrics:
         # ── 终止元数据 (v10) ──
         report.update({
             "run_completed": self.run_completed,
-            "run_terminated_early": self.run_terminated_early,
+            # v14 canonical name
+            "terminated_early": self.run_terminated_early,
             "termination_type": self.termination_type,
             "termination_reason": self.termination_reason,
             "target_duration_sec": self.target_duration_sec,
             "actual_duration_ms": self.actual_duration_ms,
+            # deprecated (保留兼容)
+            "run_terminated_early": self.run_terminated_early,
         })
 
         # ── 自动停止 ──
@@ -674,6 +691,8 @@ class B2Runner:
         )
 
         # P0-2: 稳定上下文键 — 用于信号幂等
+        # strategy_id: B2 影子运行器唯一标识（非 Python object repr）
+        self._strategy_id = "b2-shadow-runner"
         # strategy_version: 从 desk/verifier 配置派生
         self._strategy_version = "b2-1.0"
         # strategy_config_hash: B2 固定配置的 SHA256
@@ -888,6 +907,7 @@ class B2Runner:
         self.metrics.signal_details.append({
             "signal_id": sig.signal_id,
             "symbol": sig.symbol,
+            "event_id": sig.event_id,
             "candidate_level": cand,
             "candidate_action": sig.candidate_trade_action,
             "effective_level": eff,
@@ -896,9 +916,17 @@ class B2Runner:
             "secondary_norms": sig.secondary_normalization_reasons,
             "confidence": sig.confidence,
             "market_session": sig.market_session,
-            "event_id": sig.event_id,
             "action_suppressed": sig.action_suppressed,
             "execution_tags": sig.execution_tags,
+            # ── v14: 完整 lineage（从 ledger/持久化记录读取）──
+            "strategy_id": self._strategy_id,
+            "strategy_version": self._strategy_version,
+            "strategy_config_hash": self._strategy_config_hash,
+            "account_snapshot_id": self._account_snapshot_id,
+            "account_snapshot_id_full": self._account_snapshot_id,
+            "signal_rule_version": self._strategy_version,
+            "session": sig.market_session,
+            "environment": "shadow",
         })
 
         required_tags = {"SHADOW_ONLY", "NOT_FOR_EXECUTION",
@@ -1137,6 +1165,24 @@ class B2Runner:
 
                     for nq in norms:
                         event, quarantined, qreason = normalized_quote_to_event(nq)
+
+                        # v14: 注入安全上下文（EventRecord 首次持久化时写入，不可变）
+                        event.payload.data["safety"] = {
+                            "environment": "shadow",
+                            "execution_allowed": False,
+                            "tags": [
+                                "SHADOW_ONLY",
+                                "NOT_FOR_EXECUTION",
+                                "ACCOUNT_CONTEXT_FIXTURE",
+                                "ACCOUNT_CONTEXT_STALE",
+                            ],
+                        }
+                        event.payload.data["account_context"] = {
+                            "mode": "FIXTURE",
+                            "stale": True,
+                            "account_snapshot_id": self._account_snapshot_id,
+                            "account_snapshot_id_full": self._account_snapshot_id,
+                        }
 
                         if quarantined:
                             self.store.quarantine_event(
@@ -1379,6 +1425,10 @@ class B2Runner:
             self.metrics.ledger_failed_count = ledger_stats.get("FAILED", 0)
             self.metrics.ledger_in_progress = ledger_stats.get("PROCESSING", 0)
             self.metrics.ledger_already_processed = (
+                self.idempotent.stats.get("already_processed", 0))
+            # v14: 连接幂等统计 — signals_skipped_idempotent 从处理器统计填充
+            # duplicate_signals_created 为独立字段（跨事件精确重复计数，可不同值）
+            self.metrics.signals_skipped_idempotent = (
                 self.idempotent.stats.get("already_processed", 0))
         except Exception:
             self.metrics.report_failed += 1

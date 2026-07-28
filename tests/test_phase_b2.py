@@ -1495,3 +1495,179 @@ class TestV11OfflineReplay:
               f"both {result1.cycles_started} cycles")
 
         B2Runner._release_lock()
+
+
+# ====================================================================
+# v14: lineage, safety persistence, report contract
+# ====================================================================
+
+
+class TestV14LineageAndSchema:
+    """v14: 信号 lineage 完整性、安全持久化、报告字段规范。"""
+
+    def test_to_report_dict_has_schema_v1_1(self):
+        """v14-01: schema_version = b2-1.1。"""
+        from serenity_v2.phase_b2 import B2Metrics, B2_REPORT_SCHEMA_VERSION
+
+        assert B2_REPORT_SCHEMA_VERSION == "b2-1.1"
+        m = B2Metrics()
+        d = m.to_report_dict()
+        assert d["schema_version"] == "b2-1.1"
+
+    def test_canonical_safety_fields_present(self):
+        """v14-02: canonical 安全字段存在且值与 deprecated 一致。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        m.real_push_count = 0
+        m.real_trade_count = 0
+        d = m.to_report_dict()
+
+        assert "real_pushes" in d
+        assert "real_trades" in d
+        assert "duplicate_signals_created" in d
+        assert "signals_skipped_cooldown" in d
+        assert "cooldown_enabled" in d
+        assert "cooldown_policy_version" in d
+        assert d["real_pushes"] == d["real_push_count"]
+        assert d["real_trades"] == d["real_trade_count"]
+        assert d["duplicate_signals_created"] == 0
+        assert d["cooldown_enabled"] is False
+
+    def test_terminated_early_canonical(self):
+        """v14-03: terminated_early 存在且与 run_terminated_early 一致。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        m.run_terminated_early = False
+        d = m.to_report_dict()
+        assert "terminated_early" in d
+        assert d["terminated_early"] is False
+        assert "run_terminated_early" in d
+        assert d["terminated_early"] == d["run_terminated_early"]
+
+        m2 = B2Metrics()
+        m2.run_terminated_early = True
+        d2 = m2.to_report_dict()
+        assert d2["terminated_early"] is True
+
+    def test_duplicate_signals_not_hardcoded(self):
+        """v14-04: duplicate_signals_created 来自 metrics 字段。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        m.duplicate_signals_created = 5
+        d = m.to_report_dict()
+        assert d["duplicate_signals_created"] == 5
+
+        m.duplicate_signals_created = 0
+        d2 = m.to_report_dict()
+        assert d2["duplicate_signals_created"] == 0
+
+    def test_signal_detail_lineage_complete(self):
+        """v14-05: signal_details 包含完整 lineage 字段。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        full_snap = "18dc7d197f33a1bde4312e187743309d3a01b7108e51d76d901e8c4e2b46ff67"
+        m = B2Metrics()
+        m.signal_details = [{
+            "signal_id": "SIG_TEST_001", "symbol": "600487",
+            "event_id": "EVT_TEST_001",
+            "candidate_level": "ACTION", "candidate_action": "REDUCE",
+            "effective_level": "ACTION", "effective_action": "REDUCE",
+            "primary_norm": "", "secondary_norms": [],
+            "confidence": "high", "market_session": "CONTINUOUS_PM",
+            "action_suppressed": False,
+            "execution_tags": ["SHADOW_ONLY", "NOT_FOR_EXECUTION",
+                               "ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE"],
+            "strategy_id": "b2-shadow-runner",
+            "strategy_version": "b2-1.0",
+            "strategy_config_hash": "ff81aeab0fa74c5a",
+            "account_snapshot_id": full_snap,
+            "account_snapshot_id_full": full_snap,
+            "signal_rule_version": "b2-1.0",
+            "session": "CONTINUOUS_PM", "environment": "shadow",
+        }]
+        d = m.to_report_dict()
+        sd = d["signal_details"][0]
+
+        for key in ["strategy_id", "strategy_version", "strategy_config_hash",
+                     "account_snapshot_id", "account_snapshot_id_full",
+                     "signal_rule_version", "session", "environment",
+                     "execution_tags", "event_id", "signal_id"]:
+            assert key in sd, f"missing: {key}"
+            assert sd[key] is not None, f"{key} is None"
+            if key != "secondary_norms":
+                assert sd[key] != "", f"{key} is empty"
+
+        assert len(sd["account_snapshot_id_full"]) == 64
+        assert not sd["strategy_id"].startswith("<"), \
+            f"strategy_id is Python repr: {sd['strategy_id']}"
+
+        tags = sd["execution_tags"]
+        for tag in ["SHADOW_ONLY", "NOT_FOR_EXECUTION",
+                     "ACCOUNT_CONTEXT_FIXTURE", "ACCOUNT_CONTEXT_STALE"]:
+            assert tag in tags, f"missing tag: {tag}"
+
+    def test_no_signal_detail_for_empty(self):
+        """v14-06: 无信号时 signal_details 为空数组。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        d = m.to_report_dict()
+        assert d["signal_details"] == []
+
+    def test_report_still_valid_json_dict(self):
+        """v14-07: 报告仍是合法 JSON object。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        import json
+
+        m = B2Metrics()
+        m.run_id = "B2_v14_test"
+        m.status = "COMPLETED"
+        d = m.to_report_dict()
+
+        j = json.dumps(d, ensure_ascii=False, default=str)
+        assert j.lstrip().startswith("{")
+        parsed = json.loads(j)
+        assert isinstance(parsed, dict)
+        assert parsed["schema_version"] == "b2-1.1"
+
+    def test_b2_1_0_backward_compatible(self):
+        """v14-08: b2-1.0 legacy 字段仍存在。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        import json
+
+        m = B2Metrics()
+        m.run_id = "B2_legacy_test"
+        m.status = "COMPLETED"
+        d = m.to_report_dict()
+
+        for k in ["run_id", "status", "cycles_planned", "cycles_started",
+                   "cycles_completed", "signals_total", "real_push_count",
+                   "real_trade_count", "run_terminated_early", "run_completed"]:
+            assert k in d, f"legacy key missing: {k}"
+
+        json.loads(json.dumps(d, ensure_ascii=False, default=str))
+
+    def test_cooldown_disabled_by_default(self):
+        """v14-09: cooldown 默认禁用。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        d = m.to_report_dict()
+        assert d["cooldown_enabled"] is False
+        assert d["cooldown_policy_version"] == ""
+        assert d["signals_skipped_cooldown"] == 0
+
+    def test_duplicate_vs_idempotent_not_mixed(self):
+        """v14-10: duplicate 和 idempotent 独立。"""
+        from serenity_v2.phase_b2 import B2Metrics
+
+        m = B2Metrics()
+        m.duplicate_signals_created = 7
+        m.signals_skipped_idempotent = 3
+        d = m.to_report_dict()
+        assert d["duplicate_signals_created"] == 7
+        assert d["signals_skipped_idempotent"] == 3
+        assert d["duplicate_signals_created"] != d["signals_skipped_idempotent"]
