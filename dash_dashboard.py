@@ -32,9 +32,16 @@ log = get_logger(__name__)
 
 # ── B2 管线看板 feature flag ───────────────────────────────
 # ENABLE_B2_DASHBOARD=true  启用 B2 Tab
+#   接受的 ON 值: true / 1 / yes / on (大小写不敏感)
+#   其他所有值 (包括 false / 0 / no / off / 空 / 未设置 / 非法值) → OFF (fail-closed)
 # B2_REPORT_PATH            报告 JSON 文件路径 (相对或绝对)
 # B2_REPORT_ROOT            报告根目录 (路径安全校验用)
-ENABLE_B2_DASHBOARD = os.environ.get("ENABLE_B2_DASHBOARD", "false").lower() == "true"
+def _parse_b2_flag() -> bool:
+    """Parse ENABLE_B2_DASHBOARD — fail-closed: only explicit true/1/yes/on."""
+    raw = os.environ.get("ENABLE_B2_DASHBOARD", "")
+    return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+ENABLE_B2_DASHBOARD = _parse_b2_flag()
 B2_REPORT_PATH = os.environ.get("B2_REPORT_PATH", "")
 B2_REPORT_ROOT = os.environ.get(
     "B2_REPORT_ROOT",
