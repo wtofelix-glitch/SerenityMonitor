@@ -1210,3 +1210,253 @@ class TestB2FeatureFlagIntegration:
             if "ENABLE_B2_DASHBOARD" in content and "false" in content.lower():
                 found = True
         assert found, "ENABLE_B2_DASHBOARD default=false not documented"
+
+
+# ══════════════════════════════════════════════════════════════
+# UI-P0 v3: Dash layout integration (programmatic, no browser)
+# ══════════════════════════════════════════════════════════════
+
+
+class TestB2DashLayoutFlagOff:
+    """FLAG OFF: B2 tab absent, 4 old tabs present, no traceback in layout."""
+
+    def test_b2_tab_absent_from_layout(self):
+        saved = _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            assert "🏭 B2 管线" not in layout_str
+        finally:
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+
+    def test_four_old_tabs_present(self):
+        saved = _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            for label in ["📊 IC 归因", "⚖️ 权重对比", "📈 执行历史", "🛡️ 风控状态"]:
+                assert label in layout_str, f"Missing tab: {label}"
+        finally:
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+
+    def test_no_traceback_in_layout(self):
+        saved = _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            assert "Traceback" not in layout_str
+        finally:
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+
+    def test_b2_callback_not_invoked_when_off(self):
+        """OFF → render_tab('tab-b2') still works (fault-tolerant) but no tab to click."""
+        saved = _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            result = dash_dashboard.render_tab("tab-b2", 0)
+            assert result is not None
+            assert "Div" in type(result).__name__
+        finally:
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+
+
+class TestB2DashLayoutFlagOn:
+    """FLAG ON: B2 tab present exactly once, old tabs preserved."""
+
+    def test_b2_tab_present_exactly_once(self):
+        saved = _os.environ.get("ENABLE_B2_DASHBOARD")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V14_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v14_b2_1_1_fixture.json"
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            assert layout_str.count("🏭 B2 管线") == 1, \
+                f"Expected 1 B2 tab, found {layout_str.count('🏭 B2 管线')}"
+        finally:
+            _os.environ.pop("B2_REPORT_ROOT", None)
+            _os.environ.pop("B2_REPORT_PATH", None)
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+            else:
+                _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+
+    def test_old_tabs_still_present_with_b2(self):
+        saved = _os.environ.get("ENABLE_B2_DASHBOARD")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V14_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v14_b2_1_1_fixture.json"
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            for label in ["📊 IC 归因", "⚖️ 权重对比", "📈 执行历史", "🛡️ 风控状态"]:
+                assert label in layout_str, f"Missing tab with B2 ON: {label}"
+        finally:
+            _os.environ.pop("B2_REPORT_ROOT", None)
+            _os.environ.pop("B2_REPORT_PATH", None)
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+            else:
+                _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+
+    def test_b2_tab_renders_with_v14_fixture(self):
+        saved_flag = _os.environ.get("ENABLE_B2_DASHBOARD")
+        saved_root = _os.environ.get("B2_REPORT_ROOT")
+        saved_path = _os.environ.get("B2_REPORT_PATH")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V14_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v14_b2_1_1_fixture.json"
+        # Touch fixture to prevent STALE detection
+        _os.utime(str(V14_FIXTURE_ROOT / "v14_b2_1_1_fixture.json"), None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            result = dash_dashboard.render_tab("tab-b2", 0)
+            html_str = str(getattr(result, "children", ""))
+            assert "schema:b2-1.1" in html_str
+            assert "FULL" in html_str
+        finally:
+            for k, v in [("ENABLE_B2_DASHBOARD", saved_flag),
+                         ("B2_REPORT_ROOT", saved_root),
+                         ("B2_REPORT_PATH", saved_path)]:
+                if v is not None:
+                    _os.environ[k] = v
+                else:
+                    _os.environ.pop(k, None)
+
+    def test_b2_tab_renders_with_v12_fixture(self):
+        saved_flag = _os.environ.get("ENABLE_B2_DASHBOARD")
+        saved_root = _os.environ.get("B2_REPORT_ROOT")
+        saved_path = _os.environ.get("B2_REPORT_PATH")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V12_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v12_warning_fixture.json"
+        # Touch fixture to prevent STALE detection
+        _os.utime(str(V12_FIXTURE_ROOT / "v12_warning_fixture.json"), None)
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            result = dash_dashboard.render_tab("tab-b2", 0)
+            html_str = str(getattr(result, "children", ""))
+            assert "SIGNAL STORM DETECTED" in html_str
+            assert "cooldown: DISABLED" in html_str
+        finally:
+            for k, v in [("ENABLE_B2_DASHBOARD", saved_flag),
+                         ("B2_REPORT_ROOT", saved_root),
+                         ("B2_REPORT_PATH", saved_path)]:
+                if v is not None:
+                    _os.environ[k] = v
+                else:
+                    _os.environ.pop(k, None)
+
+    def test_no_traceback_with_b2_on(self):
+        saved = _os.environ.get("ENABLE_B2_DASHBOARD")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V14_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v14_b2_1_1_fixture.json"
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            assert "Traceback" not in layout_str
+        finally:
+            _os.environ.pop("B2_REPORT_ROOT", None)
+            _os.environ.pop("B2_REPORT_PATH", None)
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+            else:
+                _os.environ.pop("ENABLE_B2_DASHBOARD", None)
+
+
+class TestB2DashFaultIsolation:
+    """B2 failures must not propagate to other tabs or crash the layout."""
+
+    def test_file_not_found_returns_error_card(self):
+        saved_flag = _os.environ.get("ENABLE_B2_DASHBOARD")
+        saved_root = _os.environ.get("B2_REPORT_ROOT")
+        saved_path = _os.environ.get("B2_REPORT_PATH")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V12_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "nonexistent_file.json"
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            result = dash_dashboard.render_tab("tab-b2", 0)
+            html_str = str(getattr(result, "children", ""))
+            assert "NO DATA" in html_str or "ERROR" in html_str or "INVALID" in html_str.upper()
+        finally:
+            for k, v in [("ENABLE_B2_DASHBOARD", saved_flag),
+                         ("B2_REPORT_ROOT", saved_root),
+                         ("B2_REPORT_PATH", saved_path)]:
+                if v is not None:
+                    _os.environ[k] = v
+                else:
+                    _os.environ.pop(k, None)
+
+    def test_old_tab_works_after_b2_error(self):
+        """Old tab rendering succeeds even after B2 encounter."""
+        saved_flag = _os.environ.get("ENABLE_B2_DASHBOARD")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V12_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "nonexistent_file.json"
+        try:
+            import importlib
+            import dash_dashboard
+            importlib.reload(dash_dashboard)
+            # B2 tab renders error card
+            b2_result = dash_dashboard.render_tab("tab-b2", 0)
+            assert b2_result is not None
+            # Old tab (IC) still works
+            ic_result = dash_dashboard.render_tab("tab-ic", 0)
+            assert ic_result is not None
+            assert "Div" in type(ic_result).__name__
+        finally:
+            for k, v in [("ENABLE_B2_DASHBOARD", saved_flag),
+                         ("B2_REPORT_ROOT", _os.environ.get("B2_REPORT_ROOT")),
+                         ("B2_REPORT_PATH", _os.environ.get("B2_REPORT_PATH"))]:
+                _os.environ.pop(k, None)
+                if v is not None and k == "ENABLE_B2_DASHBOARD":
+                    _os.environ[k] = v
+
+    def test_repeated_layout_build_does_not_duplicate(self):
+        """Repeated module reload does not accumulate duplicate B2 tabs."""
+        saved = _os.environ.get("ENABLE_B2_DASHBOARD")
+        _os.environ["ENABLE_B2_DASHBOARD"] = "true"
+        _os.environ["B2_REPORT_ROOT"] = str(V14_FIXTURE_ROOT)
+        _os.environ["B2_REPORT_PATH"] = "v14_b2_1_1_fixture.json"
+        try:
+            import importlib
+            import dash_dashboard
+            # Reload twice
+            importlib.reload(dash_dashboard)
+            importlib.reload(dash_dashboard)
+            layout_str = str(dash_dashboard.app.layout)
+            assert layout_str.count("🏭 B2 管线") == 1, \
+                f"Duplicate B2 tabs after reload: {layout_str.count('🏭 B2 管线')}"
+        finally:
+            _os.environ.pop("B2_REPORT_ROOT", None)
+            _os.environ.pop("B2_REPORT_PATH", None)
+            if saved is not None:
+                _os.environ["ENABLE_B2_DASHBOARD"] = saved
+            else:
+                _os.environ.pop("ENABLE_B2_DASHBOARD", None)
