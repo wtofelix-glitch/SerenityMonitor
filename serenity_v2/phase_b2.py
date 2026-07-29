@@ -64,25 +64,42 @@ B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-1.0"
 # ---------------------------------------------------------------------------
 
 class CooldownTracker:
-    """跨事件 cooldown：同一 (symbol, action) 在窗口内只允许一个信号。
+    """跨事件 cooldown：同一 (symbol, effective_action) 在窗口内只允许一个信号。
 
     与 EventProcessingLedger 的区别：
       - Ledger 保证同一 event_id 只处理一次（PER-EVENT 幂等）
       - CooldownTracker 保证同一 (symbol, action) 在时间窗口内不重复生成信号
         （CROSS-EVENT 去重）
 
-    策略：
-      - 键 = (symbol, effective_trade_action)
-      - 窗口 = B2_COOLDOWN_WINDOW_SEC（默认 300s）
-      - 命中 cooldown → 跳过信号，递增 signals_skipped_cooldown
-      - 未命中 → 记录键+时间戳，正常生成信号
+    作用域（scope）— 单策略上下文：
+      键 = (symbol, effective_trade_action)
+
+      CooldownTracker 在单次 B2Runner.run() 调用内运行。在此作用域内：
+        - strategy_id / strategy_version / strategy_config_hash: 不可变
+        - signal_rule_version: 不可变
+        - account_snapshot_id: 不可变（FIXTURE 模式）
+        - environment: SHADOW（非生产环境）
+
+      如果运行期间策略配置发生变化，调用方必须调用 reset() 清空状态，
+      并将 reset_reason 写入 metrics。
+
+      多策略安全：不同策略的同一 (symbol, action) 需要独立的 CooldownTracker
+      实例。当前实现假设单策略上下文 — 在此作用域内，
+      (symbol, action) 键粒度正确且充分。
+
+    参数：
+      - window_seconds: cooldown 窗口长度（默认 300s）
     """
+
+    # 键字段列表（用于报告和审计）
+    KEY_FIELDS = ("symbol", "effective_action")
 
     def __init__(self, window_seconds: int = B2_COOLDOWN_WINDOW_SEC):
         self._window = window_seconds
         self._records: dict[tuple, float] = {}   # (symbol, action) → mono timestamp
         self._skipped: int = 0
         self._total_checked: int = 0
+        self._reset_reason: str = ""
 
     @property
     def window_seconds(self) -> int:
@@ -96,9 +113,16 @@ class CooldownTracker:
     def total_checked(self) -> int:
         return self._total_checked
 
+    @property
+    def reset_reason(self) -> str:
+        """最近一次 reset() 的原因。空字符串 = 从未 reset。"""
+        return self._reset_reason
+
     def should_suppress(self, symbol: str, effective_action: str,
                         current_mono: float) -> bool:
-        """检查 (symbol, action) 是否在 cooldown 窗口内。
+        """检查 (symbol, effective_action) 是否在 cooldown 窗口内。
+
+        作用域：单策略上下文 — 假设 strategy/config/rule/account 在运行期间不变。
 
         Returns:
             True  → 应跳过（窗口内已有记录）
@@ -116,11 +140,16 @@ class CooldownTracker:
         self._records[key] = current_mono
         return False
 
-    def reset(self):
-        """重置 tracker 状态（用于测试或新的运行）。"""
+    def reset(self, reason: str = ""):
+        """重置 tracker 状态（策略/config/账户上下文变更时调用）。
+
+        Args:
+            reason: 重置原因（如 "strategy_config_changed", "test_teardown"）。
+        """
         self._records.clear()
         self._skipped = 0
         self._total_checked = 0
+        self._reset_reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +320,14 @@ class B2Metrics:
     ledger_already_processed: int = 0
     ledger_in_progress: int = 0
 
-    # ── v14: 跨事件去重（cooldown 框架就位，策略未启用）──
+    # ── v14/v18: 跨事件去重（cooldown）──
     duplicate_signals_created: int = 0   # 精确重复（同一 event_id 被多次处理）
-    signals_skipped_cooldown: int = 0    # 因 cooldown 跳过（当前始终为 0）
+    signals_skipped_cooldown: int = 0    # 因 cooldown 跳过
     cooldown_enabled: bool = False
     cooldown_policy_version: str = ""
+    cooldown_key_fields: str = ""        # 键字段（逗号分隔）
+    cooldown_scope: str = ""             # 作用域描述
+    cooldown_reset_reason: str = ""      # 最近一次 reset 原因
 
     # ── 安全层 ──
     prod_file_hash_before: dict = field(default_factory=dict)
@@ -454,6 +486,9 @@ class B2Metrics:
             "signals_skipped_cooldown": self.signals_skipped_cooldown,
             "cooldown_enabled": self.cooldown_enabled,
             "cooldown_policy_version": self.cooldown_policy_version,
+            "cooldown_key_fields": self.cooldown_key_fields,
+            "cooldown_scope": self.cooldown_scope,
+            "cooldown_reset_reason": self.cooldown_reset_reason,
             # deprecated (保留兼容，值必须与新字段相等)
             "real_push_count": self.real_push_count,
             "real_trade_count": self.real_trade_count,
@@ -534,9 +569,13 @@ class B2Runner:
         self._lock_acquired = False
 
         # P1: 跨事件 cooldown tracker — 始终初始化（与 init_env 无关）
+        # 作用域：单策略上下文 — (symbol, effective_action) 键
+        # strategy/config/rule/account 在单个 run() 调用期间不可变
         self.cooldown = CooldownTracker(window_seconds=B2_COOLDOWN_WINDOW_SEC)
         self.metrics.cooldown_enabled = True
         self.metrics.cooldown_policy_version = B2_COOLDOWN_POLICY_VERSION
+        self.metrics.cooldown_key_fields = ",".join(CooldownTracker.KEY_FIELDS)
+        self.metrics.cooldown_scope = "single_strategy_fixture_shadow"
 
         if init_env:
             self._init_env()
@@ -1501,6 +1540,7 @@ class B2Runner:
 
         # P1: 同步 cooldown tracker 统计到 metrics
         self.metrics.signals_skipped_cooldown = self.cooldown.skipped_count
+        self.metrics.cooldown_reset_reason = self.cooldown.reset_reason
 
         # P0-1: 运行后生产文件检查
         if self.guard is not None:
@@ -1655,6 +1695,8 @@ class B2Runner:
             print(f"  策略: {m.cooldown_policy_version}  "
                   f"窗口: {B2_COOLDOWN_WINDOW_SEC}s  "
                   f"启用: {'✅' if m.cooldown_enabled else '❌'}")
+            print(f"  作用域: {m.cooldown_scope}  "
+                  f"键: ({m.cooldown_key_fields})")
             print(f"  检查总数: {self.cooldown.total_checked}  "
                   f"跳过(cooldown): {m.signals_skipped_cooldown}")
 

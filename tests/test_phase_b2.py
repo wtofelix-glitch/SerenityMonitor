@@ -2586,16 +2586,26 @@ class TestV17CooldownStormReplay:
         # SELL 抑制 — 同键在窗口内
         assert ct.should_suppress("600487", "SELL", t0 + 1.0) is True
 
-    def test_cooldown_policy_not_coarse(self):
-        """v17-13: cooldown 策略非粗粒度 — (symbol, action) 键粒度合理。
+    def test_cooldown_policy_single_strategy_scope(self):
+        """v17-13（v18 修订）: cooldown 作用域为单策略上下文。
 
         验证:
-        - 同一 symbol 不同 action 各有独立窗口
+        - 同一 symbol 不同 action 各独立窗口
         - 不同 symbol 互不影响
         - 窗口长度可配置
+        - 键 = (symbol, effective_action) — 2 个字段
+        - 在此单策略作用域内，(symbol, action) 粒度正确
+
+        多策略安全说明:
+        - 当前实现假设单策略上下文（一个 run() 内 strategy/config/rule 不可变）
+        - 多策略场景需独立 CooldownTracker 实例
         """
         import time
         from serenity_v2.phase_b2 import CooldownTracker
+
+        # 验证键字段常量
+        assert CooldownTracker.KEY_FIELDS == ("symbol", "effective_action"), \
+            f"cooldown 键字段: {CooldownTracker.KEY_FIELDS}"
 
         ct = CooldownTracker(window_seconds=10)
         t0 = time.monotonic()
@@ -2605,12 +2615,75 @@ class TestV17CooldownStormReplay:
         ct.should_suppress("A", "SELL", t0 + 1.0)  # A/SELL 窗口开始
         ct.should_suppress("B", "BUY", t0 + 2.0)    # B/BUY 窗口开始
 
-        # t+3s: A/BUY 抑制（窗口内），A/SELL 抑制（窗口内），B/BUY 抑制（窗口内）
+        # t+3s: A/BUY 抑制（窗口内），A/SELL 抑制，B/BUY 抑制
         assert ct.should_suppress("A", "BUY", t0 + 3.0) is True
         assert ct.should_suppress("A", "SELL", t0 + 3.0) is True
         assert ct.should_suppress("B", "BUY", t0 + 3.0) is True
 
-        # t+12s: A/BUY 放行（窗口过期），A/SELL 放行，B/BUY 放行
+        # t+12s: 全部放行（窗口过期）
         assert ct.should_suppress("A", "BUY", t0 + 12.0) is False
         assert ct.should_suppress("A", "SELL", t0 + 12.0) is False
         assert ct.should_suppress("B", "BUY", t0 + 12.0) is False
+
+    def test_cooldown_reset_reason_tracked(self):
+        """v18-01: CooldownTracker.reset() 记录 reset reason。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker()
+        assert ct.reset_reason == ""
+        ct.reset("test_teardown")
+        assert ct.reset_reason == "test_teardown"
+        ct.reset("strategy_changed")
+        assert ct.reset_reason == "strategy_changed"
+
+
+class TestV18CooldownScope:
+    """v18: cooldown 作用域验证 — 单策略上下文 fail-closed。"""
+
+    def test_runner_metrics_has_cooldown_scope_fields(self):
+        """v18-10: B2Metrics 包含 cooldown 作用域字段。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        m = B2Metrics()
+        m.cooldown_enabled = True
+        m.cooldown_policy_version = "b2-cooldown-1.0"
+        m.cooldown_key_fields = "symbol,effective_action"
+        m.cooldown_scope = "single_strategy_fixture_shadow"
+        d = m.to_report_dict()
+        assert d["cooldown_key_fields"] == "symbol,effective_action"
+        assert d["cooldown_scope"] == "single_strategy_fixture_shadow"
+        assert "cooldown_reset_reason" in d
+
+    def test_cooldown_key_fields_match_tracker(self):
+        """v18-11: metrics 中的 cooldown_key_fields 与 CooldownTracker.KEY_FIELDS 一致。"""
+        from serenity_v2.phase_b2 import CooldownTracker, B2Metrics
+        expected = ",".join(CooldownTracker.KEY_FIELDS)
+        m = B2Metrics()
+        m.cooldown_enabled = True
+        m.cooldown_key_fields = expected
+        d = m.to_report_dict()
+        assert d["cooldown_key_fields"] == "symbol,effective_action"
+
+    def test_cooldown_scope_is_single_strategy(self):
+        """v18-12: cooldown 作用域显式声明为 single_strategy_fixture_shadow。
+
+        此作用域含义:
+        - single_strategy: 一次 run() 内 strategy/config/rule 不可变
+        - fixture: 账户快照来自 fixture（固定，非实时）
+        - shadow: 影子环境（非生产 DB）
+        """
+        from serenity_v2.phase_b2 import B2Runner
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
+        assert runner.metrics.cooldown_scope == "single_strategy_fixture_shadow"
+        assert runner.metrics.cooldown_key_fields == "symbol,effective_action"
+        assert runner.metrics.cooldown_enabled is True
+
+    def test_cooldown_scope_in_report_from_runner(self):
+        """v18-13: runner 生成的 report 包含完整 cooldown 作用域信息。"""
+        from serenity_v2.phase_b2 import B2Runner
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
+        runner.metrics.run_id = "v18-scope-test"
+        # 直接调用 to_report_dict（不运行 run()）
+        d = runner.metrics.to_report_dict()
+        assert d["cooldown_enabled"] is True
+        assert d["cooldown_key_fields"] == "symbol,effective_action"
+        assert d["cooldown_scope"] == "single_strategy_fixture_shadow"
+        assert d["cooldown_reset_reason"] == ""
