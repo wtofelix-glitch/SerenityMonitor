@@ -749,11 +749,17 @@ class TestPhaseB1:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.env import set_env, SerenityEnv, get_env
         from serenity_v2.clock import reset_clock
         from serenity_v2.intelligence_network import reset_intel
         from serenity_v2.signal_desk import reset_desk
         from serenity_v2.account_baseline import reset_baseline
+
+        # v17: 保存原始环境，teardown 时恢复
+        try:
+            _saved_env = get_env()
+        except RuntimeError:
+            _saved_env = None
 
         reset_clock()
         reset_intel()
@@ -764,6 +770,12 @@ class TestPhaseB1:
         self.tmp_db = Path(self.tmpdir) / "shadow.db"
 
         yield
+
+        # v17: 恢复原始环境 + 重置 baseline + clock
+        if _saved_env is not None:
+            set_env(_saved_env)
+        reset_baseline()
+        reset_clock()
 
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)

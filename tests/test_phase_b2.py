@@ -2241,7 +2241,7 @@ class TestV16CooldownIntegration:
         runner = self._make_runner()
         assert runner.cooldown is not None
         assert runner.metrics.cooldown_enabled is True
-        assert runner.metrics.cooldown_policy_version == "b2-cooldown-1.0"
+        assert runner.metrics.cooldown_policy_version == "b2-cooldown-2.0"
         assert runner.cooldown.window_seconds == 300
         from serenity_v2.phase_b2 import B2Runner
         B2Runner._release_lock()
@@ -2256,7 +2256,7 @@ class TestV16CooldownIntegration:
         assert "cooldown_enabled" in d
         assert "cooldown_policy_version" in d
         assert d["cooldown_enabled"] is True
-        assert d["cooldown_policy_version"] == "b2-cooldown-1.0"
+        assert d["cooldown_policy_version"] == "b2-cooldown-2.0"
         # total_checked >= 0 且 skipped >= 0
         assert d["signals_skipped_cooldown"] >= 0
         from serenity_v2.phase_b2 import B2Runner
@@ -2440,7 +2440,7 @@ class TestV17CooldownStormReplay:
         # 使用自定义窗口的 CooldownTracker
         runner.cooldown = CooldownTracker(window_seconds=window_seconds)
         runner.metrics.cooldown_enabled = True
-        runner.metrics.cooldown_policy_version = "b2-cooldown-1.0"
+        runner.metrics.cooldown_policy_version = "b2-cooldown-2.0"
 
         mock_guard = MagicMock()
         mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
@@ -2616,8 +2616,11 @@ class TestV17CooldownStormReplay:
         from serenity_v2.phase_b2 import CooldownTracker
 
         # 验证键字段常量
-        assert CooldownTracker.KEY_FIELDS == ("symbol", "effective_action"), \
-            f"cooldown 键字段: {CooldownTracker.KEY_FIELDS}"
+        assert CooldownTracker.KEY_FIELDS == (
+            "symbol", "effective_action", "strategy_id", "strategy_version",
+            "strategy_config_hash", "signal_rule_version",
+            "account_snapshot_id_full", "environment", "market_fingerprint",
+        ), f"cooldown 键字段: {CooldownTracker.KEY_FIELDS}"
 
         ct = CooldownTracker(window_seconds=10)
         t0 = time.monotonic()
@@ -2656,23 +2659,23 @@ class TestV18CooldownScope:
         from serenity_v2.phase_b2 import B2Metrics
         m = B2Metrics()
         m.cooldown_enabled = True
-        m.cooldown_policy_version = "b2-cooldown-1.0"
-        m.cooldown_key_fields = "symbol,effective_action"
+        m.cooldown_policy_version = "b2-cooldown-2.0"
+        m.cooldown_key_fields = "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
         m.cooldown_scope = "single_strategy_fixture_shadow"
         d = m.to_report_dict()
-        assert d["cooldown_key_fields"] == "symbol,effective_action"
+        assert d["cooldown_key_fields"] == "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
         assert d["cooldown_scope"] == "single_strategy_fixture_shadow"
         assert "cooldown_reset_reason" in d
 
     def test_cooldown_key_fields_match_tracker(self):
         """v18-11: metrics 中的 cooldown_key_fields 与 CooldownTracker.KEY_FIELDS 一致。"""
         from serenity_v2.phase_b2 import CooldownTracker, B2Metrics
-        expected = ",".join(CooldownTracker.KEY_FIELDS)
+        expected = "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
         m = B2Metrics()
         m.cooldown_enabled = True
         m.cooldown_key_fields = expected
         d = m.to_report_dict()
-        assert d["cooldown_key_fields"] == "symbol,effective_action"
+        assert d["cooldown_key_fields"] == "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
 
     def test_cooldown_scope_is_single_strategy(self):
         """v18-12: cooldown 作用域显式声明为 single_strategy_fixture_shadow。
@@ -2685,7 +2688,7 @@ class TestV18CooldownScope:
         from serenity_v2.phase_b2 import B2Runner
         runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
         assert runner.metrics.cooldown_scope == "single_strategy_fixture_shadow"
-        assert runner.metrics.cooldown_key_fields == "symbol,effective_action"
+        assert runner.metrics.cooldown_key_fields == "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
         assert runner.metrics.cooldown_enabled is True
 
     def test_cooldown_scope_in_report_from_runner(self):
@@ -2696,7 +2699,7 @@ class TestV18CooldownScope:
         # 直接调用 to_report_dict（不运行 run()）
         d = runner.metrics.to_report_dict()
         assert d["cooldown_enabled"] is True
-        assert d["cooldown_key_fields"] == "symbol,effective_action"
+        assert d["cooldown_key_fields"] == "symbol,effective_action,strategy_id,strategy_version,strategy_config_hash,signal_rule_version,account_snapshot_id_full,environment,market_fingerprint"
         assert d["cooldown_scope"] == "single_strategy_fixture_shadow"
         assert d["cooldown_reset_reason"] == ""
 

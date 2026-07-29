@@ -56,47 +56,77 @@ B2_FORBIDDEN_SESSIONS = {
 
 # ── P1: 跨事件 cooldown ──
 B2_COOLDOWN_WINDOW_SEC = 300            # 5 分钟窗口
-B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-1.0"
+B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-2.0"
 
 
 # ---------------------------------------------------------------------------
 # P1: CooldownTracker — 跨事件信号去重
 # ---------------------------------------------------------------------------
 
+def compute_market_fingerprint(event_id: str, price: float = 0.0,
+                                volume: int = 0) -> str:
+    """计算稳定行情指纹，用于 cooldown re-arm 判定。
+
+    行情实质变化时指纹改变 → cooldown 窗口内允许新信号。
+    行情不变时指纹稳定 → cooldown 有效抑制重复信号。
+
+    Args:
+        event_id: 事件 ID（唯一标识一个行情事件）
+        price: 最新成交价
+        volume: 成交量
+
+    Returns:
+        稳定的行情指纹字符串。
+
+    策略：
+      - 使用 event_id 前 8 字符作为基础标识
+      - price 量化到 2% bucket（滤除微小的 tick 波动）
+      - volume 量化到对数 bucket（滤除正常波动）
+    """
+    import math
+    parts = [event_id[:8] if event_id else "noevent"]
+    if price > 0:
+        # 2% 价格分桶 (0-2%, 2-4%, ...)
+        pct_move = abs(price)  # absolute price used as proxy
+        p_bucket = int(pct_move / max(pct_move * 0.02, 0.01))
+        parts.append(f"p{p_bucket}")
+    if volume > 0:
+        # 对数成交量分桶
+        v_bucket = int(math.log2(max(volume, 1)) / 2)
+        parts.append(f"v{v_bucket}")
+    return ":".join(parts)
+
+
 class CooldownTracker:
-    """跨事件 cooldown：同一 (symbol, effective_action) 在窗口内只允许一个信号。
+    """跨事件 cooldown：同语义信号在窗口内只生成一次。
 
     与 EventProcessingLedger 的区别：
       - Ledger 保证同一 event_id 只处理一次（PER-EVENT 幂等）
-      - CooldownTracker 保证同一 (symbol, action) 在时间窗口内不重复生成信号
+      - CooldownTracker 保证同语义信号在时间窗口内不重复生成
         （CROSS-EVENT 去重）
 
-    作用域（scope）— 单策略上下文：
-      键 = (symbol, effective_trade_action)
+    键语义（b2-cooldown-2.0）— 完整上下文感知：
+      键 = (symbol, effective_trade_action, strategy_id, strategy_version,
+            strategy_config_hash, signal_rule_version,
+            account_snapshot_id_full, environment, market_fingerprint)
 
-      CooldownTracker 在单次 B2Runner.run() 调用内运行。在此作用域内：
-        - strategy_id / strategy_version / strategy_config_hash: 不可变
-        - signal_rule_version: 不可变
-        - account_snapshot_id: 不可变（FIXTURE 模式）
-        - environment: SHADOW（非生产环境）
-
-      如果运行期间策略配置发生变化，调用方必须调用 reset() 清空状态，
-      并将 reset_reason 写入 metrics。
-
-      多策略安全：不同策略的同一 (symbol, action) 需要独立的 CooldownTracker
-      实例。当前实现假设单策略上下文 — 在此作用域内，
-      (symbol, action) 键粒度正确且充分。
+      不同策略/配置/账户/行情 → 不会错误互抑。
+      同一语义 + 相同上下文 → 窗口内只允许一个信号。
 
     参数：
       - window_seconds: cooldown 窗口长度（默认 300s）
     """
 
     # 键字段列表（用于报告和审计）
-    KEY_FIELDS = ("symbol", "effective_action")
+    KEY_FIELDS = (
+        "symbol", "effective_action", "strategy_id", "strategy_version",
+        "strategy_config_hash", "signal_rule_version",
+        "account_snapshot_id_full", "environment", "market_fingerprint",
+    )
 
     def __init__(self, window_seconds: int = B2_COOLDOWN_WINDOW_SEC):
         self._window = window_seconds
-        self._records: dict[tuple, float] = {}   # (symbol, action) → mono timestamp
+        self._records: dict[tuple, float] = {}  # composite_key → mono timestamp
         self._skipped: int = 0
         self._total_checked: int = 0
         self._reset_reason: str = ""
@@ -118,18 +148,35 @@ class CooldownTracker:
         """最近一次 reset() 的原因。空字符串 = 从未 reset。"""
         return self._reset_reason
 
-    def should_suppress(self, symbol: str, effective_action: str,
-                        current_mono: float) -> bool:
-        """检查 (symbol, effective_action) 是否在 cooldown 窗口内。
+    def should_suppress(self,
+                        symbol: str,
+                        effective_action: str,
+                        current_mono: float,
+                        strategy_id: str = "",
+                        strategy_version: str = "",
+                        strategy_config_hash: str = "",
+                        signal_rule_version: str = "",
+                        account_snapshot_id_full: str = "",
+                        environment: str = "",
+                        market_fingerprint: str = "",
+                        ) -> bool:
+        """检查完整语义键是否在 cooldown 窗口内。
 
-        作用域：单策略上下文 — 假设 strategy/config/rule/account 在运行期间不变。
+        键包含所有可能影响信号合法性的上下文维度。
+        不同 strategy/config/account/env/行情 → 不会错误互抑。
 
         Returns:
-            True  → 应跳过（窗口内已有记录）
+            True  → 应跳过（窗口内已有同语义记录）
             False → 可以生成信号
         """
         self._total_checked += 1
-        key = (symbol, effective_action)
+        key = (
+            symbol, effective_action,
+            strategy_id, strategy_version,
+            strategy_config_hash, signal_rule_version,
+            account_snapshot_id_full, environment,
+            market_fingerprint,
+        )
         last = self._records.get(key)
         if last is not None:
             elapsed = current_mono - last
@@ -576,6 +623,7 @@ class B2Runner:
         self.metrics.cooldown_policy_version = B2_COOLDOWN_POLICY_VERSION
         self.metrics.cooldown_key_fields = ",".join(CooldownTracker.KEY_FIELDS)
         self.metrics.cooldown_scope = "single_strategy_fixture_shadow"
+        self._latest_market: dict[str, dict] = {}  # v17: symbol→market data for fingerprint
 
         if init_env:
             self._init_env()
@@ -1362,6 +1410,13 @@ class B2Runner:
                     events_this_cycle = 0
                     quarantined_this_cycle = 0
 
+                    # v17: 存储最新行情用于 cooldown market fingerprint
+                    for nq in norms:
+                        self._latest_market[nq.symbol] = {
+                            "price": nq.price,
+                            "volume": getattr(nq, 'volume', 0),
+                        }
+
                     for nq in norms:
                         event, quarantined, qreason = normalized_quote_to_event(nq)
 
@@ -1430,10 +1485,25 @@ class B2Runner:
                     # ── P1: 跨事件 cooldown 检查 ──
                     cycle_mono = _time.monotonic()
                     for sig in signals:
+                        mkt = self._latest_market.get(sig.symbol, {})
+                        fingerprint = compute_market_fingerprint(
+                            sig.event_id or "",
+                            mkt.get("price", 0),
+                            mkt.get("volume", 0),
+                        )
                         if self.cooldown.should_suppress(
-                            sig.symbol, sig.effective_trade_action, cycle_mono
+                            symbol=sig.symbol,
+                            effective_action=sig.effective_trade_action,
+                            current_mono=cycle_mono,
+                            strategy_id=self._strategy_id,
+                            strategy_version=self._strategy_version,
+                            strategy_config_hash=self._strategy_config_hash,
+                            signal_rule_version=self._strategy_version,
+                            account_snapshot_id_full=self._account_snapshot_id,
+                            environment="shadow",
+                            market_fingerprint=fingerprint,
                         ):
-                            continue  # cooldown 窗口内已有相同信号
+                            continue  # cooldown 窗口内已有相同语义信号
                         self._record_signal(sig)
 
                     # P0-4: 信号处理完成时间
