@@ -54,6 +54,74 @@ B2_FORBIDDEN_SESSIONS = {
     "POSTMARKET", "CLOSED",
 }
 
+# ── P1: 跨事件 cooldown ──
+B2_COOLDOWN_WINDOW_SEC = 300            # 5 分钟窗口
+B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-1.0"
+
+
+# ---------------------------------------------------------------------------
+# P1: CooldownTracker — 跨事件信号去重
+# ---------------------------------------------------------------------------
+
+class CooldownTracker:
+    """跨事件 cooldown：同一 (symbol, action) 在窗口内只允许一个信号。
+
+    与 EventProcessingLedger 的区别：
+      - Ledger 保证同一 event_id 只处理一次（PER-EVENT 幂等）
+      - CooldownTracker 保证同一 (symbol, action) 在时间窗口内不重复生成信号
+        （CROSS-EVENT 去重）
+
+    策略：
+      - 键 = (symbol, effective_trade_action)
+      - 窗口 = B2_COOLDOWN_WINDOW_SEC（默认 300s）
+      - 命中 cooldown → 跳过信号，递增 signals_skipped_cooldown
+      - 未命中 → 记录键+时间戳，正常生成信号
+    """
+
+    def __init__(self, window_seconds: int = B2_COOLDOWN_WINDOW_SEC):
+        self._window = window_seconds
+        self._records: dict[tuple, float] = {}   # (symbol, action) → mono timestamp
+        self._skipped: int = 0
+        self._total_checked: int = 0
+
+    @property
+    def window_seconds(self) -> int:
+        return self._window
+
+    @property
+    def skipped_count(self) -> int:
+        return self._skipped
+
+    @property
+    def total_checked(self) -> int:
+        return self._total_checked
+
+    def should_suppress(self, symbol: str, effective_action: str,
+                        current_mono: float) -> bool:
+        """检查 (symbol, action) 是否在 cooldown 窗口内。
+
+        Returns:
+            True  → 应跳过（窗口内已有记录）
+            False → 可以生成信号
+        """
+        self._total_checked += 1
+        key = (symbol, effective_action)
+        last = self._records.get(key)
+        if last is not None:
+            elapsed = current_mono - last
+            if elapsed < self._window:
+                self._skipped += 1
+                return True
+        # 不在窗口内（或首次出现）→ 记录并放行
+        self._records[key] = current_mono
+        return False
+
+    def reset(self):
+        """重置 tracker 状态（用于测试或新的运行）。"""
+        self._records.clear()
+        self._skipped = 0
+        self._total_checked = 0
+
 
 # ---------------------------------------------------------------------------
 # B2 指标
@@ -464,6 +532,11 @@ class B2Runner:
         self._protected_prod_db = protected_prod_db
         self._manifest_path = manifest_path
         self._lock_acquired = False
+
+        # P1: 跨事件 cooldown tracker — 始终初始化（与 init_env 无关）
+        self.cooldown = CooldownTracker(window_seconds=B2_COOLDOWN_WINDOW_SEC)
+        self.metrics.cooldown_enabled = True
+        self.metrics.cooldown_policy_version = B2_COOLDOWN_POLICY_VERSION
 
         if init_env:
             self._init_env()
@@ -938,7 +1011,7 @@ class B2Runner:
             )
 
     def run(self):
-        from .clock import get_clock, reset_clock
+        from .clock import get_clock
         from .sina_market import (
             store_raw, store_normalized, store_quarantine,
             normalized_quote_to_event,
@@ -967,7 +1040,6 @@ class B2Runner:
         self.metrics.status = "RUNNING"
         self.metrics.started_at = datetime.now(tz=CST).isoformat(timespec="seconds")
 
-        reset_clock()
         clock = get_clock()
         symbols = B2_SYMBOLS
         last_session = session
@@ -1004,7 +1076,6 @@ class B2Runner:
                     break
 
                 # 每周期重新检查时段（可能跨越边界）
-                reset_clock()
                 current_session = get_clock().market_session()
                 self.metrics.cycle_sessions.append(current_session)
 
@@ -1228,7 +1299,13 @@ class B2Runner:
                         market_data=None,
                     )
 
+                    # ── P1: 跨事件 cooldown 检查 ──
+                    cycle_mono = _time.monotonic()
                     for sig in signals:
+                        if self.cooldown.should_suppress(
+                            sig.symbol, sig.effective_trade_action, cycle_mono
+                        ):
+                            continue  # cooldown 窗口内已有相同信号
                         self._record_signal(sig)
 
                     # P0-4: 信号处理完成时间
@@ -1422,6 +1499,9 @@ class B2Runner:
         except Exception:
             self.metrics.report_failed += 1
 
+        # P1: 同步 cooldown tracker 统计到 metrics
+        self.metrics.signals_skipped_cooldown = self.cooldown.skipped_count
+
         # P0-1: 运行后生产文件检查
         if self.guard is not None:
             try:
@@ -1568,6 +1648,15 @@ class B2Runner:
         ledger_audit = (m.ledger_claimed == m.ledger_completed + m.ledger_failed_count + m.ledger_in_progress)
         print(f"  审计 claimed = completed + failed + in_progress: "
               f"{'✅' if ledger_audit else '❌'}")
+
+        # ── P1 cooldown ──
+        if m.cooldown_enabled:
+            print(f"\n── P1 跨事件 cooldown ──")
+            print(f"  策略: {m.cooldown_policy_version}  "
+                  f"窗口: {B2_COOLDOWN_WINDOW_SEC}s  "
+                  f"启用: {'✅' if m.cooldown_enabled else '❌'}")
+            print(f"  检查总数: {self.cooldown.total_checked}  "
+                  f"跳过(cooldown): {m.signals_skipped_cooldown}")
 
         # ── P0-4 失败分类 ──
         print(f"\n── P0-4 失败分类 ──")

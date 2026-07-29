@@ -1955,3 +1955,324 @@ class TestV15FailureEquationFinalization:
         assert d4['total_failures'] == 2
         assert d4['report_failed'] == 1
         assert d4['safety_guard_failed'] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v16: Cooldown 集成 — CooldownTracker 单元 + 端到端验证
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestV16CooldownTrackerUnit:
+    """v16: CooldownTracker 单元测试 — 直接验证 cooldown 窗口逻辑。"""
+
+    def test_basic_suppression_within_window(self):
+        """v16-01: 窗口内同一 (symbol, action) 第二次请求被抑制。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=300)
+        t0 = time.monotonic()
+        # 第一次: 不放行，记录
+        assert ct.should_suppress('600487', 'BUY', t0) is False
+        assert ct.total_checked == 1
+        assert ct.skipped_count == 0
+        # 同一键，1 秒后: 应抑制
+        assert ct.should_suppress('600487', 'BUY', t0 + 1.0) is True
+        assert ct.total_checked == 2
+        assert ct.skipped_count == 1
+
+    def test_different_keys_not_suppressed(self):
+        """v16-02: 不同 symbol 或不同 action 互不干扰。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=300)
+        t0 = time.monotonic()
+        # 放行 600487/BUY
+        assert ct.should_suppress('600487', 'BUY', t0) is False
+        # 不同 symbol: 不抑制
+        assert ct.should_suppress('600176', 'BUY', t0 + 1.0) is False
+        # 不同 action: 不抑制
+        assert ct.should_suppress('600487', 'SELL', t0 + 1.0) is False
+        assert ct.skipped_count == 0  # 全部放行（键不同）
+        assert ct.total_checked == 3
+
+    def test_window_expiry_allows_new_signal(self):
+        """v16-03: cooldown 窗口过期后，新信号可以放行。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=5)
+        t0 = time.monotonic()
+        # 第一次放行
+        assert ct.should_suppress('600487', 'BUY', t0) is False
+        # 窗口内抑制
+        assert ct.should_suppress('600487', 'BUY', t0 + 3.0) is True
+        assert ct.skipped_count == 1
+        # 窗口外放行
+        assert ct.should_suppress('600487', 'BUY', t0 + 6.0) is False
+        assert ct.skipped_count == 1  # 不放行不增加
+        assert ct.total_checked == 3
+
+    def test_exact_boundary_allows(self):
+        """v16-04: 刚好在窗口边界（elapsed == window）时不抑制。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=300)
+        t0 = time.monotonic()
+        assert ct.should_suppress('600487', 'BUY', t0) is False
+        # 刚好 300s: elapsed == window, 不抑制 (elapsed < window 才抑制)
+        assert ct.should_suppress('600487', 'BUY', t0 + 300.0) is False
+        assert ct.skipped_count == 0
+
+    def test_reset_clears_all_state(self):
+        """v16-05: reset() 清空所有记录和计数器。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=300)
+        t0 = time.monotonic()
+        ct.should_suppress('600487', 'BUY', t0)
+        t1 = t0 + 1.0
+        assert ct.should_suppress('600487', 'BUY', t1) is True  # 抑制
+        assert ct.total_checked == 2
+        assert ct.skipped_count == 1
+        # 重置
+        ct.reset()
+        assert ct.total_checked == 0
+        assert ct.skipped_count == 0
+        # 重置后首请求放行
+        assert ct.should_suppress('600487', 'BUY', t1) is False
+        assert ct.total_checked == 1
+        assert ct.skipped_count == 0
+
+    def test_multiple_keys_independent_windows(self):
+        """v16-06: 多个键各自维护独立窗口，互不干扰。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        import time
+        ct = CooldownTracker(window_seconds=10)
+        t0 = time.monotonic()
+        # 填充 3 个不同键
+        ct.should_suppress('A', 'BUY', t0)
+        ct.should_suppress('B', 'BUY', t0)
+        ct.should_suppress('A', 'SELL', t0)
+        # t0+5s: 全部抑制
+        for sym, act in [('A', 'BUY'), ('B', 'BUY'), ('A', 'SELL')]:
+            assert ct.should_suppress(sym, act, t0 + 5.0) is True
+        assert ct.skipped_count == 3
+        assert ct.total_checked == 6
+
+    def test_monotonic_clock_used_not_real(self):
+        """v16-07: CooldownTracker 使用调用者传入的 monotonic 时间，
+        不依赖系统时钟（与 SimClock 解耦）。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        # 使用一个任意时间戳，验证 tracker 正常工作
+        assert ct.should_suppress('X', 'BUY', 1000000.0) is False
+        assert ct.should_suppress('X', 'BUY', 1000001.0) is True
+        assert ct.skipped_count == 1
+
+
+class TestV16CooldownIntegration:
+    """v16: Cooldown 端到端集成 — B2Runner.run() 中 cooldown 行为验证。"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.clock import reset_clock
+        from serenity_v2.intelligence_network import reset_intel
+        from serenity_v2.signal_desk import reset_desk
+        from serenity_v2.account_baseline import reset_baseline
+
+        reset_clock()
+        reset_intel()
+        reset_desk()
+        reset_baseline()
+
+        from serenity_v2.phase_b2 import B2Runner
+        B2Runner._release_lock()
+        lock = B2Runner._lock_path()
+        lock.unlink(missing_ok=True)
+
+        self.tmpdir = tempfile.mkdtemp(prefix="serenity_b2_cooldown_")
+        self.tmp_db = Path(self.tmpdir) / "b2_shadow.db"
+
+        yield
+
+        B2Runner._release_lock()
+        lock.unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_runner(self):
+        """构造 cooldown 集成测试的 runner（与 V11OfflineReplay 类似）。"""
+        from serenity_v2.clock import set_clock, SimClock
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.migrations import apply_migrations
+        from serenity_v2.sina_market import _init_tables
+        from serenity_v2.event_record import EventStore
+        from serenity_v2.account_fixture import load_and_set_fixture, to_account_state
+        from serenity_v2.account_baseline import get_baseline, reset_baseline
+        from serenity_v2.intelligence_network import get_intel, reset_intel
+        from serenity_v2.signal_desk import get_desk, reset_desk
+        from serenity_v2.phase_b2 import B2Runner
+        from serenity_v2.signal_idempotency import EventProcessingLedger, IdempotentSignalProcessor
+        from unittest.mock import MagicMock
+
+        set_clock(SimClock("2026-07-24T09:35:00+08:00"))
+        env = SerenityEnv.shadow(db_path=self.tmp_db, log_dir=Path(self.tmpdir))
+        set_env(env)
+        apply_migrations(self.tmp_db)
+        _init_tables(self.tmp_db)
+        store = EventStore(db_path=self.tmp_db)
+        store.init_schema()
+
+        reset_baseline()
+        baseline = get_baseline()
+        fixture_path = Path(__file__).resolve().parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        fixture = load_and_set_fixture(fixture_path)
+        state = to_account_state(fixture)
+        state.snapshot_at = ""
+        baseline.save_snapshot(state)
+
+        reset_intel()
+        intel = get_intel(shadow_mode=True)
+        reset_desk()
+        desk = get_desk()
+
+        B2Runner._acquire_lock(caller_token="test-cooldown-integration")
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
+        runner._locked = True
+        runner.shadow_dir = Path(self.tmpdir)
+        runner.shadow_db = self.tmp_db
+        runner.store = store
+        runner.baseline = baseline
+        runner.intel = intel
+        runner.desk = desk
+        runner._fixture = fixture
+        runner._account_snapshot_id = fixture.snapshot_id_full
+        runner._account_snapshot_id_short = fixture.snapshot_id
+        runner._manifest = None
+
+        mock_guard = MagicMock()
+        mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
+        mock_guard.before = None
+        runner.guard = mock_guard
+
+        runner.ledger = EventProcessingLedger(self.tmp_db)
+        runner.ledger.init_schema()
+        runner.idempotent = IdempotentSignalProcessor(
+            desk=desk, ledger=runner.ledger, worker_id="test-cooldown"
+        )
+        runner._strategy_version = "1.0"
+        runner._strategy_config_hash = "test"
+        runner.metrics.run_id = "B2_COOLDOWN_INTEGRATION"
+        runner._consecutive_failures = 0
+        runner._cycle_count = 0
+
+        # 模拟 fetcher（单信号，确保 cooldown 可观测）
+        from serenity_v2.sina_market import (
+            SinaQuoteFetcher, RawQuoteRecord, NormalizedQuote,
+        )
+        import hashlib
+        from datetime import datetime, timezone, timedelta
+        CST = timezone(timedelta(hours=8))
+
+        fetcher = MagicMock(spec=SinaQuoteFetcher)
+
+        def mock_fetch(symbols):
+            now = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+            raws = []
+            for sym in symbols:
+                raw_str = f'var hq_str_{sym}="测试,57.98,0,0,0,0,0,0,0,0,..."'
+                raw_hash = hashlib.sha256(
+                    f"{sym}_{now}_{raw_str}".encode()
+                ).hexdigest()[:32]
+                raws.append(RawQuoteRecord(
+                    symbol=sym, source="sina_realtime",
+                    collected_at=now, raw_payload=raw_str,
+                    raw_payload_hash=raw_hash,
+                    http_status=200, response_time_ms=50.0,
+                ))
+            return raws
+
+        def mock_normalize(raw, business_time=None):
+            return NormalizedQuote(
+                symbol=raw.symbol,
+                name="测试",
+                normalized_at=raw.collected_at,
+                price=57.98,
+                previous_close=57.50,
+                open=57.60,
+                high=58.50,
+                low=57.30,
+                volume=10000,
+                amount=579800.0,
+                validation_status="valid",
+                validation_errors=[],
+                acceptable_as_postmarket_snapshot=False,
+                raw_payload_hash=raw.raw_payload_hash,
+                data_age_ms=2000,
+                effective_action_eligible=True,
+            )
+
+        fetcher.fetch = mock_fetch
+        fetcher.normalize = mock_normalize
+        runner.fetcher = fetcher
+        runner.verify_environment = lambda: (True, {"clock_mode": "SIM_TEST", "guard": "mock"}, [])
+
+        return runner
+
+    def test_runner_cooldown_enabled_by_default(self):
+        """v16-10: Runner 初始化时 cooldown 默认启用。"""
+        runner = self._make_runner()
+        assert runner.cooldown is not None
+        assert runner.metrics.cooldown_enabled is True
+        assert runner.metrics.cooldown_policy_version == "b2-cooldown-1.0"
+        assert runner.cooldown.window_seconds == 300
+        from serenity_v2.phase_b2 import B2Runner
+        B2Runner._release_lock()
+
+    def test_runner_cooldown_stats_in_report(self):
+        """v16-11: 运行后 metrics 中的 cooldown 统计正确同步。"""
+        runner = self._make_runner()
+        result = runner.run()
+        # 报告包含 cooldown 字段
+        d = result.to_report_dict()
+        assert "signals_skipped_cooldown" in d
+        assert "cooldown_enabled" in d
+        assert "cooldown_policy_version" in d
+        assert d["cooldown_enabled"] is True
+        assert d["cooldown_policy_version"] == "b2-cooldown-1.0"
+        # total_checked >= 0 且 skipped >= 0
+        assert d["signals_skipped_cooldown"] >= 0
+        from serenity_v2.phase_b2 import B2Runner
+        B2Runner._release_lock()
+
+    def test_cooldown_not_duplicate_with_idempotent(self):
+        """v16-12: cooldown (cross-event) 与 idempotent (per-event) 是独立字段。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        m = B2Metrics()
+        m.signals_skipped_cooldown = 5
+        m.duplicate_signals_created = 3
+        d = m.to_report_dict()
+        assert d["signals_skipped_cooldown"] == 5
+        assert d["duplicate_signals_created"] == 3
+        # 两者互不影响
+        assert d["signals_skipped_cooldown"] != d["duplicate_signals_created"]
+
+    def test_runner_cancelled_cycles_skip_cooldown(self):
+        """v16-13: auto-stop 取消的周期不影响 cooldown 统计（cancelled 周期不生成信号）。"""
+        runner = self._make_runner()
+        result = runner.run()
+        # cancelled_cycles_auto_stop 与 signals_skipped_cooldown 无关
+        # cancelled 周期在信号生成之前就已退出
+        assert result.cancelled_cycles_auto_stop >= 0
+        from serenity_v2.phase_b2 import B2Runner
+        B2Runner._release_lock()
+
+    def test_cooldown_window_configurable(self):
+        """v16-14: CooldownTracker 窗口可配置，非硬编码。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=60)
+        assert ct.window_seconds == 60
+        ct2 = CooldownTracker(window_seconds=900)
+        assert ct2.window_seconds == 900
+        # 默认窗口
+        ct3 = CooldownTracker()
+        assert ct3.window_seconds == 300

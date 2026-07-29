@@ -254,6 +254,12 @@ def get_clock() -> Clock:
 
 
 def reset_clock() -> None:
-    """重置为真实时钟（测试用）。"""
+    """重置为真实时钟（测试用）。
+
+    SimClock 模式下不重置 —— 保留模拟时钟供离线回放测试使用。
+    只有当前时钟为 RealClock 或未设置时才重置。
+    """
     global _clock
+    if isinstance(_clock, SimClock):
+        return  # 保留模拟时钟，不重置
     _clock = None
