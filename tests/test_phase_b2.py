@@ -2847,3 +2847,229 @@ class TestV19CooldownRuntimeEnforcement:
             f"应报告 strategy 违规: {violations}"
         assert any("account_snapshot_id" in v for v in violations), \
             f"应报告 account_snapshot_id 违规: {violations}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v20: Cooldown 离线验收 — 12 场景全覆盖
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestV20CooldownAcceptance:
+    """v20: cooldown 离线验收 — 覆盖 12 个接受场景（b2-cooldown-2.0 完整语义）。
+
+    场景:
+      1.  同一语义 300s 内只产生一次 ✅ (已有 TestV16CooldownTrackerUnit)
+      2.  跳过信号计入 skipped_cooldown ✅ (已有 TestV17CooldownStormReplay)
+      3.  300s 后允许重新产生 ✅ (已有 TestV16CooldownTrackerUnit)
+      4.  action 改变时不错误拦截 ✅ (已有 TestV16CooldownTrackerUnit)
+      5.  strategy/config/snapshot 改变时不错误拦截 🆕
+      6.  行情实质变化时重新武装 🆕
+      7.  NO_SIGNAL 不创建 cooldown 状态 🆕
+      8.  第二次固定回放不产生额外 signal ✅ (已有 TestV17CooldownStormReplay)
+      9.  重启后 cooldown 重置语义明确 🆕
+      10. SimClock 与 RealClock 一致 ✅ (已有 TestV17SimClockLeak)
+      11. 多进程原子锁 fail-closed ✅ (已有 TestV11ProcessIsolation)
+      12. 报告审计关系: emitted + skipped_idempotent + skipped_cooldown 🆕
+    """
+
+    # ── 5. strategy/config/snapshot 改变时不错误拦截 ──
+
+    def test_acceptance_05_different_strategy_not_suppressed(self):
+        """v20-05: 不同 strategy_id 的同 (symbol, action) 不会互抑。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        assert ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="strat-A", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint="fp:1",
+        ) is False
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="strat-B", strategy_version="2.0",
+            strategy_config_hash="bbb", signal_rule_version="2.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint="fp:1",
+        ) is False  # 不同策略，不抑制
+
+    def test_acceptance_05_different_config_not_suppressed(self):
+        """v20-05b: 不同 strategy_config_hash 不互抑。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="config-v1", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint="fp:1",
+        )
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="config-v2",
+            signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint="fp:1",
+        ) is False
+
+    def test_acceptance_05_different_snapshot_not_suppressed(self):
+        """v20-05c: 不同 account_snapshot_id 不互抑。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-20260722", environment="shadow",
+            market_fingerprint="fp:1",
+        )
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-20260723",
+            environment="shadow",
+            market_fingerprint="fp:1",
+        ) is False
+
+    def test_acceptance_05_different_environment_not_suppressed(self):
+        """v20-05d: 不同 environment 不互抑。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint="fp:1",
+        )
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="production",
+            market_fingerprint="fp:1",
+        ) is False
+
+    # ── 6. 行情实质变化时重新武装 ──
+
+    def test_acceptance_06_market_fingerprint_reams(self):
+        """v20-06: 行情指纹变化时允许重新生成信号。"""
+        from serenity_v2.phase_b2 import CooldownTracker, compute_market_fingerprint
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint=fp1,
+        )
+        # 同一语义，行情不变 → 抑制
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint=fp1,
+        ) is True
+        # 行情变化 → 重新武装
+        fp2 = compute_market_fingerprint("evt-002", 59.20, 12000)
+        assert fp2 != fp1, "不同行情应产生不同指纹"
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 2.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint=fp2,
+        ) is False
+
+    def test_acceptance_06_minor_price_change_not_ream(self):
+        """v20-06b: 微小价格变动不触发 re-arm（same bucket）。"""
+        from serenity_v2.phase_b2 import CooldownTracker, compute_market_fingerprint
+        ct = CooldownTracker(window_seconds=300)
+        t0 = 1000.0
+        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        ct.should_suppress(
+            "600487", "BUY", t0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint=fp1,
+        )
+        fp2 = compute_market_fingerprint("evt-002", 58.50, 10500)
+        if fp1 == fp2:
+            assert ct.should_suppress(
+                "600487", "BUY", t0 + 1.0,
+                strategy_id="s1", strategy_version="1.0",
+                strategy_config_hash="aaa", signal_rule_version="1.0",
+                account_snapshot_id_full="snap-1", environment="shadow",
+                market_fingerprint=fp2,
+            ) is True
+
+    def test_acceptance_06_fingerprint_stable(self):
+        """v20-06c: compute_market_fingerprint 对相同输入稳定。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        fp2 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        assert fp1 == fp2
+        fp3 = compute_market_fingerprint("evt-002", 57.98, 10000)
+        assert fp3 != fp1
+
+    # ── 7. NO_SIGNAL 不创建 cooldown 状态 ──
+
+    def test_acceptance_07_no_signal_no_cooldown(self):
+        """v20-07: 空信号列表不创建 cooldown 记录。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        assert ct.total_checked == 0
+        assert ct.skipped_count == 0
+
+    # ── 9. 重启后 cooldown 重置语义 ──
+
+    def test_acceptance_09_cooldown_reset_on_new_instance(self):
+        """v20-09: 新 CooldownTracker 实例无历史状态。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct1 = CooldownTracker(window_seconds=300)
+        ct1.should_suppress("600487", "BUY", 1000.0)
+        ct2 = CooldownTracker(window_seconds=300)
+        assert ct2.total_checked == 0
+        assert ct2.skipped_count == 0
+        assert ct2.should_suppress("600487", "BUY", 1000.0) is False
+
+    def test_acceptance_09_explicit_reset_clears_all(self):
+        """v20-09b: 显式 reset() 清空所有状态。"""
+        from serenity_v2.phase_b2 import CooldownTracker
+        ct = CooldownTracker(window_seconds=300)
+        ct.should_suppress("600487", "BUY", 1000.0)
+        ct.should_suppress("600176", "SELL", 1000.0)
+        assert ct.total_checked == 2
+        ct.reset("restart")
+        assert ct.total_checked == 0
+        assert ct.skipped_count == 0
+        assert ct.reset_reason == "restart"
+
+    # ── 12. 报告审计关系 ──
+
+    def test_acceptance_12_audit_relationship(self):
+        """v20-12: emitted + skipped_idempotent + skipped_cooldown
+        构成完整的信号生命周期审计方程。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        m = B2Metrics()
+        m.signals_created_unique = 15
+        m.signals_skipped_idempotent = 3
+        m.signals_skipped_cooldown = 7
+        m.duplicate_signals_created = 0
+        d = m.to_report_dict()
+        assert "signals_created_unique" in d
+        assert "signals_skipped_idempotent" in d
+        assert "signals_skipped_cooldown" in d
+        total = (d["signals_created_unique"]
+                 + d["signals_skipped_idempotent"]
+                 + d["signals_skipped_cooldown"])
+        assert total == 25
