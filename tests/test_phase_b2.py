@@ -937,6 +937,9 @@ class TestV11OfflineReplay:
         lock.unlink(missing_ok=True)
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # v17: 防止 SimClock 泄漏到后续测试
+        from serenity_v2.clock import reset_clock
+        reset_clock()
 
     def _make_mock_fetcher(self):
         """创建一个返回合成行情的模拟 fetcher。"""
@@ -2098,6 +2101,9 @@ class TestV16CooldownIntegration:
         lock.unlink(missing_ok=True)
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # v17: 防止 SimClock 泄漏到后续测试
+        from serenity_v2.clock import reset_clock
+        reset_clock()
 
     def _make_runner(self):
         """构造 cooldown 集成测试的 runner（与 V11OfflineReplay 类似）。"""
@@ -2276,3 +2282,335 @@ class TestV16CooldownIntegration:
         # 默认窗口
         ct3 = CooldownTracker()
         assert ct3.window_seconds == 300
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v17: SimClock 泄漏修复 + Cooldown storm replay
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestV17SimClockLeak:
+    """v17: 验证 reset_clock() 始终恢复 RealClock，SimClock 不会全局泄漏。"""
+
+    def test_reset_clock_always_restores_real_clock(self):
+        """v17-01: set_clock(SimClock) → reset_clock() → get_clock() 返回 RealClock。"""
+        from serenity_v2.clock import set_clock, SimClock, reset_clock, get_clock, RealClock
+        set_clock(SimClock("2026-07-24T09:35:00+08:00"))
+        assert isinstance(get_clock(), SimClock)
+        reset_clock()
+        assert isinstance(get_clock(), RealClock), \
+            "reset_clock() 必须恢复 RealClock"
+
+    def test_reset_clock_twice_is_idempotent(self):
+        """v17-02: 重复 reset_clock() 安全且幂等。"""
+        from serenity_v2.clock import set_clock, SimClock, reset_clock, get_clock, RealClock
+        set_clock(SimClock("2026-07-24T09:35:00+08:00"))
+        reset_clock()
+        reset_clock()  # 第二次 reset 不应出错
+        assert isinstance(get_clock(), RealClock)
+
+    def test_no_sim_clock_leak_after_reset(self):
+        """v17-03: reset_clock() 后 now() 返回真实时间（非 SimClock 时间）。"""
+        from serenity_v2.clock import set_clock, SimClock, reset_clock, get_clock
+        from datetime import datetime, timezone, timedelta
+        CST = timezone(timedelta(hours=8))
+
+        set_clock(SimClock("2020-01-01T00:00:00+08:00"))
+        assert get_clock().now().year == 2020
+        reset_clock()
+        # 真实时间应该在 2026 年之后
+        assert get_clock().now().year >= 2026, \
+            "reset_clock() 后 now() 应返回真实时间"
+
+    def test_get_clock_returns_real_clock_by_default(self):
+        """v17-04: 未设置时钟时，get_clock() 返回 RealClock。"""
+        from serenity_v2.clock import reset_clock, get_clock, RealClock
+        reset_clock()
+        assert isinstance(get_clock(), RealClock)
+
+    def test_set_clock_after_reset_is_clean(self):
+        """v17-05: reset → set(SimClock) → reset → get 必须始终有效。"""
+        from serenity_v2.clock import set_clock, SimClock, reset_clock, get_clock, RealClock
+        # 循环 3 次以验证无状态残留
+        for i in range(3):
+            set_clock(SimClock(f"2026-07-24T09:35:0{i}+08:00"))
+            assert isinstance(get_clock(), SimClock), f"iter {i}: set failed"
+            reset_clock()
+            assert isinstance(get_clock(), RealClock), f"iter {i}: reset failed"
+
+
+class TestV17CooldownStormReplay:
+    """v17: 确定性 cooldown storm replay — 验证 cooldown 拦截重复建议。"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.clock import reset_clock
+        from serenity_v2.intelligence_network import reset_intel
+        from serenity_v2.signal_desk import reset_desk
+        from serenity_v2.account_baseline import reset_baseline
+
+        reset_clock()
+        reset_intel()
+        reset_desk()
+        reset_baseline()
+
+        from serenity_v2.phase_b2 import B2Runner
+        B2Runner._release_lock()
+        lock = B2Runner._lock_path()
+        lock.unlink(missing_ok=True)
+
+        self.tmpdir = tempfile.mkdtemp(prefix="serenity_b2_storm_")
+        self.tmp_db = Path(self.tmpdir) / "b2_shadow.db"
+
+        yield
+
+        B2Runner._release_lock()
+        lock.unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        from serenity_v2.clock import reset_clock
+        reset_clock()
+
+    def _make_storm_runner(self, window_seconds=300):
+        """构造 cooldown storm 测试的 runner。
+
+        使用极短 cooldown 窗口（10s），在同一 symbol 上注入相同 action，
+        验证 cooldown 在窗口内抑制重复信号，窗口外放行。
+        """
+        from serenity_v2.clock import set_clock, SimClock
+        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.migrations import apply_migrations
+        from serenity_v2.sina_market import _init_tables
+        from serenity_v2.event_record import EventStore
+        from serenity_v2.account_fixture import load_and_set_fixture, to_account_state
+        from serenity_v2.account_baseline import get_baseline, reset_baseline
+        from serenity_v2.intelligence_network import get_intel, reset_intel
+        from serenity_v2.signal_desk import get_desk, reset_desk
+        from serenity_v2.phase_b2 import B2Runner, CooldownTracker
+        from serenity_v2.signal_idempotency import EventProcessingLedger, IdempotentSignalProcessor
+        from unittest.mock import MagicMock
+
+        set_clock(SimClock("2026-07-24T09:35:00+08:00"))
+        env = SerenityEnv.shadow(db_path=self.tmp_db, log_dir=Path(self.tmpdir))
+        set_env(env)
+        apply_migrations(self.tmp_db)
+        _init_tables(self.tmp_db)
+        store = EventStore(db_path=self.tmp_db)
+        store.init_schema()
+
+        reset_baseline()
+        baseline = get_baseline()
+        fixture_path = Path(__file__).resolve().parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        fixture = load_and_set_fixture(str(fixture_path))
+        state = to_account_state(fixture)
+        state.snapshot_at = ""
+        baseline.save_snapshot(state)
+
+        reset_intel()
+        intel = get_intel(shadow_mode=True)
+        reset_desk()
+        desk = get_desk()
+
+        B2Runner._acquire_lock(caller_token="test-cooldown-storm")
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False)
+        runner._locked = True
+        runner.shadow_dir = Path(self.tmpdir)
+        runner.shadow_db = self.tmp_db
+        runner.store = store
+        runner.baseline = baseline
+        runner.intel = intel
+        runner.desk = desk
+        runner._fixture = fixture
+        runner._account_snapshot_id = fixture.snapshot_id_full
+        runner._account_snapshot_id_short = fixture.snapshot_id
+        runner._manifest = None
+
+        # 使用自定义窗口的 CooldownTracker
+        runner.cooldown = CooldownTracker(window_seconds=window_seconds)
+        runner.metrics.cooldown_enabled = True
+        runner.metrics.cooldown_policy_version = "b2-cooldown-1.0"
+
+        mock_guard = MagicMock()
+        mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
+        mock_guard.before = None
+        runner.guard = mock_guard
+
+        runner.ledger = EventProcessingLedger(self.tmp_db)
+        runner.ledger.init_schema()
+        runner.idempotent = IdempotentSignalProcessor(
+            desk=desk, ledger=runner.ledger, worker_id="test-cooldown-storm"
+        )
+        runner._strategy_version = "1.0"
+        runner._strategy_config_hash = "test"
+        runner.metrics.run_id = "B2_COOLDOWN_STORM"
+        runner._consecutive_failures = 0
+        runner._cycle_count = 0
+
+        from serenity_v2.sina_market import (
+            SinaQuoteFetcher, RawQuoteRecord, NormalizedQuote,
+        )
+        import hashlib
+        from datetime import datetime, timezone, timedelta
+        CST = timezone(timedelta(hours=8))
+
+        fetcher = MagicMock(spec=SinaQuoteFetcher)
+
+        def mock_fetch(symbols):
+            now = datetime.now(tz=CST).isoformat(timespec="milliseconds")
+            raws = []
+            prices = {"600487": 57.98, "600176": 40.20, "000988": 108.40}
+            for sym in symbols:
+                raw_str = f'var hq_str_{sym}="测试,{prices.get(sym,100)},0,0,0,0,0,0,0,0,..."'
+                raw_hash = hashlib.sha256(
+                    f"{sym}_{now}_{raw_str}".encode()
+                ).hexdigest()[:32]
+                raws.append(RawQuoteRecord(
+                    symbol=sym, source="sina_realtime",
+                    collected_at=now, raw_payload=raw_str,
+                    raw_payload_hash=raw_hash,
+                    http_status=200, response_time_ms=50.0,
+                ))
+            return raws
+
+        def mock_normalize(raw, business_time=None):
+            return NormalizedQuote(
+                symbol=raw.symbol,
+                name="测试",
+                normalized_at=raw.collected_at,
+                price=57.98,
+                previous_close=57.50,
+                open=57.60,
+                high=58.50,
+                low=57.30,
+                volume=10000,
+                amount=579800.0,
+                validation_status="valid",
+                validation_errors=[],
+                acceptable_as_postmarket_snapshot=False,
+                raw_payload_hash=raw.raw_payload_hash,
+                data_age_ms=2000,
+                effective_action_eligible=True,
+            )
+
+        fetcher.fetch = mock_fetch
+        fetcher.normalize = mock_normalize
+        runner.fetcher = fetcher
+        runner.verify_environment = lambda: (True, {"clock_mode": "SIM_TEST", "guard": "mock"}, [])
+
+        return runner
+
+    def test_cooldown_suppresses_duplicate_signals_across_cycles(self):
+        """v17-10: 确定性 storm — cooldown 拦截重复信号。
+
+        构造场景: 5 个周期，每个周期对同一 symbol 生成相同 action 的信号。
+        预期: 第 1 周期放行 3 个信号（1 per symbol），后续 4 个周期全部抑制。
+        总计: signals_skipped_cooldown = 12 (= 3 symbols × 4 重复周期)
+        """
+        import time
+        from serenity_v2.phase_b2 import CooldownTracker
+
+        # 直接测试 CooldownTracker — 比端到端测试更确定、更快
+        ct = CooldownTracker(window_seconds=10)
+        symbols = ["600487", "600176", "000988"]
+        action = "BUY"
+        t0 = time.monotonic()
+
+        # 5 个周期，每个 2s 间隔（窗口内）
+        skipped = 0
+        checked = 0
+        for cycle in range(5):
+            cycle_t = t0 + cycle * 2.0
+            for sym in symbols:
+                if ct.should_suppress(sym, action, cycle_t):
+                    skipped += 1
+                checked += 1
+
+        # 周期 0: 3 个信号全部放行（首次出现）
+        # 周期 1-4: 每个周期 3 个信号全部抑制（窗口内）
+        assert checked == 15, f"应检查 15 次: {checked}"
+        assert skipped == 12, (
+            f"cooldown 应抑制 12 次 (3 symbols × 4 cycles): {skipped}"
+        )
+        assert ct.total_checked == 15
+        assert ct.skipped_count == 12
+
+    def test_cooldown_window_expiry_allows_after_window(self):
+        """v17-11: cooldown 窗口过期后重新放行信号。
+
+        周期 0: 放行 3 个信号
+        周期 1 (t+2s, 窗口内): 抑制 3 个信号
+        周期 2 (t+12s, 窗口外): 放行 3 个信号
+        """
+        import time
+        from serenity_v2.phase_b2 import CooldownTracker
+
+        ct = CooldownTracker(window_seconds=10)
+        symbols = ["600487", "600176", "000988"]
+        action = "BUY"
+        t0 = time.monotonic()
+
+        # 周期 0: t+0s — 首次放行
+        for sym in symbols:
+            assert ct.should_suppress(sym, action, t0) is False
+        assert ct.skipped_count == 0
+
+        # 周期 1: t+2s — 窗口内全部抑制
+        t1 = t0 + 2.0
+        for sym in symbols:
+            assert ct.should_suppress(sym, action, t1) is True
+        assert ct.skipped_count == 3
+
+        # 周期 2: t+12s — 窗口外全部放行
+        t2 = t0 + 12.0
+        for sym in symbols:
+            assert ct.should_suppress(sym, action, t2) is False
+        assert ct.skipped_count == 3  # 不增加
+
+    def test_cooldown_different_actions_not_suppressed(self):
+        """v17-12: 不同 action 互不抑制 — 粗粒度键误抑制风险已关闭。
+
+        同一 symbol 的 BUY → SELL → BUY：每个 action 有独立 cooldown 窗口。
+        """
+        import time
+        from serenity_v2.phase_b2 import CooldownTracker
+
+        ct = CooldownTracker(window_seconds=10)
+        t0 = time.monotonic()
+
+        # BUY 放行，记录 (600487, BUY)
+        assert ct.should_suppress("600487", "BUY", t0) is False
+        # SELL 放行 — 不同键
+        assert ct.should_suppress("600487", "SELL", t0 + 1.0) is False
+        # BUY 抑制 — 同键在窗口内
+        assert ct.should_suppress("600487", "BUY", t0 + 1.0) is True
+        # SELL 抑制 — 同键在窗口内
+        assert ct.should_suppress("600487", "SELL", t0 + 1.0) is True
+
+    def test_cooldown_policy_not_coarse(self):
+        """v17-13: cooldown 策略非粗粒度 — (symbol, action) 键粒度合理。
+
+        验证:
+        - 同一 symbol 不同 action 各有独立窗口
+        - 不同 symbol 互不影响
+        - 窗口长度可配置
+        """
+        import time
+        from serenity_v2.phase_b2 import CooldownTracker
+
+        ct = CooldownTracker(window_seconds=10)
+        t0 = time.monotonic()
+
+        # 场景: A/BUY 和 A/SELL 是两个独立键
+        ct.should_suppress("A", "BUY", t0)       # A/BUY 窗口开始
+        ct.should_suppress("A", "SELL", t0 + 1.0)  # A/SELL 窗口开始
+        ct.should_suppress("B", "BUY", t0 + 2.0)    # B/BUY 窗口开始
+
+        # t+3s: A/BUY 抑制（窗口内），A/SELL 抑制（窗口内），B/BUY 抑制（窗口内）
+        assert ct.should_suppress("A", "BUY", t0 + 3.0) is True
+        assert ct.should_suppress("A", "SELL", t0 + 3.0) is True
+        assert ct.should_suppress("B", "BUY", t0 + 3.0) is True
+
+        # t+12s: A/BUY 放行（窗口过期），A/SELL 放行，B/BUY 放行
+        assert ct.should_suppress("A", "BUY", t0 + 12.0) is False
+        assert ct.should_suppress("A", "SELL", t0 + 12.0) is False
+        assert ct.should_suppress("B", "BUY", t0 + 12.0) is False

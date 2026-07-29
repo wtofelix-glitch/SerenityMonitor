@@ -38,10 +38,12 @@ def setup_shadow_env():
     import serenity_v2.intelligence_network as intel_mod
     import serenity_v2.signal_desk as sd
     import serenity_v2.event_record as er
+    from serenity_v2.clock import reset_clock
 
     ab.reset_baseline()
     intel_mod.reset_intel()
     sd.reset_desk()
+    reset_clock()  # v17: 防御深度 — 防止来自其他文件的 SimClock 泄漏
 
     # 应用迁移
     from serenity_v2.migrations import apply_migrations
