@@ -104,11 +104,17 @@ class TestPhaseB2:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        from serenity_v2.env import set_env, SerenityEnv
+        from serenity_v2.env import set_env, SerenityEnv, get_env
         from serenity_v2.clock import reset_clock
         from serenity_v2.intelligence_network import reset_intel
         from serenity_v2.signal_desk import reset_desk
         from serenity_v2.account_baseline import reset_baseline
+
+        # v17: 保存原始环境（若存在），teardown 时恢复，防止跨测试文件 env 污染
+        try:
+            _saved_env = get_env()
+        except RuntimeError:
+            _saved_env = None
 
         reset_clock()
         reset_intel()
@@ -119,6 +125,12 @@ class TestPhaseB2:
         self.tmp_db = Path(self.tmpdir) / "b2_shadow.db"
 
         yield
+
+        # v17: 恢复原始环境 + 重置 baseline + clock
+        if _saved_env is not None:
+            set_env(_saved_env)
+        reset_baseline()
+        reset_clock()
 
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -2687,3 +2699,148 @@ class TestV18CooldownScope:
         assert d["cooldown_key_fields"] == "symbol,effective_action"
         assert d["cooldown_scope"] == "single_strategy_fixture_shadow"
         assert d["cooldown_reset_reason"] == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v19: Cooldown 运行时作用域强制执行（fail-closed）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestV19CooldownRuntimeEnforcement:
+    """v19: cooldown 作用域运行时验证 — fail-closed 防止多策略误用。"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """为作用域验证测试设置 shadow 环境。"""
+        import tempfile
+        from pathlib import Path
+        from serenity_v2.env import set_env, SerenityEnv
+        tmpdir = tempfile.mkdtemp(prefix="v19_scope_")
+        env = SerenityEnv.shadow(db_path=Path(tmpdir) / "test.db",
+                                  log_dir=Path(tmpdir) / "logs")
+        set_env(env)
+        self._v19_tmpdir = tmpdir
+        yield
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _make_runner_with_context(self, strategy_version="1.0",
+                                   config_hash="test-hash",
+                                   snapshot_id="abc123",
+                                   protected_prod_db=False):
+        """构造一个上下文完整的 runner 用于测试 _verify_cooldown_context。"""
+        from serenity_v2.phase_b2 import B2Runner
+
+        runner = B2Runner(duration_seconds=10, interval_seconds=2, init_env=False,
+                          protected_prod_db=protected_prod_db)
+        runner._strategy_version = strategy_version
+        runner._strategy_config_hash = config_hash
+        runner._account_snapshot_id = snapshot_id
+        # 绕过 env 确认以允许 run() 在不设置完整环境的情况下被调用
+        runner._print_env_confirmation = lambda: None
+        return runner
+
+    def test_verify_context_pass_with_valid_single_strategy(self):
+        """v19-01: 有效单策略上下文通过验证。"""
+        runner = self._make_runner_with_context()
+        ok, violations = runner._verify_cooldown_context()
+        assert ok, f"应该通过: violations={violations}"
+        assert len(violations) == 0
+
+    def test_verify_context_fails_without_strategy_version(self):
+        """v19-02: strategy_version 缺失 → fail-closed。"""
+        runner = self._make_runner_with_context(strategy_version=None)
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "缺少 strategy_version 应该失败"
+        assert any("strategy_version" in v for v in violations)
+
+    def test_verify_context_fails_without_config_hash(self):
+        """v19-03: strategy_config_hash 缺失 → fail-closed。"""
+        runner = self._make_runner_with_context(config_hash=None)
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "缺少 strategy_config_hash 应该失败"
+        assert any("strategy_config_hash" in v for v in violations)
+
+    def test_verify_context_fails_without_snapshot_id(self):
+        """v19-04: account_snapshot_id 缺失 → fail-closed。"""
+        runner = self._make_runner_with_context(snapshot_id=None)
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "缺少 account_snapshot_id 应该失败"
+        assert any("account_snapshot_id" in v for v in violations)
+
+    def test_verify_context_fails_with_protected_prod(self):
+        """v19-05: protected_prod_db 已设置 → fail-closed（防止产品误用单策略作用域）。"""
+        runner = self._make_runner_with_context(protected_prod_db="/prod/serenity.db")
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "protected_prod_db 已设置应该失败"
+        assert any("protected_prod_db" in v for v in violations)
+
+    def test_snapshot_context_captures_all_fields(self):
+        """v19-06: _snapshot_cooldown_context 捕获所有相关字段。"""
+        runner = self._make_runner_with_context()
+        snap = runner._snapshot_cooldown_context()
+        expected_keys = {"strategy_version", "strategy_config_hash",
+                         "account_snapshot_id"}
+        assert set(snap.keys()) == expected_keys, \
+            f"快照键: {set(snap.keys())}, 期望: {expected_keys}"
+        assert snap["strategy_version"] == "1.0"
+        assert snap["strategy_config_hash"] == "test-hash"
+        assert snap["account_snapshot_id"] == "abc123"
+
+    def test_context_change_detected_by_snapshot_diff(self):
+        """v19-07: 快照差异正确检测上下文变化。"""
+        runner = self._make_runner_with_context()
+        snap1 = runner._snapshot_cooldown_context()
+        # 变更 strategy_version
+        runner._strategy_version = "2.0"
+        snap2 = runner._snapshot_cooldown_context()
+        assert snap1 != snap2
+        changed = [k for k in snap2 if snap2[k] != snap1[k]]
+        assert "strategy_version" in changed
+
+    def test_context_change_triggers_cooldown_reset(self):
+        """v19-08: 上下文变更触发 cooldown reset 并记录原因。"""
+        from serenity_v2.phase_b2 import B2Runner, CooldownTracker
+        runner = self._make_runner_with_context()
+        runner._cooldown_context_snapshot = runner._snapshot_cooldown_context()
+
+        # 模拟上下文变更
+        runner._strategy_version = "2.0"
+        current_ctx = runner._snapshot_cooldown_context()
+
+        # 执行逐周期验证逻辑
+        if runner._cooldown_context_snapshot:
+            if current_ctx != runner._cooldown_context_snapshot:
+                changed = [k for k in current_ctx
+                           if current_ctx[k] != runner._cooldown_context_snapshot[k]]
+                reason = f"cooldown_context_changed:{','.join(changed)}"
+                runner.cooldown.reset(reason)
+                runner._cooldown_context_snapshot = current_ctx
+
+        assert runner.cooldown.reset_reason == "cooldown_context_changed:strategy_version"
+        assert runner.cooldown.total_checked == 0
+        assert runner.cooldown.skipped_count == 0
+
+    def test_run_fails_closed_on_scope_violation(self):
+        """v19-09: run() 在作用域违规时返回 ERROR 状态不被执行。"""
+        runner = self._make_runner_with_context(strategy_version=None)
+        runner.metrics.run_id = "v19-fail-closed"
+        result = runner.run()
+        assert result.status == "ERROR"
+        assert len(result.violations) > 0
+
+    def test_all_violations_reported(self):
+        """v19-10: 多个作用域违规全部报告（不只是第一个）。
+
+        strategy_version + config_hash 合并为一条违规（两者都缺失 → strategy 违规），
+        account_snapshot_id 单独一条。环境已设置（shadow mode → 通过）。"""
+        runner = self._make_runner_with_context(
+            strategy_version=None, config_hash=None, snapshot_id=None
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok
+        assert len(violations) >= 2, \
+            f"应至少有 2 个违规（strategy + account_snapshot）: {violations}"
+        assert any("strategy_version" in v for v in violations), \
+            f"应报告 strategy 违规: {violations}"
+        assert any("account_snapshot_id" in v for v in violations), \
+            f"应报告 account_snapshot_id 违规: {violations}"

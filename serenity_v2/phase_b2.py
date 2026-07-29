@@ -581,6 +581,7 @@ class B2Runner:
             self._init_env()
         self._consecutive_failures = 0
         self._cycle_count = 0  # track across run()
+        self._cooldown_context_snapshot: Optional[dict] = None  # v19: run() 入口快照
 
     # ── v11: 进程隔离锁 (原子 O_CREAT|O_EXCL + fcntl.flock) ──
 
@@ -960,6 +961,71 @@ class B2Runner:
 
         return True, remaining, ""
 
+    def _verify_cooldown_context(self) -> tuple:
+        """v19: 验证 cooldown 作用域运行时约束 — fail-closed。
+
+        检查:
+        - 环境为 SHADOW（非生产）
+        - 单策略配置（strategy_version, config_hash 已设置且非空）
+        - account_snapshot_id 已设置（FIXTURE 模式）
+        - 账户上下文为 FIXTURE（非实时）
+
+        Returns:
+            (ok, violations_list)
+        """
+        violations = []
+
+        # 1. 环境检查: 必须是 shadow 模式
+        from .env import get_env
+        try:
+            env = get_env()
+            env_mode = env.mode if env else "UNSET"
+        except Exception:
+            env_mode = "UNSET"
+        if env_mode != "shadow":
+            violations.append(
+                f"cooldown SCOPE 违规: environment={env_mode}, "
+                f"期望 shadow（cooldown_scope={self.metrics.cooldown_scope}）"
+            )
+
+        # 2. 单策略配置检查
+        sv = getattr(self, '_strategy_version', None)
+        sh = getattr(self, '_strategy_config_hash', None)
+        if not sv or not sh:
+            violations.append(
+                f"cooldown SCOPE 违规: strategy_version={sv!r} "
+                f"strategy_config_hash={sh!r}（两者都必须设置）"
+            )
+
+        # 3. 账户快照检查
+        asid = getattr(self, '_account_snapshot_id', None)
+        if not asid:
+            violations.append(
+                "cooldown SCOPE 违规: account_snapshot_id 未设置（需要 FIXTURE 模式）"
+            )
+
+        # 4. 检查是否在生产保护模式（防止误用）
+        if getattr(self, '_protected_prod_db', True):
+            violations.append(
+                "cooldown SCOPE 违规: protected_prod_db=True，"
+                "单策略 FIXTURE SHADOW 作用域不应用于生产保护"
+            )
+
+        return len(violations) == 0, violations
+
+    def _snapshot_cooldown_context(self) -> dict:
+        """v19: 拍摄 cooldown 上下文快照用于运行时逐周期验证。
+
+        Returns:
+            {strategy_version, strategy_config_hash, account_snapshot_id} 的字典。
+            如果 run() 执行期间其中任何值发生变化，cooldown 必须重置。
+        """
+        return {
+            "strategy_version": getattr(self, '_strategy_version', None),
+            "strategy_config_hash": getattr(self, '_strategy_config_hash', None),
+            "account_snapshot_id": getattr(self, '_account_snapshot_id', None),
+        }
+
     def _auto_stop(self, reason: str):
         if not self.metrics.auto_stop_triggered:
             import time as _time
@@ -1076,6 +1142,18 @@ class B2Runner:
             print(f"❌ 窗口不足: {rem_why}")
             return self.metrics
 
+        # ── v19: Cooldown 作用域运行时验证（fail-closed）──
+        ctx_ok, ctx_violations = self._verify_cooldown_context()
+        if not ctx_ok:
+            for v in ctx_violations:
+                self.metrics.violations.append(v)
+                logger.error(f"cooldown scope: {v}")
+                print(f"❌ {v}")
+            self.metrics.status = "ERROR"
+            return self.metrics
+        # 拍摄上下文快照用于逐周期验证
+        self._cooldown_context_snapshot = self._snapshot_cooldown_context()
+
         self.metrics.status = "RUNNING"
         self.metrics.started_at = datetime.now(tz=CST).isoformat(timespec="seconds")
 
@@ -1141,6 +1219,17 @@ class B2Runner:
                     break
 
                 last_session = current_session
+
+                # v19: 逐周期 cooldown 上下文验证
+                if self._cooldown_context_snapshot:
+                    current_ctx = self._snapshot_cooldown_context()
+                    if current_ctx != self._cooldown_context_snapshot:
+                        changed = [k for k in current_ctx
+                                   if current_ctx[k] != self._cooldown_context_snapshot[k]]
+                        reason = f"cooldown_context_changed:{','.join(changed)}"
+                        logger.warning(f"cooldown 上下文变更: {reason}")
+                        self.cooldown.reset(reason)
+                        self._cooldown_context_snapshot = current_ctx
 
                 # v11: 周期边界守卫 — 不允许启动超过 planned 的周期
                 if cycle >= self.metrics.cycles_planned:
@@ -1541,6 +1630,19 @@ class B2Runner:
         # P1: 同步 cooldown tracker 统计到 metrics
         self.metrics.signals_skipped_cooldown = self.cooldown.skipped_count
         self.metrics.cooldown_reset_reason = self.cooldown.reset_reason
+
+        # v19: 飞行后 cooldown 上下文一致性验证
+        if self._cooldown_context_snapshot:
+            final_ctx = self._snapshot_cooldown_context()
+            if final_ctx != self._cooldown_context_snapshot:
+                changed = [k for k in final_ctx
+                           if final_ctx[k] != self._cooldown_context_snapshot[k]]
+                violation = (
+                    f"cooldown postflight: 上下文在运行期间变更 "
+                    f"{','.join(changed)}"
+                )
+                self.metrics.violations.append(violation)
+                logger.error(violation)
 
         # P0-1: 运行后生产文件检查
         if self.guard is not None:
