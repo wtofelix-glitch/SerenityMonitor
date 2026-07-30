@@ -1010,13 +1010,16 @@ class B2Runner:
         return True, remaining, ""
 
     def _verify_cooldown_context(self) -> tuple:
-        """v19: 验证 cooldown 作用域运行时约束 — fail-closed。
+        """v22: 验证 cooldown 作用域运行时约束 — fail-closed。
 
         检查:
-        - 环境为 SHADOW（非生产）
+        - 环境为 SHADOW（非生产）— production 由 env.mode 判定，不由路径推断
         - 单策略配置（strategy_version, config_hash 已设置且非空）
         - account_snapshot_id 已设置（FIXTURE 模式）
-        - 账户上下文为 FIXTURE（非实时）
+        - protected_prod_db 必须已配置（显式声明受保护的生产 DB）
+        - shadow_db 与 protected_prod_db 路径隔离（realpath 不同、非同一 inode）
+        - push_adapter 必须为 disabled
+        - trade_adapter 必须为 disabled
 
         Returns:
             (ok, violations_list)
@@ -1053,25 +1056,89 @@ class B2Runner:
             )
 
         # 4. 生产 DB 保护必须已配置（防御性：必须显式声明受保护的生产 DB 路径）
-        if not getattr(self, '_protected_prod_db', None):
+        protected_prod_db = getattr(self, '_protected_prod_db', None)
+        if not protected_prod_db:
             violations.append(
                 "cooldown SCOPE 违规: protected_prod_db 未设置，"
                 "无法保证生产 DB 不被修改"
             )
 
+        # 5. Shadow/生产 DB 路径隔离检查
+        shadow_db = getattr(self, 'shadow_db', None)
+        if shadow_db and protected_prod_db:
+            try:
+                shadow_real = Path(str(shadow_db)).resolve()
+                prod_real = Path(str(protected_prod_db)).resolve()
+                # 5a. realpath 相同
+                if shadow_real == prod_real:
+                    violations.append(
+                        "cooldown SCOPE 违规: shadow_db 与 protected_prod_db "
+                        f"realpath 相同 ({shadow_real})"
+                    )
+                # 5b. 文件存在时 inode 相同（硬链接或同一文件）
+                elif shadow_real.exists() and prod_real.exists():
+                    shadow_stat = shadow_real.stat()
+                    prod_stat = prod_real.stat()
+                    if (shadow_stat.st_dev, shadow_stat.st_ino) == \
+                       (prod_stat.st_dev, prod_stat.st_ino):
+                        violations.append(
+                            "cooldown SCOPE 违规: shadow_db 与 protected_prod_db "
+                            f"inode 相同 dev={shadow_stat.st_dev} ino={shadow_stat.st_ino} "
+                            "（通过硬链接或同一文件）"
+                        )
+            except Exception as e:
+                violations.append(
+                    f"cooldown SCOPE 违规: DB 隔离检查失败: {e}"
+                )
+
+        # 6. push_adapter 必须为 disabled
+        try:
+            if env.push_adapter is not None:
+                violations.append(
+                    "cooldown SCOPE 违规: push_adapter 已启用，"
+                    "单策略 FIXTURE SHADOW 作用域不允许推送"
+                )
+        except Exception:
+            pass  # env 未初始化时由 check #1 捕获
+
+        # 7. trade_adapter 必须为 disabled
+        try:
+            if env.broker_adapter is not None:
+                violations.append(
+                    "cooldown SCOPE 违规: trade_adapter 已启用，"
+                    "单策略 FIXTURE SHADOW 作用域不允许交易"
+                )
+        except Exception:
+            pass  # env 未初始化时由 check #1 捕获
+
         return len(violations) == 0, violations
 
     def _snapshot_cooldown_context(self) -> dict:
-        """v19: 拍摄 cooldown 上下文快照用于运行时逐周期验证。
+        """v22: 拍摄 cooldown 上下文快照用于运行时逐周期验证。
 
         Returns:
-            {strategy_version, strategy_config_hash, account_snapshot_id} 的字典。
+            包含 strategy_version, strategy_config_hash, account_snapshot_id,
+            protected_prod_db, shadow_db_realpath, push_adapter, trade_adapter 的字典。
             如果 run() 执行期间其中任何值发生变化，cooldown 必须重置。
         """
+        shadow_db = getattr(self, 'shadow_db', None)
+        try:
+            from .env import get_env
+            env = get_env()
+            push_adapter = "disabled" if env.push_adapter is None else "present"
+            trade_adapter = "disabled" if env.broker_adapter is None else "present"
+        except Exception:
+            push_adapter = "unknown"
+            trade_adapter = "unknown"
+
         return {
             "strategy_version": getattr(self, '_strategy_version', None),
             "strategy_config_hash": getattr(self, '_strategy_config_hash', None),
             "account_snapshot_id": getattr(self, '_account_snapshot_id', None),
+            "protected_prod_db": getattr(self, '_protected_prod_db', None),
+            "shadow_db_realpath": str(Path(str(shadow_db)).resolve()) if shadow_db else None,
+            "push_adapter": push_adapter,
+            "trade_adapter": trade_adapter,
         }
 
     def _auto_stop(self, reason: str):

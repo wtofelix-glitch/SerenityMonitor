@@ -2790,16 +2790,22 @@ class TestV19CooldownRuntimeEnforcement:
         assert ok, f"protected_prod_db 已设置应通过，但得到: {violations}"
 
     def test_snapshot_context_captures_all_fields(self):
-        """v19-06: _snapshot_cooldown_context 捕获所有相关字段。"""
+        """v22-06: _snapshot_cooldown_context 捕获所有相关字段（含 v22 新增）。"""
         runner = self._make_runner_with_context()
         snap = runner._snapshot_cooldown_context()
         expected_keys = {"strategy_version", "strategy_config_hash",
-                         "account_snapshot_id"}
+                         "account_snapshot_id", "protected_prod_db",
+                         "shadow_db_realpath", "push_adapter", "trade_adapter"}
         assert set(snap.keys()) == expected_keys, \
             f"快照键: {set(snap.keys())}, 期望: {expected_keys}"
         assert snap["strategy_version"] == "1.0"
         assert snap["strategy_config_hash"] == "test-hash"
         assert snap["account_snapshot_id"] == "abc123"
+        assert snap["protected_prod_db"] == "/test/prod.db"
+        # init_env=False → shadow_db 未设置; autouse fixture 设置 shadow env → adapters disabled
+        assert snap["shadow_db_realpath"] is None
+        assert snap["push_adapter"] == "disabled"
+        assert snap["trade_adapter"] == "disabled"
 
     def test_context_change_detected_by_snapshot_diff(self):
         """v19-07: 快照差异正确检测上下文变化。"""
@@ -3085,3 +3091,219 @@ class TestV20CooldownAcceptance:
                  + d["signals_skipped_idempotent"]
                  + d["signals_skipped_cooldown"])
         assert total == 25
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v22: Cooldown 作用域 — DB 隔离 + adapter 验证
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestV22CooldownScopeIsolation:
+    """v22: cooldown 作用域运行时验证 — DB 路径隔离与 adapter 检查。"""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """为作用域验证测试设置 shadow 环境。"""
+        import tempfile, shutil
+        from pathlib import Path
+        from serenity_v2.env import set_env, SerenityEnv
+        tmpdir = tempfile.mkdtemp(prefix="v22_scope_")
+        self._v22_tmpdir = tmpdir
+        self._v22_db_dir = Path(tmpdir) / "db"
+        self._v22_db_dir.mkdir(exist_ok=True)
+        env = SerenityEnv.shadow(db_path=self._v22_db_dir / "test.db",
+                                  log_dir=Path(tmpdir) / "logs")
+        set_env(env)
+        yield
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _make_runner_with_db(self, protected_prod_db="/test/prod.db",
+                             shadow_db_path=None):
+        """构造 runner 并设置 shadow_db 用于 DB 隔离测试。
+
+        init_env=False 避免在测试 DB 上运行完整 env 初始化（不需要
+        portfolio_reconciliations 等生产表）。
+        """
+        from serenity_v2.phase_b2 import B2Runner
+        runner = B2Runner(duration_seconds=10, interval_seconds=2,
+                          init_env=False,
+                          protected_prod_db=protected_prod_db)
+        runner._strategy_version = "1.0"
+        runner._strategy_config_hash = "test-hash"
+        runner._account_snapshot_id = "abc123"
+        runner._print_env_confirmation = lambda: None
+        if shadow_db_path is not None:
+            runner.shadow_db = shadow_db_path
+        return runner
+
+    # ── DB 隔离测试 ──────────────────────────────────────────────────
+
+    def test_shadow_prod_same_path_fails(self):
+        """v22-01: shadow_db 与 protected_prod_db 同路径 → FAIL。"""
+        same_path = str(self._v22_db_dir / "same.db")
+        # 创建文件使其存在
+        from pathlib import Path
+        Path(same_path).touch()
+        runner = self._make_runner_with_db(
+            protected_prod_db=same_path,
+            shadow_db_path=Path(same_path),
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "同路径应被拒绝"
+        assert any("realpath 相同" in v for v in violations), \
+            f"应报告 realpath 相同: {violations}"
+
+    def test_shadow_prod_symlink_same_file_fails(self):
+        """v22-02: shadow_db 与 protected_prod_db 通过 symlink 指向同一文件 → FAIL。"""
+        import os
+        real_file = str(self._v22_db_dir / "real.db")
+        link_file = str(self._v22_db_dir / "link.db")
+        from pathlib import Path
+        Path(real_file).touch()
+        os.symlink(real_file, link_file)
+        runner = self._make_runner_with_db(
+            protected_prod_db=real_file,
+            shadow_db_path=Path(link_file),
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "symlink 指向同文件应被拒绝"
+        assert any("realpath 相同" in v for v in violations), \
+            f"应通过 realpath 检测到相同文件: {violations}"
+
+    def test_shadow_prod_hardlink_same_inode_fails(self):
+        """v22-03: shadow_db 与 protected_prod_db 通过硬链接同 inode → FAIL。"""
+        import os
+        path_a = str(self._v22_db_dir / "a.db")
+        path_b = str(self._v22_db_dir / "b.db")
+        from pathlib import Path
+        Path(path_a).touch()
+        os.link(path_a, path_b)  # 硬链接
+        runner = self._make_runner_with_db(
+            protected_prod_db=path_a,
+            shadow_db_path=Path(path_b),
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "硬链接同 inode 应被拒绝"
+        assert any("inode 相同" in v for v in violations), \
+            f"应检测到 inode 相同: {violations}"
+
+    def test_shadow_prod_different_paths_pass(self):
+        """v22-04: shadow_db 与 protected_prod_db 不同路径 → PASS。"""
+        prod_path = str(self._v22_db_dir / "prod.db")
+        shadow_path = str(self._v22_db_dir / "shadow.db")
+        from pathlib import Path
+        Path(prod_path).touch()
+        Path(shadow_path).touch()
+        runner = self._make_runner_with_db(
+            protected_prod_db=prod_path,
+            shadow_db_path=Path(shadow_path),
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert ok, f"不同路径应通过，但得到: {violations}"
+
+    def test_protected_prod_db_not_exists_still_passes(self):
+        """v22-05: protected_prod_db 文件不存在（仅路径声明）→ 仍应通过。"""
+        runner = self._make_runner_with_db(
+            protected_prod_db="/nonexistent/prod.db",
+            shadow_db_path=self._v22_db_dir / "shadow.db",
+        )
+        from pathlib import Path
+        (self._v22_db_dir / "shadow.db").touch()
+        ok, violations = runner._verify_cooldown_context()
+        assert ok, f"不存在的 protected_prod_db 路径声明应通过: {violations}"
+
+    # ── Adapter 检查 ─────────────────────────────────────────────────
+
+    def test_push_adapter_enabled_fails(self):
+        """v22-06: push_adapter 已启用 → FAIL。"""
+        from serenity_v2.env import get_env, set_env, SerenityEnv
+        env = get_env()
+        # 设置 push_adapter（模拟推送适配器已连接）
+        env.push_adapter = object()  # 非 None → 已启用
+        runner = self._make_runner_with_db()
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "push_adapter 已启用应被拒绝"
+        assert any("push_adapter" in v for v in violations), \
+            f"应报告 push_adapter 违规: {violations}"
+
+    def test_trade_adapter_enabled_fails(self):
+        """v22-07: trade_adapter 已启用 → FAIL。"""
+        from serenity_v2.env import get_env
+        env = get_env()
+        env.broker_adapter = object()  # 非 None → 已启用
+        runner = self._make_runner_with_db()
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "trade_adapter 已启用应被拒绝"
+        assert any("trade_adapter" in v for v in violations), \
+            f"应报告 trade_adapter 违规: {violations}"
+
+    def test_both_adapters_disabled_pass(self):
+        """v22-08: push_adapter 和 trade_adapter 均 disabled → PASS。"""
+        runner = self._make_runner_with_db()
+        ok, violations = runner._verify_cooldown_context()
+        assert ok, f"adapters 均 disabled 应通过: {violations}"
+
+    # ── 综合场景 ─────────────────────────────────────────────────────
+
+    def test_full_valid_context_passes(self):
+        """v22-09: 完整合法单策略 fixture shadow 上下文 → PASS。"""
+        prod_path = str(self._v22_db_dir / "prod.db")
+        shadow_path = str(self._v22_db_dir / "shadow.db")
+        from pathlib import Path
+        Path(prod_path).touch()
+        Path(shadow_path).touch()
+        runner = self._make_runner_with_db(
+            protected_prod_db=prod_path,
+            shadow_db_path=Path(shadow_path),
+        )
+        ok, violations = runner._verify_cooldown_context()
+        assert ok, f"完整合法上下文应通过: {violations}"
+
+    def test_multiple_violations_reported_together(self):
+        """v22-10: 多个违规同时报告（非短路）。"""
+        from serenity_v2.phase_b2 import B2Runner
+        runner = B2Runner.__new__(B2Runner)  # 不调用 __init__
+        runner.metrics = type('M', (), {'cooldown_scope': 'single_strategy_fixture_shadow'})()
+        runner._strategy_version = None
+        runner._strategy_config_hash = None
+        runner._account_snapshot_id = None
+        runner._protected_prod_db = None
+        runner.shadow_db = None
+        runner._print_env_confirmation = lambda: None
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok
+        # autouse fixture 设置 shadow env → check #1 通过
+        # 应至少包含: strategy, account, protected_prod_db = 3
+        assert len(violations) >= 3, \
+            f"应报告至少 3 项违规: {violations}"
+
+    def test_nonempty_path_not_interpreted_as_production(self):
+        """v22-11: 非空 protected_prod_db 路径不被误判为 production=true。"""
+        runner = self._make_runner_with_db(
+            protected_prod_db="/valid/production/path.db",
+        )
+        ok, violations = runner._verify_cooldown_context()
+        # 不应包含 "production" 相关的违规（仅由 env.mode 判定 production）
+        prod_violations = [v for v in violations if "production" in v.lower()]
+        assert len(prod_violations) == 0, \
+            f"不应有 production 模式违规: {prod_violations}"
+        assert ok, f"合法路径应通过: {violations}"
+
+    def test_environment_production_with_shadow_scope_fails(self):
+        """v22-12: environment=production + cooldown scope=shadow → FAIL。"""
+        from unittest.mock import patch
+        from serenity_v2.env import SerenityEnv
+        mock_push = object()
+        prod_env = SerenityEnv.production(
+            push_adapter=mock_push,
+            db_path=self._v22_db_dir / "prod.db",
+            log_dir=self._v22_db_dir / "logs",
+        )
+        # patch get_env 返回 production 环境（绕过 set_env 的混用保护）
+        # _verify_cooldown_context 内部有 from .env import get_env，
+        # 执行时解析为 serenity_v2.env.get_env
+        with patch('serenity_v2.env.get_env', return_value=prod_env):
+            runner = self._make_runner_with_db()
+            ok, violations = runner._verify_cooldown_context()
+            assert not ok, "production 环境应被拒绝"
+            assert any("environment" in v for v in violations), \
+                f"应报告 environment 违规: {violations}"
