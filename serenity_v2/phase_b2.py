@@ -1052,11 +1052,11 @@ class B2Runner:
                 "cooldown SCOPE 违规: account_snapshot_id 未设置（需要 FIXTURE 模式）"
             )
 
-        # 4. 检查是否在生产保护模式（防止误用）
-        if getattr(self, '_protected_prod_db', True):
+        # 4. 生产 DB 保护必须已配置（防御性：必须显式声明受保护的生产 DB 路径）
+        if not getattr(self, '_protected_prod_db', None):
             violations.append(
-                "cooldown SCOPE 违规: protected_prod_db=True，"
-                "单策略 FIXTURE SHADOW 作用域不应用于生产保护"
+                "cooldown SCOPE 违规: protected_prod_db 未设置，"
+                "无法保证生产 DB 不被修改"
             )
 
         return len(violations) == 0, violations

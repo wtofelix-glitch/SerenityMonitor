@@ -1072,6 +1072,7 @@ class TestV11OfflineReplay:
         runner._account_snapshot_id = fixture.snapshot_id_full
         runner._account_snapshot_id_short = fixture.snapshot_id
         runner._manifest = None
+        runner._protected_prod_db = "/test/prod.db"
 
         # 创建模拟 ProductionGuard 以通过环境验证
         from unittest.mock import MagicMock
@@ -1214,6 +1215,7 @@ class TestV11OfflineReplay:
         runner._account_snapshot_id = fixture.snapshot_id_full
         runner._account_snapshot_id_short = fixture.snapshot_id
         runner._manifest = None
+        runner._protected_prod_db = "/test/prod.db"
         from unittest.mock import MagicMock
         mock_guard = MagicMock()
         mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
@@ -1399,6 +1401,7 @@ class TestV11OfflineReplay:
             runner._account_snapshot_id = fixture.snapshot_id_full
             runner._account_snapshot_id_short = fixture.snapshot_id
             runner._manifest = None
+            runner._protected_prod_db = "/test/prod.db"
             from unittest.mock import MagicMock as MM
             mock_guard = MM()
             mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
@@ -1756,6 +1759,7 @@ class TestV15FailureEquationFinalization:
         runner._account_snapshot_id = fixture.snapshot_id_full
         runner._account_snapshot_id_short = fixture.snapshot_id
         runner._manifest = None
+        runner._protected_prod_db = "/test/prod.db"
 
         mock_guard = MagicMock()
         mock_guard.preflight.return_value = (True, {'guard': 'mock'}, [])
@@ -2166,6 +2170,7 @@ class TestV16CooldownIntegration:
         runner._account_snapshot_id = fixture.snapshot_id_full
         runner._account_snapshot_id_short = fixture.snapshot_id
         runner._manifest = None
+        runner._protected_prod_db = "/test/prod.db"
 
         mock_guard = MagicMock()
         mock_guard.preflight.return_value = (True, {"guard": "mock"}, [])
@@ -2436,6 +2441,7 @@ class TestV17CooldownStormReplay:
         runner._account_snapshot_id = fixture.snapshot_id_full
         runner._account_snapshot_id_short = fixture.snapshot_id
         runner._manifest = None
+        runner._protected_prod_db = "/test/prod.db"
 
         # 使用自定义窗口的 CooldownTracker
         runner.cooldown = CooldownTracker(window_seconds=window_seconds)
@@ -2729,7 +2735,7 @@ class TestV19CooldownRuntimeEnforcement:
     def _make_runner_with_context(self, strategy_version="1.0",
                                    config_hash="test-hash",
                                    snapshot_id="abc123",
-                                   protected_prod_db=False):
+                                   protected_prod_db="/test/prod.db"):
         """构造一个上下文完整的 runner 用于测试 _verify_cooldown_context。"""
         from serenity_v2.phase_b2 import B2Runner
 
@@ -2770,12 +2776,18 @@ class TestV19CooldownRuntimeEnforcement:
         assert not ok, "缺少 account_snapshot_id 应该失败"
         assert any("account_snapshot_id" in v for v in violations)
 
-    def test_verify_context_fails_with_protected_prod(self):
-        """v19-05: protected_prod_db 已设置 → fail-closed（防止产品误用单策略作用域）。"""
+    def test_verify_context_fails_without_protected_prod(self):
+        """v21-fix: protected_prod_db 未设置 → fail-closed（必须显式声明受保护的生产 DB）。"""
+        runner = self._make_runner_with_context(protected_prod_db=None)
+        ok, violations = runner._verify_cooldown_context()
+        assert not ok, "protected_prod_db 未设置应该失败"
+        assert any("protected_prod_db" in v for v in violations)
+
+    def test_verify_context_passes_with_protected_prod(self):
+        """v21-fix: protected_prod_db 已设置 → 通过（正确保护生产 DB）。"""
         runner = self._make_runner_with_context(protected_prod_db="/prod/serenity.db")
         ok, violations = runner._verify_cooldown_context()
-        assert not ok, "protected_prod_db 已设置应该失败"
-        assert any("protected_prod_db" in v for v in violations)
+        assert ok, f"protected_prod_db 已设置应通过，但得到: {violations}"
 
     def test_snapshot_context_captures_all_fields(self):
         """v19-06: _snapshot_cooldown_context 捕获所有相关字段。"""
