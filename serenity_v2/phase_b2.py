@@ -98,7 +98,7 @@ def compute_market_fingerprint(event_id: str, price: float = 0.0,
     parts = [event_id[:8] if event_id else "noevent"]
     if price > 0:
         # v24: 百分比分桶 — 以昨收价为基准，纯整数运算消除 IEEE 754 抖动
-        ref = reference_price if reference_price > 0 else price
+        ref = reference_price if (reference_price is not None and reference_price > 0) else price
         price_cents = int(round(price * 100))
         ref_cents = int(round(ref * 100))
         delta_cents = price_cents - ref_cents

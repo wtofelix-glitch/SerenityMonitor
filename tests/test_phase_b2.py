@@ -3471,6 +3471,78 @@ class TestV24MarketFingerprint:
         fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 50.0, 43356251, reference_price=50.00)
         assert fp1 == fp2, f"微小成交量变化应保持相同: {fp1} vs {fp2}"
 
+    # ── 负向价格变化（验收 8 补充）──
+
+    def test_negative_within_2pct_stays_in_bucket(self):
+        """v25-13: -0.03% 到 -1.99% 下跌 → 同一负 bucket（不跨 -2% 边界）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        ref = 50.00
+        # -0.03%: 49.985, cents=4998, delta=-2, (-2*50)//5000 = -100//5000 = -1
+        fp_tiny = cmf("EVT_20260731_000001_xxxx", 49.985, 10000, reference_price=ref)
+        # -1.00%: 49.50, cents=4950, delta=-50, (-50*50)//5000 = -2500//5000 = -1
+        fp_one = cmf("EVT_20260731_000002_xxxx", 49.50, 10000, reference_price=ref)
+        # -1.99%: 49.005, cents=4900, delta=-100, (-100*50)//5000 = -5000//5000 = -1
+        fp_199 = cmf("EVT_20260731_000003_xxxx", 49.005, 10000, reference_price=ref)
+        assert fp_tiny == fp_one == fp_199, (
+            f"-0.03%, -1%, -1.99% should be same bucket: {fp_tiny} {fp_one} {fp_199}"
+        )
+        assert "p-1" in fp_tiny
+
+    def test_negative_cross_2pct_boundary(self):
+        """v25-14: -2.00% 在边界上 → p-1; -2.04% 跨边界 → p-2。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        ref = 50.00
+        # -2.00% = 49.00: delta=-100, (-100*50)//5000 = -5000//5000 = -1
+        fp_200 = cmf("EVT_20260731_000001_xxxx", 49.00, 10000, reference_price=ref)
+        # -2.04% = 48.98: cents=4898, delta=-102, (-102*50)//5000 = -5100//5000 = -2
+        fp_204 = cmf("EVT_20260731_000002_xxxx", 48.98, 10000, reference_price=ref)
+        assert "p-1" in fp_200, f"-2.00% exact boundary should be p-1: {fp_200}"
+        assert "p-2" in fp_204, f"-2.04% should cross to p-2: {fp_204}"
+        assert fp_200 != fp_204, "-2.00% and -2.04% should be different buckets"
+
+    def test_negative_symmetric_with_positive(self):
+        """v25-15: 正负方向边界行为对称 +2.00% vs -2.00%。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        ref = 50.00
+        fp_pos = cmf("EVT_20260731_000001_xxxx", 51.00, 10000, reference_price=ref)
+        fp_neg = cmf("EVT_20260731_000002_xxxx", 49.00, 10000, reference_price=ref)
+        assert "p1" in fp_pos
+        assert "p-1" in fp_neg
+        assert fp_pos != fp_neg
+
+    def test_negative_boundary_oscillation(self):
+        """v25-16: 负向边界附近往返 → 同 bucket 往返。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        ref = 50.00
+        EID = "EVT_20260731_00000{}_xxxx"
+        fp_a = cmf(EID.format(1), 49.01, 10000, reference_price=ref)  # -1.98% → p-1
+        fp_b = cmf(EID.format(2), 48.99, 10000, reference_price=ref)  # -2.02% → p-2
+        fp_c = cmf(EID.format(3), 49.01, 10000, reference_price=ref)  # -1.98% → p-1
+        assert fp_a == fp_c, "往返应回到相同 bucket"
+        assert fp_a != fp_b, "跨边界应不同"
+
+    # ── 缺失参考价处理 ──
+
+    def test_previous_close_zero_fallback_suppresses_price_dimension(self):
+        """v25-17: previous_close=0 → delta 恒 0，价格维度不贡献 discriminatory power。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        fp1 = cmf("EVT_20260731_000001_xxxx", 50.00, 10000, reference_price=0.0)
+        fp2 = cmf("EVT_20260731_000002_xxxx", 55.00, 10000, reference_price=0.0)
+        assert "p0" in fp1
+        assert "p0" in fp2  # 价格维度降级，cooldown 依赖其余 8 字段
+
+    def test_previous_close_none_handled(self):
+        """v25-18: previous_close=None → 等同 0 回退（不崩溃）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        fp = cmf("EVT_20260731_000001_xxxx", 50.00, 10000, reference_price=None)
+        assert "p0" in fp
+
+    def test_previous_close_nan_handled(self):
+        """v25-19: previous_close=NaN → reference_price > 0 is False → 回退（不崩溃）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        fp = cmf("EVT_20260731_000001_xxxx", 50.00, 10000, reference_price=float('nan'))
+        assert "p0" in fp
+
     # ── 边缘情况 ──
 
     def test_zero_reference_falls_back(self):
