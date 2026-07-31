@@ -64,8 +64,9 @@ B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-2.0"
 # ---------------------------------------------------------------------------
 
 def compute_market_fingerprint(event_id: str, price: float = 0.0,
-                                volume: int = 0) -> str:
-    """计算稳定行情指纹，用于 cooldown re-arm 判定（v24: 定点整数，消除浮点抖动）。
+                                volume: int = 0,
+                                reference_price: float = 0.0) -> str:
+    """计算稳定行情指纹，用于 cooldown re-arm 判定（v24: 参考价百分比分桶 + 整数运算）。
 
     行情实质变化时指纹改变 → cooldown 窗口内允许新信号。
     行情不变时指纹稳定 → cooldown 有效抑制重复信号。
@@ -74,24 +75,42 @@ def compute_market_fingerprint(event_id: str, price: float = 0.0,
         event_id: 事件 ID（唯一标识一个行情事件）
         price: 最新成交价（元）
         volume: 成交量（股）
+        reference_price: 参考价格（昨收价，元）。为 0 时回退为 price 自身（仅用于测试）。
 
     Returns:
         稳定的行情指纹字符串。
 
-    v24 策略（定点整数，确定性量化）:
+    v24 策略（基于昨收参考价的百分比分桶，纯整数运算）:
       - event_id 前 8 字符作为 session 标识
-      - price: 整数分（1 分 = 0.01 元），按 1 元档位分桶
-        （约 2% 对于 50 元股票，边界舍入方向：向下取整）
-      - volume: 整数 bit_length 对数量化（等价于 log2/2，但纯整数）
-        边界舍入方向：向下取整
+      - price bucket: 以昨收价为基准，计算百分比变化，按 2% 档位分桶。
+        公式: p_bucket = floor((price - reference_price) / reference_price * 50)
+        等价于: p_bucket = (delta_cents * 50) // ref_cents（纯整数，无浮点）
+        边界舍入方向: 向下取整（floor）
+      - volume bucket: 整数 bit_length 对数量化（等价于 floor(log2(vol)/2)）
+        边界舍入方向: 向下取整
+
+    关键性质:
+      - 价格未跨真实 2% 区间时 fingerprint 稳定
+      - 同一价格的等价浮点表示得到相同 fingerprint
+      - 微小 ULP 差异不改变 bucket
+      - 不使用当前价格同时作为分子和 bucket 宽度基准
     """
     parts = [event_id[:8] if event_id else "noevent"]
     if price > 0:
-        # v24: 定点整数分桶 — 1 元档位，向下取整
-        # 48.99→48, 49.01→49, 97.33→97
-        # 确定性的：不依赖二进制浮点近似
+        # v24: 百分比分桶 — 以昨收价为基准，纯整数运算消除 IEEE 754 抖动
+        ref = reference_price if reference_price > 0 else price
         price_cents = int(round(price * 100))
-        p_bucket = price_cents // 100  # 1-yuan bands
+        ref_cents = int(round(ref * 100))
+        delta_cents = price_cents - ref_cents
+
+        if ref_cents > 0:
+            # pct_change = (price - ref) / ref * 100
+            # 2% bucket = floor(pct_change / 2)
+            #            = floor(delta_cents / ref_cents * 50)
+            #            = (delta_cents * 50) // ref_cents   (Python floor division)
+            p_bucket = (delta_cents * 50) // ref_cents
+        else:
+            p_bucket = 0
         parts.append(f"p{p_bucket}")
     if volume > 0:
         # v24: bit_length 对数量化 — 等价于 floor(log2(vol)/2)，但纯整数
@@ -627,7 +646,7 @@ class B2Runner:
         self.metrics.cooldown_policy_version = B2_COOLDOWN_POLICY_VERSION
         self.metrics.cooldown_key_fields = ",".join(CooldownTracker.KEY_FIELDS)
         self.metrics.cooldown_scope = "single_strategy_fixture_shadow"
-        self._latest_market: dict[str, dict] = {}  # v17: symbol→market data for fingerprint
+        self._latest_market: dict[str, dict] = {}  # v24: symbol→market data for fingerprint (price, volume, reference_price)
 
         if init_env:
             self._init_env()
@@ -1481,11 +1500,12 @@ class B2Runner:
                     events_this_cycle = 0
                     quarantined_this_cycle = 0
 
-                    # v17: 存储最新行情用于 cooldown market fingerprint
+                    # v24: 存储最新行情用于 cooldown market fingerprint（含昨收参考价）
                     for nq in norms:
                         self._latest_market[nq.symbol] = {
                             "price": nq.price,
                             "volume": getattr(nq, 'volume', 0),
+                            "reference_price": getattr(nq, 'previous_close', 0),
                         }
 
                     for nq in norms:
@@ -1561,6 +1581,7 @@ class B2Runner:
                             sig.event_id or "",
                             mkt.get("price", 0),
                             mkt.get("volume", 0),
+                            reference_price=mkt.get("reference_price", 0),
                         )
                         if self.cooldown.should_suppress(
                             symbol=sig.symbol,

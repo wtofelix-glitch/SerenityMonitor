@@ -2976,11 +2976,15 @@ class TestV20CooldownAcceptance:
     # ── 6. 行情实质变化时重新武装 ──
 
     def test_acceptance_06_market_fingerprint_reams(self):
-        """v20-06: 行情指纹变化时允许重新生成信号。"""
+        """v20-06: 行情指纹变化时允许重新生成信号（v24: 基于昨收参考价）。"""
         from serenity_v2.phase_b2 import CooldownTracker, compute_market_fingerprint
         ct = CooldownTracker(window_seconds=300)
         t0 = 1000.0
-        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        # 昨收 56.00, 当前 57.98 → +3.54% → bucket 1 (2-4%)
+        # 昨收 56.00, 当前 59.20 → +5.71% → bucket 2 (4-6%)
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 57.98, 10000, reference_price=56.00)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 59.20, 12000, reference_price=56.00)
+        assert fp2 != fp1, "不同行情应产生不同指纹"
         ct.should_suppress(
             "600487", "BUY", t0,
             strategy_id="s1", strategy_version="1.0",
@@ -2996,9 +3000,7 @@ class TestV20CooldownAcceptance:
             account_snapshot_id_full="snap-1", environment="shadow",
             market_fingerprint=fp1,
         ) is True
-        # 行情变化 → 重新武装
-        fp2 = compute_market_fingerprint("evt-002", 59.20, 12000)
-        assert fp2 != fp1, "不同行情应产生不同指纹"
+        # 行情变化（跨 2% bucket）→ 重新武装
         assert ct.should_suppress(
             "600487", "BUY", t0 + 2.0,
             strategy_id="s1", strategy_version="1.0",
@@ -3008,11 +3010,18 @@ class TestV20CooldownAcceptance:
         ) is False
 
     def test_acceptance_06_minor_price_change_not_ream(self):
-        """v20-06b: 微小价格变动不触发 re-arm（same bucket）。"""
+        """v20-06b: 微小价格变动不触发 re-arm（同一 2% bucket）。"""
         from serenity_v2.phase_b2 import CooldownTracker, compute_market_fingerprint
         ct = CooldownTracker(window_seconds=300)
         t0 = 1000.0
-        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        # 昨收 56.00, 57.98 → +3.54% → bucket 1
+        #             58.50 → +4.46% → bucket 2 (crosses 4%!)
+        # 使用同一 bucket 内的值:
+        # 昨收 56.00, 57.98 → +3.54% → bucket 1
+        #             58.00 → +3.57% → bucket 1 (still < 4%)
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 57.98, 10000, reference_price=56.00)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 58.00, 10500, reference_price=56.00)
+        assert fp1 == fp2, "同一 2% bucket 内应产生相同指纹"
         ct.should_suppress(
             "600487", "BUY", t0,
             strategy_id="s1", strategy_version="1.0",
@@ -3020,23 +3029,22 @@ class TestV20CooldownAcceptance:
             account_snapshot_id_full="snap-1", environment="shadow",
             market_fingerprint=fp1,
         )
-        fp2 = compute_market_fingerprint("evt-002", 58.50, 10500)
-        if fp1 == fp2:
-            assert ct.should_suppress(
-                "600487", "BUY", t0 + 1.0,
-                strategy_id="s1", strategy_version="1.0",
-                strategy_config_hash="aaa", signal_rule_version="1.0",
-                account_snapshot_id_full="snap-1", environment="shadow",
-                market_fingerprint=fp2,
-            ) is True
+        assert ct.should_suppress(
+            "600487", "BUY", t0 + 1.0,
+            strategy_id="s1", strategy_version="1.0",
+            strategy_config_hash="aaa", signal_rule_version="1.0",
+            account_snapshot_id_full="snap-1", environment="shadow",
+            market_fingerprint=fp2,
+        ) is True
 
     def test_acceptance_06_fingerprint_stable(self):
-        """v20-06c: compute_market_fingerprint 对相同输入稳定。"""
+        """v20-06c: compute_market_fingerprint 对相同输入 + 相同参考价稳定。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000)
-        fp2 = compute_market_fingerprint("evt-001", 57.98, 10000)
+        fp1 = compute_market_fingerprint("evt-001", 57.98, 10000, reference_price=56.00)
+        fp2 = compute_market_fingerprint("evt-001", 57.98, 10000, reference_price=56.00)
         assert fp1 == fp2
-        fp3 = compute_market_fingerprint("evt-002", 57.98, 10000)
+        # 不同 event_id → 不同指纹（session 标识部分不同）
+        fp3 = compute_market_fingerprint("evt-002", 57.98, 10000, reference_price=56.00)
         assert fp3 != fp1
 
     # ── 7. NO_SIGNAL 不创建 cooldown 状态 ──
@@ -3314,99 +3322,180 @@ class TestV22CooldownScopeIsolation:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestV24MarketFingerprint:
-    """v24: compute_market_fingerprint — 定点整数，消除浮点抖动。"""
+    """v24: compute_market_fingerprint — 昨收参考价百分比分桶 + 纯整数运算，消除浮点抖动。"""
+
+    # ── 验收 1: 同一价格等价浮点表示 → 相同 fingerprint ──
 
     def test_same_price_same_fingerprint(self):
-        """v24-01: 相同价格 → 相同指纹。"""
+        """v24-01: 相同价格 + 相同参考价 → 相同指纹（event_id 使用相同 session 前缀）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 49.10, 1000000)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.10, 1000000)
-        assert fp1 == fp2, f"相同输入应产生相同指纹: {fp1} vs {fp2}"
+        # 使用一致的 event_id 前缀模拟真实场景（EVT_2026... 所有事件共享）
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 49.10, 1000000, reference_price=48.50)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.10, 1000000, reference_price=48.50)
+        assert fp1 == fp2, f"相同(price, ref)应相同: {fp1} vs {fp2}"
 
-    def test_price_within_same_band_same_fingerprint(self):
-        """v24-02: 同一 1 元档位内不同价格 → 相同指纹。"""
+    def test_price_rounding_consistency(self):
+        """v24-01b: 相同价格的不同浮点表示 → 相同指纹（无 ULP 抖动）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 49.10, 1000000)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.99, 1000000)
-        assert fp1 == fp2, f"同一档位内应相同: {fp1} vs {fp2}"
+        prices = [48.99, 48.990, 48.99000000001]
+        fingerprints = set()
+        for p in prices:
+            fp = compute_market_fingerprint("evt-001", p, 1000000, reference_price=48.50)
+            fingerprints.add(fp)
+        assert len(fingerprints) == 1, f"等价价格应相同: {fingerprints}"
 
-    def test_price_cross_band_different_fingerprint(self):
-        """v24-03: 价格跨 1 元档位 → 不同指纹。"""
-        from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 48.99, 1000000)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.01, 1000000)
-        assert fp1 != fp2, f"跨档位应不同: {fp1} vs {fp2}"
+    # ── 验收 2: 微小 ULP 差异不改变 bucket ──
 
-    def test_fp_jitter_eliminated(self):
-        """v24-04: 旧公式浮点抖动已消除 — 48.99 和 49.01 不会因 fp 抖动被误判为同 bucket。"""
+    def test_ulp_does_not_change_bucket(self):
+        """v24-02: IEEE 754 最后一位差异不改变 bucket（整数运算消除抖动）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        # 48.99 和 49.05 在旧公式中会触发 fp jitter (p49↔p50)
-        # v24 使用定点整数：48→p48, 49→p49, 明确不同
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 48.99, 1000000)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.05, 1000000)
-        assert fp1 != fp2  # 跨 band
-        assert "p48" in fp1
-        assert "p49" in fp2
+        # 97.33/(97.33*0.02)=49.999... → 旧公式 p49; 实际价格未变
+        # v24: 昨收 96.00, 97.33 → +1.39% → bucket 0
+        #      昨收 96.00, 97.11 → +1.16% → bucket 0
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 97.33, 43353751, reference_price=96.00)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 97.11, 43095923, reference_price=96.00)
+        assert fp1 == fp2, f"微小价格差异应在同一 bucket: {fp1} vs {fp2}"
 
-    def test_boundary_below_stays_in_lower_band(self):
-        """v24-05: 档位下边界（如 48.00）→ 属于 48 档（向下取整）。"""
-        from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp = compute_market_fingerprint("EVT_20260731_000001_xxxx", 48.00, 1000000)
-        assert "p48" in fp
+    # ── 验收 3: 价格未跨真实 2% 区间时 fingerprint 稳定 ──
 
-    def test_boundary_above_stays_in_higher_band(self):
-        """v24-06: 档位上边界前一档（如 48.99）→ 属于 48 档（向下取整）。"""
+    def test_price_within_2pct_band_stable(self):
+        """v24-03: 同一 2% bucket 内价格变化 → 指纹不变。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp = compute_market_fingerprint("EVT_20260731_000001_xxxx", 48.99, 1000000)
-        assert "p48" in fp
+        # 昨收 50.00, 50.50 → +1.0% → bucket 0
+        # 昨收 50.00, 50.99 → +1.98% → bucket 0 (still < 2%)
+        EID = "EVT_20260731_00000{}_xxxx"
+        fp1 = compute_market_fingerprint(EID.format(1), 50.50, 10000, reference_price=50.00)
+        fp2 = compute_market_fingerprint(EID.format(2), 50.99, 10000, reference_price=50.00)
+        assert fp1 == fp2, f"同一 2% bucket: {fp1} vs {fp2}"
 
-    def test_exact_boundary_behavior(self):
-        """v24-07: 档位精确边界（如 49.00）→ 属于 49 档。"""
+    # ── 验收 4: 实际跨区间时 fingerprint 改变 ──
+
+    def test_price_cross_2pct_band_changes(self):
+        """v24-04: 跨 2% 边界 → 指纹改变。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp = compute_market_fingerprint("EVT_20260731_000001_xxxx", 49.00, 1000000)
-        assert "p49" in fp
+        # 昨收 50.00, 50.99 → +1.98% → bucket 0
+        # 昨收 50.00, 51.01 → +2.02% → bucket 1
+        fp1 = compute_market_fingerprint("evt-001", 50.99, 10000, reference_price=50.00)
+        fp2 = compute_market_fingerprint("evt-002", 51.01, 10000, reference_price=50.00)
+        assert fp1 != fp2, f"跨 2%边界应不同: {fp1} vs {fp2}"
+        assert "p0" in fp1
+        assert "p1" in fp2
+
+    def test_large_price_move_multi_bucket(self):
+        """v24-04b: 大幅价格变动 → 跨多个 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # 昨收 50.00, 55.00 → +10% → bucket 5
+        fp = compute_market_fingerprint("evt-001", 55.00, 10000, reference_price=50.00)
+        assert "p5" in fp
+
+    def test_negative_price_move(self):
+        """v24-04c: 价格下跌 → 负 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # 昨收 50.00, 48.50 → -3.0% → bucket -2 (floor(-1.5) = -2)
+        fp = compute_market_fingerprint("evt-001", 48.50, 10000, reference_price=50.00)
+        assert "p-2" in fp
+
+    # ── 验收 5: 边界附近往返不连续 re-arm ──
+
+    def test_boundary_oscillation_stable(self):
+        """v24-05: 价格围绕 2% 边界往返 → 往返后回到相同 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # 昨收 50.00
+        # 50.99 → +1.98% → bucket 0
+        # 51.01 → +2.02% → bucket 1
+        # 50.99 → +1.98% → bucket 0 (back to same)
+        EID = "EVT_20260731_00000{}_xxxx"
+        fp_a = compute_market_fingerprint(EID.format(1), 50.99, 10000, reference_price=50.00)
+        fp_b = compute_market_fingerprint(EID.format(2), 51.01, 10000, reference_price=50.00)
+        fp_c = compute_market_fingerprint(EID.format(3), 50.99, 10000, reference_price=50.00)
+        assert fp_a == fp_c, "往返应回到相同指纹"
+        assert fp_a != fp_b, "跨边界应不同"
+
+    def test_boundary_exact_2pct(self):
+        """v24-05b: 精确 2% 边界（如 51.00 from 50.00）→ bucket 1（floor）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # 昨收 50.00, 51.00 → +2.00% → bucket 1
+        # 整数: (5100 - 5000) * 50 // 5000 = 100*50//5000 = 5000//5000 = 1
+        fp = compute_market_fingerprint("evt-001", 51.00, 10000, reference_price=50.00)
+        assert "p1" in fp
+
+    # ── 验收 6: 复现 v23 三组价格不产生 p49/p50 抖动 ──
+
+    def test_v23_000988_pair_no_jitter(self):
+        """v24-06a: 97.11 vs 97.33（000988），昨收同价 → 相同 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # v23 昨收 = 97.11（首价），97.33 仍在 2% 内 → bucket 0
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 97.11, 43095923, reference_price=97.11)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 97.33, 43353751, reference_price=97.11)
+        assert fp1 == fp2, f"000988 v23 pair: {fp1} vs {fp2}"
+        assert "p0" in fp1  # 0% change bucket
+
+    def test_v23_600176_pair_no_jitter(self):
+        """v24-06b: 38.38 vs 38.41（600176），昨收同价 → 相同 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 38.38, 307479843, reference_price=38.38)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 38.41, 307540843, reference_price=38.38)
+        assert fp1 == fp2, f"600176 v23 pair: {fp1} vs {fp2}"
+
+    def test_v23_600487_pair_no_jitter(self):
+        """v24-06c: 49.10 vs 49.22（600487），昨收同价 → 相同 bucket。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 49.10, 157936517, reference_price=49.10)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.22, 160007417, reference_price=49.10)
+        assert fp1 == fp2, f"600487 v23 pair: {fp1} vs {fp2}"
+
+    # ── 验收 7: 不同参考价产生不同指纹 ──
+
+    def test_different_reference_different_fingerprint(self):
+        """v24-07: 同价不同参考 → 不同指纹。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        fp1 = compute_market_fingerprint("evt-001", 50.00, 10000, reference_price=49.00)
+        fp2 = compute_market_fingerprint("evt-001", 50.00, 10000, reference_price=48.00)
+        assert fp1 != fp2, f"不同参考价应产生不同指纹: {fp1} vs {fp2}"
+
+    # ── 成交量 bucket 验证 ──
 
     def test_volume_bucket_deterministic(self):
         """v24-08: 成交量 bucket 使用 bit_length — 确定性整数运算。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
         import math
         for vol in [1, 100, 10000, 1000000, 100000000, 157936517]:
-            fp = compute_market_fingerprint("EVT_20260731_000001_xxxx", 50.0, vol)
-            # 验证等价于原 log2/2 向下取整
+            fp = compute_market_fingerprint("evt-001", 50.0, vol, reference_price=50.00)
             expected_v = int(math.log2(max(vol, 1)) / 2)
             assert f"v{expected_v}" in fp, f"vol={vol}: expected v{expected_v}, got {fp}"
 
     def test_volume_bucket_stable_for_small_changes(self):
         """v24-09: 成交量微小变化 → 相同 bucket。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 50.0, 43353751)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 50.0, 43356251)
-        assert fp1 == fp2, f"微小成交量变化应保持相同 bucket: {fp1} vs {fp2}"
+        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 50.0, 43353751, reference_price=50.00)
+        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 50.0, 43356251, reference_price=50.00)
+        assert fp1 == fp2, f"微小成交量变化应保持相同: {fp1} vs {fp2}"
 
-    def test_price_rounding_consistency(self):
-        """v24-10: 相同价格的不同浮点表示 → 相同指纹（无抖动）。"""
-        from serenity_v2.phase_b2 import compute_market_fingerprint
-        # 这些值在二进制浮点中可能略有不同，但 round(x*100) 应一致
-        prices = [48.99, 48.990, 48.99000000001]
-        fingerprints = set()
-        for p in prices:
-            fp = compute_market_fingerprint("EVT_20260731_000001_xxxx", p, 1000000)
-            fingerprints.add(fp)
-        assert len(fingerprints) == 1, f"等价价格应产生相同指纹: {fingerprints}"
+    # ── 边缘情况 ──
 
-    def test_boundary_oscillation_stable(self):
-        """v24-11: 边界附近往返 → 指纹按档位确定（48.99→48, 49.01→49, 回到48.99→48）。"""
+    def test_zero_reference_falls_back(self):
+        """v24-10: reference_price=0 → 回退到 price 自身（测试兼容性）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp_a = compute_market_fingerprint("EVT_20260731_000001_xxxx", 48.99, 1000000)
-        fp_b = compute_market_fingerprint("EVT_20260731_000002_xxxx", 49.01, 1000000)
-        fp_c = compute_market_fingerprint("EVT_20260731_000003_xxxx", 48.99, 1000000)
-        assert fp_a == fp_c, "往返应回到相同指纹"
-        assert fp_a != fp_b, "跨档位应不同"
+        fp1 = compute_market_fingerprint("evt-001", 50.00, 10000, reference_price=0.0)
+        fp2 = compute_market_fingerprint("evt-001", 50.00, 10000, reference_price=0.0)
+        assert fp1 == fp2, "零参考价回退应一致"
 
-    def test_high_price_bands(self):
-        """v24-12: 高价股（如 97 元）→ 97 档。"""
+    def test_high_price_stock(self):
+        """v24-11: 高价股 percentage bucket 表现。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint
-        fp1 = compute_market_fingerprint("EVT_20260731_000001_xxxx", 97.33, 43353751)
-        fp2 = compute_market_fingerprint("EVT_20260731_000002_xxxx", 97.35, 43353751)
-        assert fp1 == fp2, f"97 档内应相同: {fp1} vs {fp2}"
-        assert "p97" in fp1
+        # 昨收 500.00, 510.00 → +2.0% → bucket 1
+        fp = compute_market_fingerprint("evt-001", 510.00, 10000, reference_price=500.00)
+        assert "p1" in fp
+        # 昨收 500.00, 509.99 → +1.998% → bucket 0
+        fp2 = compute_market_fingerprint("evt-002", 509.99, 10000, reference_price=500.00)
+        assert "p0" in fp2
+
+    def test_low_price_stock(self):
+        """v24-12: 低价股 percentage bucket 表现。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint
+        # 昨收 5.00, 5.10 → +2.0% → bucket 1
+        fp = compute_market_fingerprint("evt-001", 5.10, 10000, reference_price=5.00)
+        assert "p1" in fp
+        # 昨收 5.00, 4.95 → -1.0% → bucket -1 (floor(-0.5) = -1)
+        fp2 = compute_market_fingerprint("evt-002", 4.95, 10000, reference_price=5.00)
+        assert "p-1" in fp2
