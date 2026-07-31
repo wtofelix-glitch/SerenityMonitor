@@ -65,34 +65,38 @@ B2_COOLDOWN_POLICY_VERSION = "b2-cooldown-2.0"
 
 def compute_market_fingerprint(event_id: str, price: float = 0.0,
                                 volume: int = 0) -> str:
-    """计算稳定行情指纹，用于 cooldown re-arm 判定。
+    """计算稳定行情指纹，用于 cooldown re-arm 判定（v24: 定点整数，消除浮点抖动）。
 
     行情实质变化时指纹改变 → cooldown 窗口内允许新信号。
     行情不变时指纹稳定 → cooldown 有效抑制重复信号。
 
     Args:
         event_id: 事件 ID（唯一标识一个行情事件）
-        price: 最新成交价
-        volume: 成交量
+        price: 最新成交价（元）
+        volume: 成交量（股）
 
     Returns:
         稳定的行情指纹字符串。
 
-    策略：
-      - 使用 event_id 前 8 字符作为基础标识
-      - price 量化到 2% bucket（滤除微小的 tick 波动）
-      - volume 量化到对数 bucket（滤除正常波动）
+    v24 策略（定点整数，确定性量化）:
+      - event_id 前 8 字符作为 session 标识
+      - price: 整数分（1 分 = 0.01 元），按 1 元档位分桶
+        （约 2% 对于 50 元股票，边界舍入方向：向下取整）
+      - volume: 整数 bit_length 对数量化（等价于 log2/2，但纯整数）
+        边界舍入方向：向下取整
     """
-    import math
     parts = [event_id[:8] if event_id else "noevent"]
     if price > 0:
-        # 2% 价格分桶 (0-2%, 2-4%, ...)
-        pct_move = abs(price)  # absolute price used as proxy
-        p_bucket = int(pct_move / max(pct_move * 0.02, 0.01))
+        # v24: 定点整数分桶 — 1 元档位，向下取整
+        # 48.99→48, 49.01→49, 97.33→97
+        # 确定性的：不依赖二进制浮点近似
+        price_cents = int(round(price * 100))
+        p_bucket = price_cents // 100  # 1-yuan bands
         parts.append(f"p{p_bucket}")
     if volume > 0:
-        # 对数成交量分桶
-        v_bucket = int(math.log2(max(volume, 1)) / 2)
+        # v24: bit_length 对数量化 — 等价于 floor(log2(vol)/2)，但纯整数
+        v = max(int(volume), 1)
+        v_bucket = (v.bit_length() - 1) // 2
         parts.append(f"v{v_bucket}")
     return ":".join(parts)
 
