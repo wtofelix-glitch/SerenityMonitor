@@ -80,35 +80,39 @@ def compute_market_fingerprint(event_id: str, price: float = 0.0,
     Returns:
         稳定的行情指纹字符串。
 
-    v24 策略（基于昨收参考价的百分比分桶，纯整数运算）:
+    v26 策略（基于昨收参考价的绝对值向零百分比分桶，纯整数运算）:
       - event_id 前 8 字符作为 session 标识
-      - price bucket: 以昨收价为基准，计算百分比变化，按 2% 档位分桶。
-        公式: p_bucket = floor((price - reference_price) / reference_price * 50)
-        等价于: p_bucket = (delta_cents * 50) // ref_cents（纯整数，无浮点）
-        边界舍入方向: 向下取整（floor）
+      - price bucket: 以昨收价为基准，计算绝对值百分比变化，按 2% 档位分桶，
+        向零方向取整。正负方向对称。
+        公式: abs_bucket = floor(|(price - ref) / ref| * 50)
+              p_bucket = sign(delta) * abs_bucket
+        等价于: abs_bucket = (abs(delta_cents) * 50) // ref_cents
+        边界舍入方向: 向零取整（truncation toward zero）
+        区间: [-2%, +2%) → p0, [+2%, +4%) → p1, [-4%, -2%) → p-1, ...
       - volume bucket: 整数 bit_length 对数量化（等价于 floor(log2(vol)/2)）
         边界舍入方向: 向下取整
 
     关键性质:
-      - 价格未跨真实 2% 区间时 fingerprint 稳定
+      - 价格未跨真实 2% 区间时 fingerprint 稳定（包括零边界）
+      - ±2% 内（含昨收价轻微波动）→ 同一 p0 bucket
       - 同一价格的等价浮点表示得到相同 fingerprint
       - 微小 ULP 差异不改变 bucket
+      - 正负方向对称：+2% → p1, -2% → p-1
       - 不使用当前价格同时作为分子和 bucket 宽度基准
     """
     parts = [event_id[:8] if event_id else "noevent"]
     if price > 0:
-        # v24: 百分比分桶 — 以昨收价为基准，纯整数运算消除 IEEE 754 抖动
+        # v26: 绝对值向零百分比分桶 — 以昨收价为基准，±2% 内均为 p0
         ref = reference_price if (reference_price is not None and reference_price > 0) else price
         price_cents = int(round(price * 100))
         ref_cents = int(round(ref * 100))
         delta_cents = price_cents - ref_cents
 
         if ref_cents > 0:
-            # pct_change = (price - ref) / ref * 100
-            # 2% bucket = floor(pct_change / 2)
-            #            = floor(delta_cents / ref_cents * 50)
-            #            = (delta_cents * 50) // ref_cents   (Python floor division)
-            p_bucket = (delta_cents * 50) // ref_cents
+            # abs(|pct_change| / 2) = abs(delta_cents) * 50 // ref_cents
+            # 向零方向取整（truncation toward zero）→ 正负对称
+            abs_bucket = (abs(delta_cents) * 50) // ref_cents
+            p_bucket = abs_bucket if delta_cents >= 0 else -abs_bucket
         else:
             p_bucket = 0
         parts.append(f"p{p_bucket}")

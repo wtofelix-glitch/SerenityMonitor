@@ -3389,11 +3389,14 @@ class TestV24MarketFingerprint:
         assert "p5" in fp
 
     def test_negative_price_move(self):
-        """v24-04c: 价格下跌 → 负 bucket。"""
-        from serenity_v2.phase_b2 import compute_market_fingerprint
-        # 昨收 50.00, 48.50 → -3.0% → bucket -2 (floor(-1.5) = -2)
-        fp = compute_market_fingerprint("evt-001", 48.50, 10000, reference_price=50.00)
+        """v26-04c: 价格下跌 → 负 bucket（绝对值向零取整）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        # 昨收 50.00, 48.00 → -4.0% → abs_bucket=2 → p-2
+        fp = cmf("EVT_20260731_000001_xxxx", 48.00, 10000, reference_price=50.00)
         assert "p-2" in fp
+        # 昨收 50.00, 48.50 → -3.0% → abs_bucket = floor(1.5) = 1 → p-1
+        fp2 = cmf("EVT_20260731_000002_xxxx", 48.50, 10000, reference_price=50.00)
+        assert "p-1" in fp2
 
     # ── 验收 5: 边界附近往返不连续 re-arm ──
 
@@ -3474,31 +3477,38 @@ class TestV24MarketFingerprint:
     # ── 负向价格变化（验收 8 补充）──
 
     def test_negative_within_2pct_stays_in_bucket(self):
-        """v25-13: -0.03% 到 -1.99% 下跌 → 同一负 bucket（不跨 -2% 边界）。"""
+        """v26-13: ±2% 内 → p0（零边界不产生 false re-arm）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
         ref = 50.00
-        # -0.03%: 49.985, cents=4998, delta=-2, (-2*50)//5000 = -100//5000 = -1
-        fp_tiny = cmf("EVT_20260731_000001_xxxx", 49.985, 10000, reference_price=ref)
-        # -1.00%: 49.50, cents=4950, delta=-50, (-50*50)//5000 = -2500//5000 = -1
+        # -0.02%: 49.99, delta=-1, abs(1)*50//5000 = 50//5000 = 0 → p0
+        fp_tiny = cmf("EVT_20260731_000001_xxxx", 49.99, 10000, reference_price=ref)
+        # -1.00%: 49.50, delta=-50, abs(50)*50//5000 = 2500//5000 = 0 → p0
         fp_one = cmf("EVT_20260731_000002_xxxx", 49.50, 10000, reference_price=ref)
-        # -1.99%: 49.005, cents=4900, delta=-100, (-100*50)//5000 = -5000//5000 = -1
-        fp_199 = cmf("EVT_20260731_000003_xxxx", 49.005, 10000, reference_price=ref)
-        assert fp_tiny == fp_one == fp_199, (
-            f"-0.03%, -1%, -1.99% should be same bucket: {fp_tiny} {fp_one} {fp_199}"
+        # -1.98%: 49.01, delta=-99, abs(99)*50//5000 = 4950//5000 = 0 → p0
+        fp_198 = cmf("EVT_20260731_000003_xxxx", 49.01, 10000, reference_price=ref)
+        # +0.00%: 50.00 → p0
+        fp_zero = cmf("EVT_20260731_000004_xxxx", 50.00, 10000, reference_price=ref)
+        # +1.98%: 50.99, delta=99, abs(99)*50//5000 = 4950//5000 = 0 → p0
+        fp_pos = cmf("EVT_20260731_000005_xxxx", 50.99, 10000, reference_price=ref)
+        # All within ±2% → p0
+        assert fp_tiny == fp_one == fp_198 == fp_zero == fp_pos, (
+            f"All within +-2% should be p0: {fp_tiny} {fp_one} {fp_198} {fp_zero} {fp_pos}"
         )
-        assert "p-1" in fp_tiny
+        assert "p0" in fp_tiny
+        assert "p0" in fp_zero
+        assert "p0" in fp_pos
 
     def test_negative_cross_2pct_boundary(self):
-        """v25-14: -2.00% 在边界上 → p-1; -2.04% 跨边界 → p-2。"""
+        """v26-14: -2.00% 边界 → p-1; -4.00% 边界 → p-2。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
         ref = 50.00
-        # -2.00% = 49.00: delta=-100, (-100*50)//5000 = -5000//5000 = -1
+        # -2.00% = 49.00: abs(100)*50//5000 = 5000//5000 = 1 → p-1
         fp_200 = cmf("EVT_20260731_000001_xxxx", 49.00, 10000, reference_price=ref)
-        # -2.04% = 48.98: cents=4898, delta=-102, (-102*50)//5000 = -5100//5000 = -2
-        fp_204 = cmf("EVT_20260731_000002_xxxx", 48.98, 10000, reference_price=ref)
+        # -4.00% = 48.00: abs(200)*50//5000 = 10000//5000 = 2 → p-2
+        fp_400 = cmf("EVT_20260731_000002_xxxx", 48.00, 10000, reference_price=ref)
         assert "p-1" in fp_200, f"-2.00% exact boundary should be p-1: {fp_200}"
-        assert "p-2" in fp_204, f"-2.04% should cross to p-2: {fp_204}"
-        assert fp_200 != fp_204, "-2.00% and -2.04% should be different buckets"
+        assert "p-2" in fp_400, f"-4.00% should cross to p-2: {fp_400}"
+        assert fp_200 != fp_400, "-2.00% and -4.00% should be different buckets"
 
     def test_negative_symmetric_with_positive(self):
         """v25-15: 正负方向边界行为对称 +2.00% vs -2.00%。"""
@@ -3511,15 +3521,18 @@ class TestV24MarketFingerprint:
         assert fp_pos != fp_neg
 
     def test_negative_boundary_oscillation(self):
-        """v25-16: 负向边界附近往返 → 同 bucket 往返。"""
+        """v26-16: 负向 2% 边界附近往返 → 同 bucket 往返（p0 ↔ p-1 ↔ p0）。"""
         from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
         ref = 50.00
         EID = "EVT_20260731_00000{}_xxxx"
-        fp_a = cmf(EID.format(1), 49.01, 10000, reference_price=ref)  # -1.98% → p-1
-        fp_b = cmf(EID.format(2), 48.99, 10000, reference_price=ref)  # -2.02% → p-2
-        fp_c = cmf(EID.format(3), 49.01, 10000, reference_price=ref)  # -1.98% → p-1
-        assert fp_a == fp_c, "往返应回到相同 bucket"
-        assert fp_a != fp_b, "跨边界应不同"
+        # -1.98% = 49.01: abs(99)*50//5000 = 0 → p0
+        # -2.02% = 48.99: abs(101)*50//5000 = 5050//5000 = 1 → p-1
+        # Back to -1.98% = 49.01 → p0
+        fp_a = cmf(EID.format(1), 49.01, 10000, reference_price=ref)  # -1.98% → p0
+        fp_b = cmf(EID.format(2), 48.99, 10000, reference_price=ref)  # -2.02% → p-1
+        fp_c = cmf(EID.format(3), 49.01, 10000, reference_price=ref)  # -1.98% → p0
+        assert fp_a == fp_c, "往返应回到相同 bucket (p0)"
+        assert fp_a != fp_b, "跨边界应不同 (p0 vs p-1)"
 
     # ── 缺失参考价处理 ──
 
@@ -3563,11 +3576,18 @@ class TestV24MarketFingerprint:
         assert "p0" in fp2
 
     def test_low_price_stock(self):
-        """v24-12: 低价股 percentage bucket 表现。"""
-        from serenity_v2.phase_b2 import compute_market_fingerprint
-        # 昨收 5.00, 5.10 → +2.0% → bucket 1
-        fp = compute_market_fingerprint("evt-001", 5.10, 10000, reference_price=5.00)
+        """v26-20: 低价股 percentage bucket 表现（±2% 内 → p0）。"""
+        from serenity_v2.phase_b2 import compute_market_fingerprint as cmf
+        EID = "EVT_20260731_00000{}_xxxx"
+        # 昨收 5.00, 5.10 → +2.0% → p1
+        fp = cmf(EID.format(1), 5.10, 10000, reference_price=5.00)
         assert "p1" in fp
-        # 昨收 5.00, 4.95 → -1.0% → bucket -1 (floor(-0.5) = -1)
-        fp2 = compute_market_fingerprint("evt-002", 4.95, 10000, reference_price=5.00)
-        assert "p-1" in fp2
+        # 昨收 5.00, 4.95 → -1.0% → p0 (within ±2%)
+        fp2 = cmf(EID.format(2), 4.95, 10000, reference_price=5.00)
+        assert "p0" in fp2
+        # 昨收 5.00, 4.85 → -3.0% → p-1 (abs_bucket = floor(1.5) = 1, sign=-)
+        fp3 = cmf(EID.format(3), 4.85, 10000, reference_price=5.00)
+        assert "p-1" in fp3
+        # 昨收 5.00, 4.80 → -4.0% → p-2
+        fp4 = cmf(EID.format(4), 4.80, 10000, reference_price=5.00)
+        assert "p-2" in fp4
