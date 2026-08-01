@@ -33,6 +33,30 @@ logger = logging.getLogger("serenity_v2.phase_b2")
 # v10: Report schema version — bump when report structure changes
 B2_REPORT_SCHEMA_VERSION = "b2-1.1"
 
+# v27: 报告脱敏配置
+B2_DESENSITIZE_FIELDS = {
+    "redact": [
+        "account_snapshot_id_full",  # 完整 fixture 哈希（可用于指纹识别）
+    ],
+    "mask": [
+        # 符号级别屏蔽（仅在 desensitize=True 时替换为匿名标识）
+    ],
+    "drop": [
+        # 完全移除的字段
+    ],
+}
+
+# v27: 报告复审敏感词检测
+B2_SENSITIVITY_PATTERNS = [
+    # 不应出现在报告中的敏感关键词
+    (r"\bpassword\b", "疑似密码字段"),
+    (r"\bapi[_-]?key\b", "疑似 API key"),
+    (r"\btoken\b", "疑似 token"),
+    (r"sk-[a-zA-Z0-9]{20,}", "疑似 OpenAI/API key 格式"),
+    (r"\b\d{6,}\s*(元|¥|CNY|RMB)", "疑似金额（¥）"),
+    (r"position.*\d{3,}\s*(股|share)", "疑似持仓数量"),
+]
+
 # ---------------------------------------------------------------------------
 # B2 配置
 # ---------------------------------------------------------------------------
@@ -600,6 +624,412 @@ class B2Metrics:
 
         return report
 
+    # ── v27: 综合后飞行不变量审计 ──
+
+    def audit_postflight_invariants(self, prod_guard_before: dict = None,
+                                    prod_guard_after: dict = None,
+                                    shadow_db_path: str = "") -> dict:
+        """综合后飞行不变量与安全审计。
+
+        返回包含所有不变量检查结果的审计报告。
+        所有检查项必须全部 PASS 才算审计通过。
+        """
+        checks = []
+
+        # ────── A. 调度方程 (v10) ──────
+        eq1 = (self.cycles_planned == self.cycles_started
+               + self.cycles_skipped + self.not_due_cycles
+               + self.cancelled_cycles_auto_stop)
+        checks.append({
+            "category": "scheduling",
+            "id": "SCHED_EQ1",
+            "name": "planned = started + skipped + not_due + cancelled",
+            "pass": eq1,
+            "detail": (f"planned={self.cycles_planned} == "
+                       f"started({self.cycles_started}) + skipped({self.cycles_skipped}) + "
+                       f"not_due({self.not_due_cycles}) + cancelled({self.cancelled_cycles_auto_stop})"),
+        })
+
+        eq2 = (self.cycles_started == self.cycles_completed
+               + self.cycles_aborted + self.cycles_failed)
+        checks.append({
+            "category": "scheduling",
+            "id": "SCHED_EQ2",
+            "name": "started = completed + aborted + failed",
+            "pass": eq2,
+            "detail": (f"started={self.cycles_started} == "
+                       f"completed({self.cycles_completed}) + aborted({self.cycles_aborted}) + "
+                       f"failed({self.cycles_failed})"),
+        })
+
+        # ────── B. 数据流方程 ──────
+        eq3 = (self.raw_received == self.raw_stored + self.raw_duplicates)
+        checks.append({
+            "category": "data_integrity",
+            "id": "DATA_EQ1",
+            "name": "raw_received = raw_stored + raw_duplicates",
+            "pass": eq3,
+            "detail": (f"raw_received={self.raw_received} == "
+                       f"raw_stored({self.raw_stored}) + raw_duplicates({self.raw_duplicates})"),
+        })
+
+        # ────── C. 事件方程 ──────
+        eq4 = (self.events_created >= self.events_deduplicated)
+        checks.append({
+            "category": "data_integrity",
+            "id": "DATA_EQ2",
+            "name": "events_created >= events_deduplicated",
+            "pass": eq4,
+            "detail": f"events_created={self.events_created} >= events_deduplicated={self.events_deduplicated}",
+        })
+
+        # ────── D. 信号方程 ──────
+        eq5 = (self.signals_total == self.signals_created_unique
+               + self.signals_skipped_idempotent + self.signals_skipped_cooldown
+               + self.signals_no_decision)
+        checks.append({
+            "category": "data_integrity",
+            "id": "SIGNAL_EQ1",
+            "name": "signals_total = created + skipped_idempotent + skipped_cooldown + no_decision",
+            "pass": eq5,
+            "detail": (f"signals_total={self.signals_total} == "
+                       f"created({self.signals_created_unique}) + "
+                       f"skipped_idempotent({self.signals_skipped_idempotent}) + "
+                       f"skipped_cooldown({self.signals_skipped_cooldown}) + "
+                       f"no_decision({self.signals_no_decision})"),
+        })
+
+        # ────── E. 失败会计方程 ──────
+        fail_sum = (self.scheduler_failed + self.session_check_failed
+                    + self.fetch_failed + self.http_failed + self.parse_failed
+                    + self.validation_failed + self.normalization_failed
+                    + self.quarantine_failed + self.event_failed
+                    + self.signal_failed + self.ledger_failed
+                    + self.report_failed + self.safety_guard_failed)
+        eq6 = (self.total_failures == fail_sum)
+        checks.append({
+            "category": "failure_accounting",
+            "id": "FAIL_EQ1",
+            "name": "total_failures = sum(all failure types)",
+            "pass": eq6,
+            "detail": f"total_failures={self.total_failures} == sum(types)={fail_sum}",
+        })
+
+        # ────── F. 账本幂等方程 ──────
+        eq7 = (self.ledger_claimed == self.ledger_completed
+               + self.ledger_failed_count + self.ledger_in_progress)
+        checks.append({
+            "category": "idempotency",
+            "id": "LEDGER_EQ1",
+            "name": "ledger claimed = completed + failed + in_progress",
+            "pass": eq7,
+            "detail": (f"claimed={self.ledger_claimed} == "
+                       f"completed({self.ledger_completed}) + "
+                       f"failed({self.ledger_failed_count}) + "
+                       f"in_progress({self.ledger_in_progress})"),
+        })
+
+        # ────── G. 生产 DB 不变量 (P0-1) ──────
+        if prod_guard_before and prod_guard_after:
+            b_main_hash = prod_guard_before.get("sha256")
+            a_main_hash = prod_guard_after.get("sha256")
+            if b_main_hash and a_main_hash:
+                prod_unchanged = (b_main_hash == a_main_hash)
+                checks.append({
+                    "category": "security",
+                    "id": "SEC_PROD_DB_UNCHANGED",
+                    "name": "生产 DB SHA256 不变",
+                    "pass": prod_unchanged,
+                    "detail": (f"before={b_main_hash[:12]}... "
+                               f"after={a_main_hash[:12]}... "
+                               f"{'✅ 未变' if prod_unchanged else '❌ 变化!'}"),
+                })
+
+        # ────── H. 零副作用硬门禁 ──────
+        zero_side_effects = (self.real_push_count == 0 and self.real_trade_count == 0
+                             and self.account_modifications == 0)
+        checks.append({
+            "category": "security",
+            "id": "SEC_ZERO_SIDE_EFFECTS",
+            "name": "零真实副作用（无推送/成交/账户修改）",
+            "pass": zero_side_effects,
+            "detail": (f"real_pushes={self.real_push_count} "
+                       f"real_trades={self.real_trade_count} "
+                       f"account_mods={self.account_modifications}"),
+        })
+
+        # ────── I. 影子 DB 身份 (P0-1) ──────
+        if shadow_db_path and "/shadow" in str(shadow_db_path):
+            checks.append({
+                "category": "security",
+                "id": "SEC_SHADOW_IDENTITY",
+                "name": "DB 路径包含 /shadow（非生产）",
+                "pass": True,
+                "detail": f"shadow_db={shadow_db_path}",
+            })
+        else:
+            checks.append({
+                "category": "security",
+                "id": "SEC_SHADOW_IDENTITY",
+                "name": "DB 路径包含 /shadow（非生产）",
+                "pass": False,
+                "detail": f"shadow_db={shadow_db_path} 路径不含 /shadow!",
+            })
+
+        # ────── J. 报告 schema 版本 ──────
+        checks.append({
+            "category": "report_integrity",
+            "id": "RPT_SCHEMA_VERSION",
+            "name": f"报告 schema 版本 = {B2_REPORT_SCHEMA_VERSION}",
+            "pass": True,
+            "detail": f"schema_version={B2_REPORT_SCHEMA_VERSION}",
+        })
+
+        # ────── K. 运行终止合理性 ──────
+        if self.run_completed and not self.run_terminated_early:
+            termination_ok = True
+            term_detail = "正常运行完成"
+        elif self.run_terminated_early:
+            termination_ok = (self.termination_type
+                              in ("SAFETY_AUTO_STOP", "SESSION_BOUNDARY",
+                                  "USER_INTERRUPT", "NORMAL"))
+            term_detail = (f"提前终止 type={self.termination_type} "
+                           f"reason={self.termination_reason}")
+        else:
+            termination_ok = False
+            term_detail = "运行未完成（异常）"
+        checks.append({
+            "category": "process_integrity",
+            "id": "PROC_TERMINATION",
+            "name": "运行终止状态合理",
+            "pass": termination_ok,
+            "detail": term_detail,
+        })
+
+        # ────── 汇总 ──────
+        passed = sum(1 for c in checks if c["pass"])
+        failed = len(checks) - passed
+        all_pass = failed == 0
+
+        return {
+            "audit_version": "v27",
+            "timestamp": datetime.now(tz=CST).isoformat(timespec="seconds"),
+            "run_id": self.run_id,
+            "all_pass": all_pass,
+            "total_checks": len(checks),
+            "passed": passed,
+            "failed": failed,
+            "checks": checks,
+            "summary": (f"✅ 审计全部通过 ({passed}/{len(checks)})"
+                        if all_pass else
+                        f"❌ 审计失败: {failed}/{len(checks)} 项未通过"),
+        }
+
+    def print_audit_report(self, audit: dict):
+        """打印人类可读的审计报告。"""
+        print(f"\n{'='*70}")
+        print(f"  Postflight 不变量与安全审计 (v27)")
+        print(f"{'='*70}")
+        print(f"  run_id: {audit['run_id']}")
+        print(f"  timestamp: {audit['timestamp']}")
+        print()
+
+        from collections import defaultdict
+        by_cat = defaultdict(list)
+        for c in audit["checks"]:
+            by_cat[c["category"]].append(c)
+
+        cat_names = {
+            "scheduling": "调度方程",
+            "data_integrity": "数据完整性",
+            "failure_accounting": "失败会计",
+            "idempotency": "幂等性",
+            "security": "安全边界",
+            "report_integrity": "报告完整性",
+            "process_integrity": "进程完整性",
+        }
+
+        for cat, items in by_cat.items():
+            cat_label = cat_names.get(cat, cat)
+            print(f"  ── {cat_label} ──")
+            for c in items:
+                icon = "✅" if c["pass"] else "❌"
+                print(f"    {icon} [{c['id']}] {c['name']}")
+                if not c["pass"]:
+                    print(f"       详情: {c['detail']}")
+
+        print()
+        print(f"  {audit['summary']}")
+        print(f"{'='*70}\n")
+
+    # ── v27: 报告复审与脱敏 ──
+
+    def review_report(self) -> dict:
+        """复审 B2 报告质量与敏感信息。
+
+        返回审查结果: {ok, warnings, findings}。
+        """
+        import re
+        report = self.to_report_dict()
+        findings = []
+        warnings = []
+
+        # 1. 必填字段完整性检查
+        required_fields = [
+            "run_id", "schema_version", "status", "started_at", "ended_at",
+            "duration_seconds", "cycles_completed", "total_failures",
+        ]
+        for field in required_fields:
+            if field not in report or report[field] is None:
+                findings.append(f"缺失必填字段: {field}")
+
+        # 2. 审计方程完整性 (v27: 直接计算，不依赖 save_report 的 _audit_scheduling_v10)
+        eq1 = (report.get("cycles_planned", 0) == report.get("cycles_started", 0)
+               + report.get("cycles_skipped", 0) + report.get("not_due_cycles", 0)
+               + report.get("cancelled_cycles_auto_stop", 0))
+        eq2 = (report.get("cycles_started", 0) == report.get("cycles_completed", 0)
+               + report.get("cycles_aborted", 0) + report.get("cycles_failed", 0))
+        if not eq1:
+            findings.append("调度方程1不通过: planned != started + skipped + not_due + cancelled")
+        if not eq2:
+            findings.append("调度方程2不通过: started != completed + aborted + failed")
+
+        # 3. 安全层门禁
+        if report.get("real_pushes", -1) != 0:
+            findings.append(f"真实推送计数异常: {report['real_pushes']}")
+        if report.get("real_trades", -1) != 0:
+            findings.append(f"真实成交计数异常: {report['real_trades']}")
+        if report.get("account_modifications", -1) != 0:
+            findings.append(f"账户修改异常: {report['account_modifications']}")
+
+        # 4. 敏感信息检测
+        report_text = json.dumps(report, ensure_ascii=False, default=str)
+        for pattern, description in B2_SENSITIVITY_PATTERNS:
+            matches = re.findall(pattern, report_text, re.IGNORECASE)
+            if matches:
+                warnings.append(f"{description}: 匹配到 {len(matches)} 次 ({pattern})")
+
+        # 5. 数据合理性检查
+        if report.get("cycles_completed", 0) < 0:
+            findings.append("cycles_completed 为负值")
+        if report.get("duration_seconds", 0) < 0:
+            findings.append("duration_seconds 为负值")
+
+        return {
+            "ok": len(findings) == 0,
+            "findings_count": len(findings),
+            "warnings_count": len(warnings),
+            "findings": findings,
+            "warnings": warnings,
+            "summary": (f"✅ 报告复审通过"
+                        if not findings else
+                        f"❌ 报告复审发现 {len(findings)} 个问题"),
+        }
+
+    @staticmethod
+    def desensitize_report(report_data: dict) -> dict:
+        """对 B2 报告进行脱敏处理。
+
+        返回脱敏后的 dict 副本，原数据不变。
+        """
+        import copy
+        sanitized = copy.deepcopy(report_data)
+
+        # 红action 指定字段
+        for field in B2_DESENSITIZE_FIELDS.get("redact", []):
+            if field in sanitized:
+                sanitized[field] = "[REDACTED]"
+
+        # 脱敏信号详情中的 fixture 哈希
+        if "signal_details" in sanitized:
+            for sd in sanitized["signal_details"]:
+                if "account_snapshot_id_full" in sd:
+                    sd["account_snapshot_id_full"] = "[REDACTED]"
+                if "account_snapshot_id" in sd:
+                    sd["account_snapshot_id"] = (
+                        sd["account_snapshot_id"][:8] + "...[REDACTED]"
+                        if len(sd["account_snapshot_id"]) > 8
+                        else "[REDACTED]"
+                    )
+
+        # 脱敏 prod_file_hash 中的完整 SHA256
+        for key in ("prod_file_hash_before", "prod_file_hash_after"):
+            if key in sanitized and isinstance(sanitized[key], dict):
+                if "sha256" in sanitized[key] and sanitized[key]["sha256"]:
+                    sanitized[key]["sha256"] = (
+                        sanitized[key]["sha256"][:12] + "...[REDACTED]"
+                    )
+
+        # 标记脱敏版本
+        sanitized["_desensitized"] = True
+        sanitized["_desensitized_version"] = "v27"
+
+        return sanitized
+
+
+# ---------------------------------------------------------------------------
+# v27: 独立报告复审与脱敏工具
+# ---------------------------------------------------------------------------
+
+class B2ReportReviewer:
+    """独立的 B2 报告复审与脱敏工具。
+
+    用于检查已保存的报告文件，无需启动 B2Runner。
+    """
+
+    @staticmethod
+    def review_file(report_path: str) -> dict:
+        """复审一个已保存的报告文件。"""
+        import re
+        from pathlib import Path
+
+        path = Path(report_path)
+        if not path.exists():
+            return {"ok": False, "findings": [f"文件不存在: {report_path}"],
+                    "warnings": [], "findings_count": 1, "warnings_count": 0,
+                    "summary": "❌ 文件不存在"}
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            return {"ok": False, "findings": [f"JSON 解析失败: {e}"],
+                    "warnings": [], "findings_count": 1, "warnings_count": 0,
+                    "summary": "❌ JSON 解析失败"}
+
+        # 通过 B2Metrics 实例进行复审
+        m = B2Metrics()
+        m.run_id = data.get("run_id", "")
+        m.status = data.get("status", "")
+        # 注入关键字段供审查
+        for field in ["run_id", "schema_version", "status", "started_at", "ended_at",
+                      "duration_seconds", "cycles_completed", "total_failures",
+                      "real_pushes", "real_trades", "account_modifications",
+                      "cycles_planned", "cycles_started", "cycles_skipped",
+                      "not_due_cycles", "cancelled_cycles_auto_stop",
+                      "cycles_aborted", "cycles_failed"]:
+            if field in data:
+                setattr(m, field, data[field])
+
+        return m.review_report()
+
+    @staticmethod
+    def desensitize_file(report_path: str, output_path: str = "") -> str:
+        """对报告文件进行脱敏并保存。"""
+        from pathlib import Path
+
+        path = Path(report_path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        sanitized = B2Metrics.desensitize_report(data)
+
+        if not output_path:
+            output_path = str(path.parent / f"{path.stem}_sanitized{path.suffix}")
+
+        Path(output_path).write_text(
+            json.dumps(sanitized, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        return output_path
+
 
 # ---------------------------------------------------------------------------
 # 统计工具
@@ -978,6 +1408,11 @@ class B2Runner:
             if prod and prod.state == "PRESENT":
                 print(f"  ✅ prod_db_sha256: {prod.sha256}")
                 print(f"  ✅ prod_db_inode: {prod.inode} dev={prod.device}")
+                # v27: 保存生产 DB 哈希到 metrics（供审计使用）
+                self.metrics.prod_file_hash_before = {
+                    "sha256": prod.sha256, "size": prod.size,
+                    "inode": prod.inode, "device": prod.device,
+                }
         print(f"{'='*60}")
 
         if violations:
@@ -1840,8 +2275,53 @@ class B2Runner:
             + self.metrics.safety_guard_failed
         )
 
+        # v27: 综合后飞行不变量与安全审计
+        self._run_postflight_audit()
+
         self._print_report()
         return self.metrics
+
+    def _run_postflight_audit(self):
+        """v27: 执行综合 postflight 不变量与安全审计。"""
+        prod_before = {}
+        prod_after = {}
+        if self.guard and self.guard.before:
+            prod_before = {
+                "sha256": self.guard.before.main.sha256,
+                "size": self.guard.before.main.size,
+                "inode": self.guard.before.main.inode,
+            }
+        if self.guard and self.guard.after:
+            prod_after = {
+                "sha256": self.guard.after.main.sha256,
+                "size": self.guard.after.main.size,
+                "inode": self.guard.after.main.inode,
+            }
+            self.metrics.prod_file_hash_after = prod_after
+
+        audit = self.metrics.audit_postflight_invariants(
+            prod_guard_before=prod_before,
+            prod_guard_after=prod_after,
+            shadow_db_path=str(self.shadow_db),
+        )
+        self.metrics.print_audit_report(audit)
+
+        # 审计失败触发自动停止
+        if not audit["all_pass"]:
+            self.metrics.violations.append(
+                f"POSTFLIGHT_AUDIT_FAILED: {audit['failed']}/{audit['total_checks']} 检查未通过"
+            )
+            if self.metrics.status == "COMPLETED":
+                self.metrics.status = "AUTO_STOPPED"
+            self.metrics.auto_stop_triggered = True
+            self.metrics.auto_stop_reason = (
+                self.metrics.auto_stop_reason + "; "
+                + f"postflight_audit({audit['failed']} failed)"
+            ) if self.metrics.auto_stop_reason else (
+                f"postflight_audit({audit['failed']} failed)"
+            )
+
+        return audit
 
     def _print_report(self):
         m = self.metrics

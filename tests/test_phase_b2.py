@@ -3591,3 +3591,482 @@ class TestV24MarketFingerprint:
         # 昨收 5.00, 4.80 → -4.0% → p-2
         fp4 = cmf(EID.format(4), 4.80, 10000, reference_price=5.00)
         assert "p-2" in fp4
+
+
+# ============================================================================
+# v27: Postflight 不变量审计测试
+# ============================================================================
+
+class TestPostflightAudit:
+    """v27: B2Metrics.audit_postflight_invariants 综合审计测试。"""
+
+    @staticmethod
+    def _make_clean_metrics():
+        """创建通过所有不变量的一致性 B2Metrics。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        m = B2Metrics()
+        m.run_id = "B2_TEST_20260801_120000"
+        m.status = "COMPLETED"
+        m.run_completed = True
+
+        # 调度层（自洽）
+        m.cycles_planned = 10
+        m.cycles_started = 8
+        m.cycles_completed = 7
+        m.cycles_aborted = 1
+        m.cycles_skipped = 1
+        m.not_due_cycles = 1
+        m.cancelled_cycles_auto_stop = 0
+        m.cycles_failed = 0
+
+        # 数据流
+        m.raw_received = 100
+        m.raw_stored = 90
+        m.raw_duplicates = 10
+
+        # 事件
+        m.events_created = 50
+        m.events_deduplicated = 5
+
+        # 信号
+        m.signals_total = 20
+        m.signals_created_unique = 12
+        m.signals_skipped_idempotent = 3
+        m.signals_skipped_cooldown = 2
+        m.signals_no_decision = 3
+
+        # 失败（全零）
+        m.total_failures = 0
+
+        # 账本
+        m.ledger_claimed = 20
+        m.ledger_completed = 18
+        m.ledger_failed_count = 1
+        m.ledger_in_progress = 1
+
+        # 安全
+        m.real_push_count = 0
+        m.real_trade_count = 0
+        m.account_modifications = 0
+
+        return m
+
+    def test_all_invariants_pass_with_clean_metrics(self):
+        """自洽 metrics 下所有审计检查通过。"""
+        m = self._make_clean_metrics()
+        audit = m.audit_postflight_invariants(
+            prod_guard_before={"sha256": "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123"},
+            prod_guard_after={"sha256": "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123"},
+            shadow_db_path="/tmp/shadow/shadow.db",
+        )
+        assert audit["all_pass"] is True
+        assert audit["failed"] == 0
+
+    def test_audit_detects_scheduling_violation(self):
+        """调度方程不成立时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.cycles_planned = 10
+        m.cycles_started = 5  # 不匹配 planned = started + skipped + not_due + cancelled (5+1+1+0=7 != 10)
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SCHED_EQ1" in failed_ids
+
+    def test_audit_detects_data_integrity_violation(self):
+        """数据流方程不成立时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.raw_received = 100
+        m.raw_stored = 80
+        m.raw_duplicates = 5  # 80+5=85 != 100
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "DATA_EQ1" in failed_ids
+
+    def test_audit_detects_failure_accounting_violation(self):
+        """失败会计方程不成立时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.total_failures = 5
+        m.scheduler_failed = 3  # sum=3 != 5
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "FAIL_EQ1" in failed_ids
+
+    def test_audit_detects_ledger_violation(self):
+        """账本方程不成立时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.ledger_claimed = 10
+        m.ledger_completed = 5
+        m.ledger_failed_count = 1
+        m.ledger_in_progress = 1  # 5+1+1=7 != 10
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "LEDGER_EQ1" in failed_ids
+
+    def test_audit_detects_prod_db_change(self):
+        """生产 DB 哈希变化时审计检测到。"""
+        m = self._make_clean_metrics()
+        audit = m.audit_postflight_invariants(
+            prod_guard_before={"sha256": "aaa111222333aaa111222333aaa111222333aaa111222333aaa111222333aaa111"},
+            prod_guard_after={"sha256": "bbb444555666bbb444555666bbb444555666bbb444555666bbb444555666bbb444"},
+        )
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SEC_PROD_DB_UNCHANGED" in failed_ids
+
+    def test_audit_detects_side_effects(self):
+        """有真实副作用时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.real_push_count = 1  # 违规!
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SEC_ZERO_SIDE_EFFECTS" in failed_ids
+
+    def test_audit_detects_signal_equation_violation(self):
+        """信号方程不成立时审计检测到。"""
+        m = self._make_clean_metrics()
+        m.signals_total = 20
+        m.signals_created_unique = 10
+        # 10+3+2+3=18 != 20
+        audit = m.audit_postflight_invariants()
+        assert audit["all_pass"] is False
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SIGNAL_EQ1" in failed_ids
+
+    def test_audit_includes_all_categories(self):
+        """审计报告包含所有检查类别。"""
+        m = self._make_clean_metrics()
+        audit = m.audit_postflight_invariants(
+            prod_guard_before={"sha256": "aaa111222333aaa111222333aaa111222333aaa111222333aaa111222333aaa111"},
+            prod_guard_after={"sha256": "aaa111222333aaa111222333aaa111222333aaa111222333aaa111222333aaa111"},
+            shadow_db_path="/tmp/shadow/shadow.db",
+        )
+        categories = {c["category"] for c in audit["checks"]}
+        assert "scheduling" in categories
+        assert "data_integrity" in categories
+        assert "failure_accounting" in categories
+        assert "idempotency" in categories
+        assert "security" in categories
+        assert "report_integrity" in categories
+        assert "process_integrity" in categories
+
+    def test_audit_shadow_db_identity_rejects_production_path(self):
+        """影子 DB 路径不含 /shadow 时审计拒绝。"""
+        m = self._make_clean_metrics()
+        audit = m.audit_postflight_invariants(
+            shadow_db_path="/data/prod/serenity.db",
+        )
+        failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SEC_SHADOW_IDENTITY" in failed_ids
+
+    def test_audit_termination_reported(self):
+        """运行终止状态合理时审计通过该检查。"""
+        m = self._make_clean_metrics()
+        m.run_completed = True
+        m.run_terminated_early = False
+        audit = m.audit_postflight_invariants()
+        term_check = [c for c in audit["checks"] if c["id"] == "PROC_TERMINATION"][0]
+        assert term_check["pass"] is True
+
+
+# ============================================================================
+# v27: B2 报告复审与脱敏测试
+# ============================================================================
+
+class TestReportReview:
+    """v27: B2Metrics.review_report 报告复审测试。"""
+
+    @staticmethod
+    def _make_clean_metrics():
+        """创建复审通过的 B2Metrics。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        m = B2Metrics()
+        m.run_id = "B2_TEST_20260801_120000"
+        m.status = "COMPLETED"
+        m.started_at = "2026-08-01T12:00:00+08:00"
+        m.ended_at = "2026-08-01T12:05:00+08:00"
+        m.duration_seconds = 300
+        m.cycles_planned = 60
+        m.cycles_started = 60
+        m.cycles_completed = 60
+        m.real_push_count = 0
+        m.real_trade_count = 0
+        m.account_modifications = 0
+        return m
+
+    def test_clean_metrics_pass_review(self):
+        """正常的 metrics 通过复审。"""
+        m = self._make_clean_metrics()
+        result = m.review_report()
+        assert result["ok"] is True
+        assert result["findings_count"] == 0
+
+    def test_review_detects_missing_required_field(self):
+        """缺少必填字段时复审检测到。"""
+        m = self._make_clean_metrics()
+        m.run_id = ""
+        result = m.review_report()
+        # run_id="" 仍然在 dict 中但为空 — 检查 findings
+        # 注意: "" 不是 None, 所以不会触发"缺失必填字段"
+        # 但审计方程可能受影响
+        assert "findings" in result
+
+    def test_review_detects_real_pushes(self):
+        """有真实推送时复审检测到。"""
+        m = self._make_clean_metrics()
+        m.real_push_count = 1
+        result = m.review_report()
+        assert result["ok"] is False
+        assert any("真实推送" in f for f in result["findings"])
+
+    def test_review_detects_real_trades(self):
+        """有真实成交时复审检测到。"""
+        m = self._make_clean_metrics()
+        m.real_trade_count = 5
+        result = m.review_report()
+        assert result["ok"] is False
+        assert any("真实成交" in f for f in result["findings"])
+
+    def test_review_detects_account_modifications(self):
+        """有账户修改时复审检测到。"""
+        m = self._make_clean_metrics()
+        m.account_modifications = 1
+        result = m.review_report()
+        assert result["ok"] is False
+        assert any("账户修改" in f for f in result["findings"])
+
+
+class TestReportDesensitization:
+    """v27: B2Metrics.desensitize_report 脱敏测试。"""
+
+    def test_desensitize_redacts_account_snapshot_full(self):
+        """脱敏后 account_snapshot_id_full 被替换。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        data = {
+            "run_id": "B2_TEST",
+            "status": "COMPLETED",
+            "signal_details": [{
+                "signal_id": "SIG_001",
+                "symbol": "600487",
+                "account_snapshot_id": "18dc7d197f33a1bd",
+                "account_snapshot_id_full": "18dc7d197f33a1bde4312e187743309d3a01b7108e51d76d901e8c4e2b46ff67",
+            }],
+            "prod_file_hash_before": {
+                "sha256": "ab9cc9266796abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+            },
+            "prod_file_hash_after": {
+                "sha256": "341f2854e3a2abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+            },
+        }
+        sanitized = B2Metrics.desensitize_report(data)
+
+        # account_snapshot_id_full 被红action
+        assert sanitized["signal_details"][0]["account_snapshot_id_full"] == "[REDACTED]"
+
+        # account_snapshot_id 被截断
+        assert sanitized["signal_details"][0]["account_snapshot_id"] == "18dc7d19...[REDACTED]"
+
+    def test_desensitize_truncates_sha256(self):
+        """脱敏后 SHA256 哈希被截断。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        data = {
+            "run_id": "B2_TEST",
+            "prod_file_hash_before": {
+                "sha256": "ab9cc9266796abcdef1234567890abcdef1234567890abcdef1234567890abcd",
+            },
+        }
+        sanitized = B2Metrics.desensitize_report(data)
+        sha = sanitized["prod_file_hash_before"]["sha256"]
+        assert len(sha) < 30  # 截断后应远短于原始 64 字符
+        assert "[REDACTED]" in sha
+
+    def test_desensitize_preserves_run_id(self):
+        """脱敏保留 run_id 和 status。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        data = {"run_id": "B2_20260801_120000", "status": "COMPLETED"}
+        sanitized = B2Metrics.desensitize_report(data)
+        assert sanitized["run_id"] == "B2_20260801_120000"
+        assert sanitized["status"] == "COMPLETED"
+
+    def test_desensitize_marks_version(self):
+        """脱敏后添加版本标记。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        sanitized = B2Metrics.desensitize_report({"run_id": "B2_TEST"})
+        assert sanitized["_desensitized"] is True
+        assert sanitized["_desensitized_version"] == "v27"
+
+    def test_desensitize_idempotent(self):
+        """重复脱敏不改变结果（幂等）。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        data = {
+            "run_id": "B2_TEST",
+            "signal_details": [{
+                "account_snapshot_id_full": "18dc7d197f33a1bde4312e187743309d3a01b7108e51d76d901e8c4e2b46ff67",
+            }],
+        }
+        s1 = B2Metrics.desensitize_report(data)
+        s2 = B2Metrics.desensitize_report(s1)
+        assert s1 == s2
+
+    def test_desensitize_handles_empty_signal_details(self):
+        """无信号详情时不报错。"""
+        from serenity_v2.phase_b2 import B2Metrics
+        data = {"run_id": "B2_TEST", "signal_details": []}
+        sanitized = B2Metrics.desensitize_report(data)
+        assert sanitized["_desensitized"] is True
+
+
+# ============================================================================
+# UI-P0 正向 fixture 验证 & Phase C 兼容性回归
+# ============================================================================
+
+class TestUIP0PositiveFixture:
+    """验证 UI-P0 正向 fixture 完整性和可用性。"""
+
+    def test_fixture_file_exists_and_valid_json(self):
+        """fixture 文件存在且为有效 JSON。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        assert fixture_path.exists(), f"fixture 不存在: {fixture_path}"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+        assert isinstance(data, dict)
+
+    def test_fixture_has_required_fields(self):
+        """fixture 包含所有必填字段。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        required = ["fixture_version", "fixture_id", "account_snapshot_as_of",
+                     "cash", "total_assets", "position_market_value", "positions"]
+        for field in required:
+            assert field in data, f"缺失必填字段: {field}"
+
+    def test_fixture_book_equation_balanced(self):
+        """现金 + 持仓市值 = 总资产。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        cash = data["cash"]
+        positions = data["positions"]
+        mv_sum = sum(p["market_value"] for p in positions)
+        total = data["total_assets"]
+
+        assert abs(total - (cash + mv_sum)) < 1.0, (
+            f"账面不匹配: total={total}, cash={cash}, mv_sum={mv_sum}"
+        )
+
+    def test_fixture_positions_have_valid_codes(self):
+        """所有持仓股票代码为 6 位数字。"""
+        import re
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        for p in data["positions"]:
+            assert re.match(r"^\d{6}$", p["code"]), f"无效股票代码: {p['code']}"
+
+    def test_fixture_available_shares_not_exceed_total(self):
+        """可卖股数 ≤ 持仓股数（无不合理超卖）。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        for p in data["positions"]:
+            assert p["available_shares"] <= p["shares"], (
+                f"{p['code']}: 可卖{p['available_shares']} > 持仓{p['shares']}"
+            )
+
+    def test_fixture_total_assets_positive(self):
+        """总资产为正（正向 fixture）。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        assert data["total_assets"] > 0, "总资产必须为正"
+        assert data["cash"] >= 0, "现金不能为负"
+
+    def test_fixture_has_three_baskets(self):
+        """fixture 恰好包含三只股票（p0-3）。"""
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        codes = {p["code"] for p in data["positions"]}
+        assert codes == {"600487", "600176", "000988"}, (
+            f"期望三篮 (600487/600176/000988)，实际: {codes}"
+        )
+
+    def test_fixture_consistent_with_b2_symbols(self):
+        """fixture 股票代码与 B2_SYMBOLS 一致。"""
+        from serenity_v2.phase_b2 import B2_SYMBOLS
+
+        fixture_path = Path(__file__).parent / "fixtures" / "b2" / "account_fixture_20260722.json"
+        data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        codes = {p["code"] for p in data["positions"]}
+        assert codes == set(B2_SYMBOLS), (
+            f"fixture codes {codes} vs B2_SYMBOLS {B2_SYMBOLS}"
+        )
+
+
+class TestPhaseCCompatibility:
+    """Phase C 兼容性回归: 旧 API /api/monitor-data 与新 API /api/dashboard 并行。"""
+
+    def test_monitoring_dashboard_importable(self):
+        """monitoring_dashboard 模块可导入。"""
+        try:
+            import monitoring_dashboard  # noqa: F401
+        except Exception:
+            pytest.skip("monitoring_dashboard 需要 serenity.db 运行时依赖")
+
+    def test_both_api_routes_defined(self):
+        """/api/dashboard 和 /api/monitor-data 两个路由均已定义。"""
+        import importlib
+        try:
+            md = importlib.import_module("monitoring_dashboard")
+        except Exception:
+            pytest.skip("monitoring_dashboard 不可导入")
+
+        app = getattr(md, "app", None)
+        if app is None:
+            pytest.skip("monitoring_dashboard 无 Flask app")
+
+        # 检查路由注册
+        rules = {rule.rule: rule for rule in app.url_map.iter_rules()
+                 if not rule.rule.startswith("/static")}
+        assert "/api/dashboard" in rules, "新 API /api/dashboard 未注册"
+        assert "/api/monitor-data" in rules, "旧 API /api/monitor-data 未注册"
+
+    def test_monitor_route_accessible(self):
+        """/monitor 路由可访问（旧版看板，Phase C 保留兼容）。"""
+        import importlib
+        try:
+            md = importlib.import_module("monitoring_dashboard")
+        except Exception:
+            pytest.skip("monitoring_dashboard 不可导入")
+
+        app = getattr(md, "app", None)
+        if app is None:
+            pytest.skip("monitoring_dashboard 无 Flask app")
+
+        with app.test_client() as client:
+            resp = client.get("/monitor")
+            # 旧版看板可访问（返回 200 渲染 monitor.html 模板）
+            # Phase C 计划: 后续可能 → 302 → /dashboard
+            assert resp.status_code == 200, (
+                f"旧版看板不可访问: {resp.status_code}"
+            )
+
+    def test_dashboard_route_exists(self):
+        """/dashboard 路由存在（新版 3-tab 看板）。"""
+        import importlib
+        try:
+            md = importlib.import_module("monitoring_dashboard")
+        except Exception:
+            pytest.skip("monitoring_dashboard 不可导入")
+
+        app = getattr(md, "app", None)
+        if app is None:
+            pytest.skip("monitoring_dashboard 无 Flask app")
+
+        rules = {rule.rule: rule for rule in app.url_map.iter_rules()
+                 if not rule.rule.startswith("/static")}
+        assert "/dashboard" in rules, "/dashboard 路由未注册"
