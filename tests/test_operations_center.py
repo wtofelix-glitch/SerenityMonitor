@@ -3,9 +3,40 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    """固定 operations_center 的时钟，使时间敏感测试确定性化。
+
+    AS_OF 是一个固定锚点；测试数据日期基于它推算，而非 date.today()。
+    这样测试不随实际运行日期推移而过期。
+
+    注意：datetime.date 是 immutable type，不能 setattr 其 'today' 方法。
+    因此用轻量 fake 类替换 operations_center 模块中的 date 引用，只暴露
+    today() 与减法运算（供 get_data_quality_summary 计算 since 用）。
+    """
+    import operations_center
+
+    AS_OF = date(2026, 7, 10)
+
+    # 轻量 fake date 类：只暴露 today() 与 __sub__，供
+    # get_data_quality_summary 计算 since = today - timedelta(days) 用。
+    class _FakeDate:
+        _as_of = AS_OF
+
+        @classmethod
+        def today(cls):
+            return cls._as_of
+
+        def __sub__(self, other):
+            return self._as_of - other
+
+    monkeypatch.setattr(operations_center, "date", _FakeDate)
+    return AS_OF
 
 
 @pytest.fixture
@@ -85,20 +116,23 @@ def test_reconciliation_task_is_deduplicated(operations_db):
     assert tasks[0]["severity"] == "critical"
 
 
-def test_data_quality_summary_keeps_low_confidence_visible(operations_db):
+def test_data_quality_summary_keeps_low_confidence_visible(operations_db, fixed_clock):
     import operations_center
+
+    as_of = fixed_clock
+    in_window = (as_of - timedelta(days=1)).isoformat()  # 窗口内，确定性
 
     conn = operations_db.get_conn()
     conn.executemany(
         """
         INSERT INTO data_quality_log
             (code, date, quality_status, conflict_pct, warning)
-        VALUES (?, '2026-07-03', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
         [
-            ("000938", "high", 0, ""),
-            ("600585", "low", 0.017, "source conflict"),
-            ("600900", "missing", 0, "no source"),
+            ("000938", in_window, "high", 0, ""),
+            ("600585", in_window, "low", 0.017, "source conflict"),
+            ("600900", in_window, "missing", 0, "no source"),
         ],
     )
     conn.commit()
@@ -112,6 +146,47 @@ def test_data_quality_summary_keeps_low_confidence_visible(operations_db):
     assert result["missing"] == 1
     assert result["conflicts"] == 1
     assert len(result["warnings"]) == 2
+
+
+def test_data_quality_summary_window_boundary(operations_db, fixed_clock):
+    """验证 30 天窗口的包含/排除语义固定。
+
+    - 窗口内（as_of - 1）被查询
+    - 超 30 天（as_of - 31）不被查询
+    - 边界日（as_of - 30）被查询（WHERE date >= since，含边界）
+    """
+    import operations_center
+
+    as_of = fixed_clock
+    in_window = (as_of - timedelta(days=1)).isoformat()
+    boundary = (as_of - timedelta(days=30)).isoformat()   # 应被包含
+    outside = (as_of - timedelta(days=31)).isoformat()    # 应被排除
+
+    conn = operations_db.get_conn()
+    conn.executemany(
+        """
+        INSERT INTO data_quality_log
+            (code, date, quality_status, conflict_pct, warning)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            ("000938", in_window, "high", 0, ""),
+            ("600585", boundary, "low", 0.0, "boundary day"),
+            ("600900", outside, "missing", 0, "outside window"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    result = operations_center.get_data_quality_summary(days=30)
+
+    # 窗口内 + 边界日 被查，超窗排除
+    assert result["total"] == 2
+    # high=in_window 1 条；low=boundary 1 条（conflict_pct 0 → 非 conflict）
+    assert result["high_confidence"] == 1
+    assert result["low_confidence"] == 1
+    assert result["missing"] == 0
+    assert result["conflicts"] == 0
 
 
 def test_risk_tasks_use_reconciled_daily_loss_and_concentration(operations_db):
