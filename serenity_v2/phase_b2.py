@@ -386,6 +386,9 @@ class B2Metrics:
     signals_total: int = 0
     signals_created_unique: int = 0
     signals_skipped_idempotent: int = 0
+    # v28: 幂等统计 run/lifetime 分离
+    signals_skipped_idempotent_run: int = 0    # 本次运行的 delta
+    signals_skipped_idempotent_lifetime: int = 0  # 账本生命周期累计
     signals_no_decision: int = 0
     candidate_ACTION: int = 0
     effective_ACTION: int = 0
@@ -536,6 +539,9 @@ class B2Metrics:
             "signals_total": self.signals_total,
             "signals_created_unique": self.signals_created_unique,
             "signals_skipped_idempotent": self.signals_skipped_idempotent,
+            # v28: run/lifetime 分离字段
+            "signals_skipped_idempotent_run": self.signals_skipped_idempotent_run,
+            "signals_skipped_idempotent_lifetime": self.signals_skipped_idempotent_lifetime,
             "signals_no_decision": self.signals_no_decision,
             "candidate_ACTION": self.candidate_ACTION,
             "effective_ACTION": self.effective_ACTION,
@@ -683,20 +689,21 @@ class B2Metrics:
             "detail": f"events_created={self.events_created} >= events_deduplicated={self.events_deduplicated}",
         })
 
-        # ────── D. 信号方程 ──────
+        # ────── D. 信号方程 (v28: run-scoped delta) ──────
         eq5 = (self.signals_total == self.signals_created_unique
-               + self.signals_skipped_idempotent + self.signals_skipped_cooldown
+               + self.signals_skipped_idempotent_run + self.signals_skipped_cooldown
                + self.signals_no_decision)
         checks.append({
             "category": "data_integrity",
             "id": "SIGNAL_EQ1",
-            "name": "signals_total = created + skipped_idempotent + skipped_cooldown + no_decision",
+            "name": "signals_total = created + skipped_idempotent(run) + skipped_cooldown + no_decision",
             "pass": eq5,
             "detail": (f"signals_total={self.signals_total} == "
                        f"created({self.signals_created_unique}) + "
-                       f"skipped_idempotent({self.signals_skipped_idempotent}) + "
+                       f"skipped_idempotent(run)={self.signals_skipped_idempotent_run} + "
                        f"skipped_cooldown({self.signals_skipped_cooldown}) + "
-                       f"no_decision({self.signals_no_decision})"),
+                       f"no_decision({self.signals_no_decision})"
+                       f" (lifetime={self.signals_skipped_idempotent_lifetime})"),
         })
 
         # ────── E. 失败会计方程 ──────
@@ -729,21 +736,37 @@ class B2Metrics:
                        f"in_progress({self.ledger_in_progress})"),
         })
 
-        # ────── G. 生产 DB 不变量 (P0-1) ──────
+        # ────── G. 生产 DB 不变量 (v28: 客观 + 归因分离) ──────
+        # G1: 客观事实 — 生产 DB 全局 SHA256 是否变化
+        prod_unchanged = True  # default: no guard data → assume unchanged
         if prod_guard_before and prod_guard_after:
             b_main_hash = prod_guard_before.get("sha256")
             a_main_hash = prod_guard_after.get("sha256")
             if b_main_hash and a_main_hash:
                 prod_unchanged = (b_main_hash == a_main_hash)
-                checks.append({
-                    "category": "security",
-                    "id": "SEC_PROD_DB_UNCHANGED",
-                    "name": "生产 DB SHA256 不变",
-                    "pass": prod_unchanged,
-                    "detail": (f"before={b_main_hash[:12]}... "
-                               f"after={a_main_hash[:12]}... "
-                               f"{'✅ 未变' if prod_unchanged else '❌ 变化!'}"),
-                })
+            checks.append({
+                "category": "security",
+                "id": "SEC_PROD_DB_GLOBAL_UNCHANGED",
+                "name": "生产 DB SHA256 客观不变 (pre vs post)",
+                "pass": prod_unchanged,
+                "detail": (f"before={b_main_hash[:12]}... "
+                           f"after={a_main_hash[:12]}... "
+                           f"{'✅ 未变' if prod_unchanged else '❌ 客观变化!'}"),
+            })
+
+        # G2: 归因判断 — Runner 是否写入生产 DB
+        runner_no_write = (self.real_push_count == 0
+                           and self.real_trade_count == 0
+                           and self.account_modifications == 0)
+        checks.append({
+            "category": "security",
+            "id": "SEC_RUNNER_DID_NOT_MODIFY_PROD_DB",
+            "name": "Runner 归因: 零生产写入 (推送/成交/账户修改=0)",
+            "pass": runner_no_write,
+            "detail": (f"real_pushes={self.real_push_count} "
+                       f"real_trades={self.real_trade_count} "
+                       f"account_mods={self.account_modifications}"),
+        })
 
         # ────── H. 零副作用硬门禁 ──────
         zero_side_effects = (self.real_push_count == 0 and self.real_trade_count == 0
@@ -812,7 +835,7 @@ class B2Metrics:
         all_pass = failed == 0
 
         return {
-            "audit_version": "v27",
+            "audit_version": "v28",
             "timestamp": datetime.now(tz=CST).isoformat(timespec="seconds"),
             "run_id": self.run_id,
             "all_pass": all_pass,
@@ -828,7 +851,7 @@ class B2Metrics:
     def print_audit_report(self, audit: dict):
         """打印人类可读的审计报告。"""
         print(f"\n{'='*70}")
-        print(f"  Postflight 不变量与安全审计 (v27)")
+        print(f"  Postflight 不变量与安全审计 (v28)")
         print(f"{'='*70}")
         print(f"  run_id: {audit['run_id']}")
         print(f"  timestamp: {audit['timestamp']}")
@@ -864,10 +887,11 @@ class B2Metrics:
 
     # ── v27: 报告复审与脱敏 ──
 
-    def review_report(self) -> dict:
-        """复审 B2 报告质量与敏感信息。
+    def review_report(self, audit_result: dict = None) -> dict:
+        """复审 B2 报告质量与敏感信息 (v28: 集成 postflight 审计)。
 
         返回审查结果: {ok, warnings, findings}。
+        audit_result: 若提供，失败的不变量将计入 findings。
         """
         import re
         report = self.to_report_dict()
@@ -914,6 +938,15 @@ class B2Metrics:
             findings.append("cycles_completed 为负值")
         if report.get("duration_seconds", 0) < 0:
             findings.append("duration_seconds 为负值")
+
+        # v28: 检查 postflight 审计结果 — 任一无变数失败均为 finding
+        if audit_result is not None and not audit_result.get("all_pass", True):
+            for c in audit_result.get("checks", []):
+                if not c.get("pass", True):
+                    findings.append(
+                        f"postflight invariant failed: [{c['id']}] "
+                        f"{c.get('name', c['id'])} — {c.get('detail', '')}"
+                    )
 
         return {
             "ok": len(findings) == 0,
@@ -962,7 +995,7 @@ class B2Metrics:
 
         # 标记脱敏版本
         sanitized["_desensitized"] = True
-        sanitized["_desensitized_version"] = "v27"
+        sanitized["_desensitized_version"] = "v28"
 
         return sanitized
 
@@ -1307,6 +1340,10 @@ class B2Runner:
             desk=self.desk, ledger=self.ledger,
             worker_id=self.metrics.run_id,
         )
+
+        # v28: T0 快照 — 用于计算 run-scoped delta
+        self._idempotent_skipped_at_T0 = (
+            self.idempotent.stats.get("already_processed", 0))
 
         # P0-2: 稳定上下文键 — 用于信号幂等
         # strategy_id: B2 影子运行器唯一标识（非 Python object repr）
@@ -2221,10 +2258,15 @@ class B2Runner:
             self.metrics.ledger_in_progress = ledger_stats.get("PROCESSING", 0)
             self.metrics.ledger_already_processed = (
                 self.idempotent.stats.get("already_processed", 0))
-            # v14: 连接幂等统计 — signals_skipped_idempotent 从处理器统计填充
-            # duplicate_signals_created 为独立字段（跨事件精确重复计数，可不同值）
-            self.metrics.signals_skipped_idempotent = (
-                self.idempotent.stats.get("already_processed", 0))
+            # v28: 幂等统计 — run-scoped delta + lifetime
+            # 修复 SIGNAL_EQ1 混合 run/lifetime 作用域缺陷。
+            lifetime_skipped = self.idempotent.stats.get("already_processed", 0)
+            t0_skipped = getattr(self, '_idempotent_skipped_at_T0', 0)
+            self.metrics.signals_skipped_idempotent_run = (
+                max(0, lifetime_skipped - t0_skipped))
+            self.metrics.signals_skipped_idempotent_lifetime = lifetime_skipped
+            # 保留旧字段兼容（= lifetime，标记 deprecated）
+            self.metrics.signals_skipped_idempotent = lifetime_skipped
         except Exception:
             self.metrics.report_failed += 1
 
@@ -2305,6 +2347,19 @@ class B2Runner:
             shadow_db_path=str(self.shadow_db),
         )
         self.metrics.print_audit_report(audit)
+
+        # v28: review 在 postflight audit 之后执行，集成审计结果
+        review = self.metrics.review_report(audit_result=audit)
+        if not review["ok"]:
+            for f in review["findings"]:
+                self.metrics.violations.append(f"REVIEW: {f}")
+            if self.metrics.status == "COMPLETED":
+                self.metrics.status = "AUTO_STOPPED"
+            self.metrics.auto_stop_triggered = True
+            extra = f"review({review['findings_count']} findings)"
+            self.metrics.auto_stop_reason = (
+                self.metrics.auto_stop_reason + "; " + extra
+            ) if self.metrics.auto_stop_reason else extra
 
         # 审计失败触发自动停止
         if not audit["all_pass"]:

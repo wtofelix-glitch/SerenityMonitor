@@ -3632,6 +3632,7 @@ class TestPostflightAudit:
         m.signals_total = 20
         m.signals_created_unique = 12
         m.signals_skipped_idempotent = 3
+        m.signals_skipped_idempotent_run = 3  # v28: run-scoped delta
         m.signals_skipped_cooldown = 2
         m.signals_no_decision = 3
 
@@ -3706,7 +3707,7 @@ class TestPostflightAudit:
         assert "LEDGER_EQ1" in failed_ids
 
     def test_audit_detects_prod_db_change(self):
-        """生产 DB 哈希变化时审计检测到。"""
+        """生产 DB 哈希变化时审计检测到 (v28: GLOBAL_UNCHANGED)。"""
         m = self._make_clean_metrics()
         audit = m.audit_postflight_invariants(
             prod_guard_before={"sha256": "aaa111222333aaa111222333aaa111222333aaa111222333aaa111222333aaa111"},
@@ -3714,7 +3715,7 @@ class TestPostflightAudit:
         )
         assert audit["all_pass"] is False
         failed_ids = {c["id"] for c in audit["checks"] if not c["pass"]}
-        assert "SEC_PROD_DB_UNCHANGED" in failed_ids
+        assert "SEC_PROD_DB_GLOBAL_UNCHANGED" in failed_ids
 
     def test_audit_detects_side_effects(self):
         """有真实副作用时审计检测到。"""
@@ -3896,7 +3897,7 @@ class TestReportDesensitization:
         from serenity_v2.phase_b2 import B2Metrics
         sanitized = B2Metrics.desensitize_report({"run_id": "B2_TEST"})
         assert sanitized["_desensitized"] is True
-        assert sanitized["_desensitized_version"] == "v27"
+        assert sanitized["_desensitized_version"] == "v28"  # v28 bump
 
     def test_desensitize_idempotent(self):
         """重复脱敏不改变结果（幂等）。"""
