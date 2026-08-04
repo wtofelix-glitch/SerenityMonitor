@@ -21,7 +21,7 @@ class TestV28PostflightAudit:
         m.raw_received = 100; m.raw_stored = 90; m.raw_duplicates = 10
         m.events_created = 50; m.events_deduplicated = 5
         m.signals_total = 20; m.signals_created_unique = 12
-        m.signals_candidate_total_run = 20  # v29: 候选信号守恒 20 == 12+3+2+3
+        m.signals_candidate_total_run = 17  # v29: 3(idempotent)+12(emitted)+2(cooldown)
         m.signals_skipped_idempotent_run = 3; m.signals_skipped_idempotent_lifetime = 3
         m.signals_skipped_idempotent = 3; m.signals_skipped_cooldown = 2
         m.signals_no_decision = 3
@@ -89,22 +89,38 @@ class TestV28PostflightAudit:
     def test_v28_signal_eq1_detects_mismatch(self):
         """v28/v29: SIGNAL_EQ1 fails when candidate conservation doesn't balance."""
         m = self._make_clean()
-        m.signals_candidate_total_run = 25  # 12+3+2+3=20 != 25
+        m.signals_candidate_total_run = 25  # 3+12+2=17 != 25
         audit = m.audit_postflight_invariants()
         failed = {c["id"] for c in audit["checks"] if not c["pass"]}
         assert "SIGNAL_EQ1" in failed
 
     def test_v29_signal_eq1_candidate_conservation(self):
-        """v29: 3. cooldown=176, emitted=4 → candidate_total must be 180."""
+        """v29: 3. cooldown=176, emitted=4, idempotent=0 → candidate_total must be 180."""
         m = self._make_clean()
         m.signals_created_unique = 4; m.signals_total = 4
         m.signals_skipped_idempotent_run = 0
         m.signals_skipped_cooldown = 176; m.signals_no_decision = 0
-        m.signals_candidate_total_run = 180  # 4+0+176+0
+        m.signals_candidate_total_run = 180  # 0(idempotent)+4(emitted)+176(cooldown)
         audit = m.audit_postflight_invariants()
         signal = [c for c in audit["checks"] if c["id"] == "SIGNAL_EQ1"][0]
         assert signal["pass"] is True
-        assert "180" in signal["detail"] or "candidate_total_run=180" in signal["detail"]
+        assert "180" in signal["detail"]
+
+    def test_v29_signal_eq1_nonzero_idempotent(self):
+        """v29: 非零幂等场景 — skipped_idempotent_run>0 时候选守恒仍成立。
+
+        candidate_total_run 必须含幂等跳过部分（process_events 内部丢弃、不进 cooldown）。
+        场景：idempotent=5, emitted=3, cooldown=2 → candidate = 5+(3+2)=10
+        方程：candidate(10) == idempotent(5)+emitted(3)+cooldown(2)
+        """
+        m = self._make_clean()
+        m.signals_created_unique = 3; m.signals_total = 3
+        m.signals_skipped_idempotent_run = 5  # 非零幂等 delta
+        m.signals_skipped_cooldown = 2; m.signals_no_decision = 1
+        m.signals_candidate_total_run = 10  # 5+3+2
+        audit = m.audit_postflight_invariants()
+        signal = [c for c in audit["checks"] if c["id"] == "SIGNAL_EQ1"][0]
+        assert signal["pass"] is True, f"FAIL: {signal['detail']}"
 
     def test_v29_signal_eq1_t1_lt_t0_fails(self):
         """v29: 4. T1_lifetime < T0_lifetime → fail-closed (negative delta), no clamp."""

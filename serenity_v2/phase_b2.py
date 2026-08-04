@@ -466,6 +466,10 @@ class B2Metrics:
     signal_details: list = field(default_factory=list)
     violations: list = field(default_factory=list)
 
+    # ── v29: 结构化 postflight / review 结果（供 Live gate 读取，非 console grep）──
+    postflight_audit: dict = field(default_factory=dict)
+    review_result: dict = field(default_factory=dict)
+
     # ── v10: 结构化报告序列化 ──
 
     def to_report_dict(self) -> dict:
@@ -633,6 +637,43 @@ class B2Metrics:
         report["signal_details"] = self.signal_details
         report["violations"] = self.violations
 
+        # ── v29: 结构化 postflight / review（Live gate canonical 依据，非 console grep）──
+        if self.postflight_audit:
+            pa = self.postflight_audit
+            report["postflight"] = {
+                "run_id": self.run_id,           # v29: 校验只读本次运行文件
+                "all_pass": pa.get("all_pass", False),
+                "total_checks": pa.get("total_checks", 0),
+                "passed": pa.get("passed", 0),
+                "failed": pa.get("failed", 0),
+                "failed_invariant_ids": [
+                    c["id"] for c in pa.get("checks", []) if not c.get("pass", True)
+                ],
+                "checks": pa.get("checks", []),
+            }
+        else:
+            report["postflight"] = {
+                "run_id": self.run_id,
+                "all_pass": False, "total_checks": 0, "passed": 0,
+                "failed": 0, "failed_invariant_ids": [], "checks": [],
+            }
+        if self.review_result:
+            rv = self.review_result
+            report["review"] = {
+                "run_id": self.run_id,           # v29: 校验只读本次运行文件
+                "ok": rv.get("ok", False),
+                "findings_count": rv.get("findings_count", 0),
+                "findings": rv.get("findings", []),
+                "warnings_count": rv.get("warnings_count", 0),
+                "warnings": rv.get("warnings", []),
+            }
+        else:
+            report["review"] = {
+                "run_id": self.run_id,
+                "ok": False, "findings_count": 0, "findings": [],
+                "warnings_count": 0, "warnings": [],
+            }
+
         return report
 
     # ── v27: 综合后飞行不变量审计 ──
@@ -695,24 +736,27 @@ class B2Metrics:
         })
 
         # ────── D. 信号方程 (v29: 候选信号守恒，统一 scope/unit) ──────
-        # 守恒模型：
-        #   candidate_recommendations_run (unit=CANDIDATE, 信号台处理总数)
-        #   = emitted (unit=EMITTED_SIGNAL) + skipped_idempotent_run (unit=CANDIDATE)
-        #   + skipped_cooldown (unit=CANDIDATE) + no_decision (unit=EMITTED_SIGNAL)
-        # 左侧 candidate_total_run 由 cooldown.total_checked 提供（每候选都经 cooldown 检查）。
+        # 守恒模型（无重复计数）：
+        #   candidate_total_run (unit=CANDIDATE, 信号台处理的全部候选)
+        #     = skipped_idempotent_run (幂等跳过, 不进入cooldown)
+        #     + cooldown_total_checked_run (进入cooldown检查的候选)
+        #   cooldown_total_checked_run = emitted (unit=EMITTED_SIGNAL)
+        #     + skipped_cooldown (unit=CANDIDATE)
+        #   no_decision ⊆ emitted（_record_signal 里 emitted 同时计 no_decision），
+        #   故不单列，避免重复计数。
+        # 展开 → candidate_total_run = skipped_idempotent_run + emitted + skipped_cooldown
         eq5 = (self.signals_candidate_total_run == self.signals_created_unique
-               + self.signals_skipped_idempotent_run + self.signals_skipped_cooldown
-               + self.signals_no_decision)
+               + self.signals_skipped_idempotent_run + self.signals_skipped_cooldown)
         checks.append({
             "category": "data_integrity",
             "id": "SIGNAL_EQ1",
-            "name": "candidate_total_run = emitted + skipped_idempotent(run) + skipped_cooldown + no_decision",
+            "name": "candidate_total_run = skipped_idempotent(run) + emitted + skipped_cooldown",
             "pass": eq5,
             "detail": (f"candidate_total_run={self.signals_candidate_total_run} == "
-                       f"emitted({self.signals_created_unique}) + "
                        f"skipped_idempotent(run)={self.signals_skipped_idempotent_run} + "
-                       f"skipped_cooldown({self.signals_skipped_cooldown}) + "
-                       f"no_decision({self.signals_no_decision})"
+                       f"emitted({self.signals_created_unique}) + "
+                       f"skipped_cooldown({self.signals_skipped_cooldown})"
+                       f" [no_decision({self.signals_no_decision}) ⊆ emitted]"
                        f" (lifetime={self.signals_skipped_idempotent_lifetime})"),
         })
 
@@ -2294,8 +2338,13 @@ class B2Runner:
 
         # P1: 同步 cooldown tracker 统计到 metrics
         self.metrics.signals_skipped_cooldown = self.cooldown.skipped_count
-        # v29: 候选信号总数 = 本次 run 信号台检查的信号总数（每候选都经 cooldown 检查）
-        self.metrics.signals_candidate_total_run = self.cooldown.total_checked
+        # v29: 候选信号总数 = 本次 run 全部候选 = 幂等跳过 + 进入 cooldown 检查的候选。
+        # 幂等跳过的候选在 process_events 内部被丢弃、不进入 cooldown，
+        # 所以必须加上 skipped_idempotent_run 才是完整 candidate_total_run。
+        # (v29.0 曾错误定义为 cooldown.total_checked，在 skipped_idempotent_run>0 时失守)
+        self.metrics.signals_candidate_total_run = (
+            self.metrics.signals_skipped_idempotent_run
+            + self.cooldown.total_checked)
         self.metrics.cooldown_reset_reason = self.cooldown.reset_reason
 
         # v19: 飞行后 cooldown 上下文一致性验证
@@ -2370,10 +2419,12 @@ class B2Runner:
             prod_guard_after=prod_after,
             shadow_db_path=str(self.shadow_db),
         )
+        self.metrics.postflight_audit = audit  # v29: 结构化审计结果供 gate 读取
         self.metrics.print_audit_report(audit)
 
         # v28: review 在 postflight audit 之后执行，集成审计结果
         review = self.metrics.review_report(audit_result=audit)
+        self.metrics.review_result = review  # v29: 结构化 review 结果供 gate 读取
         if not review["ok"]:
             for f in review["findings"]:
                 self.metrics.violations.append(f"REVIEW: {f}")
