@@ -1799,6 +1799,16 @@ class B2Runner:
         print(f"  fixture:        {getattr(self._fixture, 'fixture_id', 'N/A')}")
         print(f"{'='*70}\n")
 
+        # ── v28.2: 主循环开始前重新快照 T0 幂等账本 ──
+        # 构造器 _init_env 在 __init__ 时快照(0)，但到主循环真正启动时，
+        # 持久化账本已累计上次 run 的跳过数(如162)，导致 run-scoped delta 错误
+        # (SIGNAL_EQ1 不成立)。必须在首周期抓取前重新快照。
+        try:
+            self._idempotent_skipped_at_T0 = (
+                self.idempotent.stats.get("already_processed", 0))
+        except Exception:
+            self._idempotent_skipped_at_T0 = 0
+
         try:
             while True:
                 now_mono = _time.monotonic()
