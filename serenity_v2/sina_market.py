@@ -637,6 +637,37 @@ def normalized_quote_to_event(
     ts = now.isoformat(timespec="seconds")
 
     prev = nq.previous_close if nq.previous_close > 0 else nq.price
+    # 零值防护: Sina 超时/空行情时 price 与 previous_close 均为 0 → prev=0 → 除零崩溃。
+    # 异常行情隔离为 price_anomaly, 不入正常事件流, 避免 runner 崩溃。
+    if prev <= 0 or nq.price <= 0:
+        event = EventRecord(
+            symbol=nq.symbol, event_type="price_anomaly",
+            headline=f"{nq.name}({nq.symbol}) 行情异常(空/零值)",
+            summary="Sina行情超时或返回空值, 已隔离",
+            source=SourceInfo(
+                name="Sina实时行情", level="A",
+                url=f"https://hq.sinajs.cn/list={nq.symbol}",
+                publish_time=nq.source_timestamp or ts,
+            ),
+            timestamps=TimestampSet(
+                event_time=nq.source_timestamp or ts,
+                publish_time=nq.source_timestamp or ts,
+                collected_at=ts, verified_at=ts, expires_at="",
+            ),
+            payload=EventPayload(data={
+                "price": nq.price, "change_pct": 0.0,
+                "volume": 0, "amount": 0, "turnover_rate": 0.0,
+            }),
+            related=RelatedInfo(direct_symbols=[nq.symbol]),
+            impact=ImpactAssessment(
+                direction="neutral", strength="low", horizon="intraday",
+            ),
+            verification=VerificationResult(status="pending", method="none"),
+            account_relevance=AccountRelevance(is_holding=is_holding),
+            action_eligible=False, signal_eligible=False, priority="P3",
+        )
+        return event, True, "empty_or_zero_quote"
+
     change_pct = round((nq.price - prev) / prev * 100, 2)
 
     if change_pct > 4:
