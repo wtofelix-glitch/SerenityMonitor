@@ -383,13 +383,16 @@ class B2Metrics:
     event_processing_failed: int = 0
 
     # ── 信号层 (P0-4 扩展) ──
-    signals_total: int = 0
-    signals_created_unique: int = 0
+    signals_total: int = 0                    # emitted 信号数 (未被 cooldown/idempotent 抑制)
+    signals_created_unique: int = 0           # = signals_total (每次 emit +1)
+    # v29: 候选信号守恒 — 本次 run 内信号台处理的所有候选信号总数
+    # scope=RUN  unit=CANDIDATE  source=COOLDOWN(total_checked)
+    signals_candidate_total_run: int = 0
     signals_skipped_idempotent: int = 0
     # v28: 幂等统计 run/lifetime 分离
-    signals_skipped_idempotent_run: int = 0    # 本次运行的 delta
-    signals_skipped_idempotent_lifetime: int = 0  # 账本生命周期累计
-    signals_no_decision: int = 0
+    signals_skipped_idempotent_run: int = 0    # scope=RUN  本次运行的 delta
+    signals_skipped_idempotent_lifetime: int = 0  # scope=LIFETIME 账本生命周期累计
+    signals_no_decision: int = 0              # scope=RUN  unit=EMITTED_SIGNAL
     candidate_ACTION: int = 0
     effective_ACTION: int = 0
     ACTION_downgraded: int = 0
@@ -538,6 +541,8 @@ class B2Metrics:
         report.update({
             "signals_total": self.signals_total,
             "signals_created_unique": self.signals_created_unique,
+            # v29: 候选信号守恒
+            "signals_candidate_total_run": self.signals_candidate_total_run,
             "signals_skipped_idempotent": self.signals_skipped_idempotent,
             # v28: run/lifetime 分离字段
             "signals_skipped_idempotent_run": self.signals_skipped_idempotent_run,
@@ -689,17 +694,22 @@ class B2Metrics:
             "detail": f"events_created={self.events_created} >= events_deduplicated={self.events_deduplicated}",
         })
 
-        # ────── D. 信号方程 (v28: run-scoped delta) ──────
-        eq5 = (self.signals_total == self.signals_created_unique
+        # ────── D. 信号方程 (v29: 候选信号守恒，统一 scope/unit) ──────
+        # 守恒模型：
+        #   candidate_recommendations_run (unit=CANDIDATE, 信号台处理总数)
+        #   = emitted (unit=EMITTED_SIGNAL) + skipped_idempotent_run (unit=CANDIDATE)
+        #   + skipped_cooldown (unit=CANDIDATE) + no_decision (unit=EMITTED_SIGNAL)
+        # 左侧 candidate_total_run 由 cooldown.total_checked 提供（每候选都经 cooldown 检查）。
+        eq5 = (self.signals_candidate_total_run == self.signals_created_unique
                + self.signals_skipped_idempotent_run + self.signals_skipped_cooldown
                + self.signals_no_decision)
         checks.append({
             "category": "data_integrity",
             "id": "SIGNAL_EQ1",
-            "name": "signals_total = created + skipped_idempotent(run) + skipped_cooldown + no_decision",
+            "name": "candidate_total_run = emitted + skipped_idempotent(run) + skipped_cooldown + no_decision",
             "pass": eq5,
-            "detail": (f"signals_total={self.signals_total} == "
-                       f"created({self.signals_created_unique}) + "
+            "detail": (f"candidate_total_run={self.signals_candidate_total_run} == "
+                       f"emitted({self.signals_created_unique}) + "
                        f"skipped_idempotent(run)={self.signals_skipped_idempotent_run} + "
                        f"skipped_cooldown({self.signals_skipped_cooldown}) + "
                        f"no_decision({self.signals_no_decision})"
@@ -2272,8 +2282,10 @@ class B2Runner:
             # 修复 SIGNAL_EQ1 混合 run/lifetime 作用域缺陷。
             lifetime_skipped = self.idempotent.stats.get("already_processed", 0)
             t0_skipped = getattr(self, '_idempotent_skipped_at_T0', 0)
+            # v29: run delta 不 clamp。T1<T0 时得负值 → SIGNAL_EQ1 失衡 → fail-closed。
+            # 不得用 max(0,...) 静默掩盖（v28 曾 clamp 导致 delta=0 掩盖了账本回退）。
             self.metrics.signals_skipped_idempotent_run = (
-                max(0, lifetime_skipped - t0_skipped))
+                lifetime_skipped - t0_skipped)
             self.metrics.signals_skipped_idempotent_lifetime = lifetime_skipped
             # 保留旧字段兼容（= lifetime，标记 deprecated）
             self.metrics.signals_skipped_idempotent = lifetime_skipped
@@ -2282,6 +2294,8 @@ class B2Runner:
 
         # P1: 同步 cooldown tracker 统计到 metrics
         self.metrics.signals_skipped_cooldown = self.cooldown.skipped_count
+        # v29: 候选信号总数 = 本次 run 信号台检查的信号总数（每候选都经 cooldown 检查）
+        self.metrics.signals_candidate_total_run = self.cooldown.total_checked
         self.metrics.cooldown_reset_reason = self.cooldown.reset_reason
 
         # v19: 飞行后 cooldown 上下文一致性验证

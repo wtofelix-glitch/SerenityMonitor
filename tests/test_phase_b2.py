@@ -3631,6 +3631,7 @@ class TestPostflightAudit:
         # 信号
         m.signals_total = 20
         m.signals_created_unique = 12
+        m.signals_candidate_total_run = 20  # v29: 候选守恒 20 == 12+3+2+3
         m.signals_skipped_idempotent = 3
         m.signals_skipped_idempotent_run = 3  # v28: run-scoped delta
         m.signals_skipped_cooldown = 2

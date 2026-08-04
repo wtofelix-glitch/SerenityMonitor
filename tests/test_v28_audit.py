@@ -21,6 +21,7 @@ class TestV28PostflightAudit:
         m.raw_received = 100; m.raw_stored = 90; m.raw_duplicates = 10
         m.events_created = 50; m.events_deduplicated = 5
         m.signals_total = 20; m.signals_created_unique = 12
+        m.signals_candidate_total_run = 20  # v29: 候选信号守恒 20 == 12+3+2+3
         m.signals_skipped_idempotent_run = 3; m.signals_skipped_idempotent_lifetime = 3
         m.signals_skipped_idempotent = 3; m.signals_skipped_cooldown = 2
         m.signals_no_decision = 3
@@ -75,7 +76,7 @@ class TestV28PostflightAudit:
         assert "SEC_RUNNER_DID_NOT_MODIFY_PROD_DB" in ids
 
     def test_v28_signal_eq1_run_scoped(self):
-        """v28: SIGNAL_EQ1 uses run-scoped delta, not lifetime."""
+        """v28/v29: SIGNAL_EQ1 uses run-scoped delta (candidate conservation), not lifetime."""
         m = self._make_clean()
         m.signals_skipped_idempotent_run = 3
         m.signals_skipped_idempotent_lifetime = 999  # large lifetime, small run delta
@@ -86,9 +87,29 @@ class TestV28PostflightAudit:
         assert "lifetime=999" in signal["detail"]
 
     def test_v28_signal_eq1_detects_mismatch(self):
-        """v28: SIGNAL_EQ1 fails when run-scoped equation doesn't balance."""
+        """v28/v29: SIGNAL_EQ1 fails when candidate conservation doesn't balance."""
         m = self._make_clean()
-        m.signals_skipped_idempotent_run = 0  # 12+0+2+3=17 != 20
+        m.signals_candidate_total_run = 25  # 12+3+2+3=20 != 25
+        audit = m.audit_postflight_invariants()
+        failed = {c["id"] for c in audit["checks"] if not c["pass"]}
+        assert "SIGNAL_EQ1" in failed
+
+    def test_v29_signal_eq1_candidate_conservation(self):
+        """v29: 3. cooldown=176, emitted=4 → candidate_total must be 180."""
+        m = self._make_clean()
+        m.signals_created_unique = 4; m.signals_total = 4
+        m.signals_skipped_idempotent_run = 0
+        m.signals_skipped_cooldown = 176; m.signals_no_decision = 0
+        m.signals_candidate_total_run = 180  # 4+0+176+0
+        audit = m.audit_postflight_invariants()
+        signal = [c for c in audit["checks"] if c["id"] == "SIGNAL_EQ1"][0]
+        assert signal["pass"] is True
+        assert "180" in signal["detail"] or "candidate_total_run=180" in signal["detail"]
+
+    def test_v29_signal_eq1_t1_lt_t0_fails(self):
+        """v29: 4. T1_lifetime < T0_lifetime → fail-closed (negative delta), no clamp."""
+        m = self._make_clean()
+        m.signals_skipped_idempotent_run = -5  # T1<T0 负 delta（若 clamp 为 0 则掩盖）
         audit = m.audit_postflight_invariants()
         failed = {c["id"] for c in audit["checks"] if not c["pass"]}
         assert "SIGNAL_EQ1" in failed
@@ -167,6 +188,28 @@ class TestV28ReportReview:
         m = self._make_clean()
         result = m.review_report(audit_result={"all_pass": True, "checks": []})
         assert result["ok"] is True
+        assert result["findings_count"] == 0
+
+    def test_v29_signal_eq1_fail_produces_review_finding(self):
+        """v29: 6. SIGNAL_EQ1=FAIL must produce >=1 Review finding."""
+        m = self._make_clean()
+        failed_audit = {"all_pass": False, "checks": [
+            {"id": "SIGNAL_EQ1", "name": "candidate conservation", "pass": False,
+             "detail": "candidate_total_run=4 == emitted(4)+skip(0)+cooldown(176)+nodec(0)"},
+        ]}
+        result = m.review_report(audit_result=failed_audit)
+        assert result["ok"] is False
+        assert result["findings_count"] >= 1
+        assert any("SIGNAL_EQ1" in f for f in result["findings"])
+
+    def test_v29_all_pass_audit_zero_findings(self):
+        """v29: 7. SIGNAL_EQ1=PASS and all invariants pass → findings=0."""
+        m = self._make_clean()
+        result = m.review_report(audit_result={"all_pass": True, "checks": [
+            {"id": "SIGNAL_EQ1", "pass": True}, {"id": "SCHED_EQ1", "pass": True},
+        ]})
+        assert result["ok"] is True
+        assert result["findings_count"] == 0
 
     def test_review_detects_real_pushes(self):
         m = self._make_clean(); m.real_push_count = 1
