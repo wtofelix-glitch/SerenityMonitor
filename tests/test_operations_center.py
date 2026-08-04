@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -89,16 +89,18 @@ def test_data_quality_summary_keeps_low_confidence_visible(operations_db):
     import operations_center
 
     conn = operations_db.get_conn()
+    # 用相对日期（昨天），确保落在 get_data_quality_summary(days=30) 窗口内
+    insert_date = (date.today() - timedelta(days=1)).isoformat()
     conn.executemany(
         """
         INSERT INTO data_quality_log
             (code, date, quality_status, conflict_pct, warning)
-        VALUES (?, '2026-07-03', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
         [
-            ("000938", "high", 0, ""),
-            ("600585", "low", 0.017, "source conflict"),
-            ("600900", "missing", 0, "no source"),
+            ("000938", insert_date, "high", 0, ""),
+            ("600585", insert_date, "low", 0.017, "source conflict"),
+            ("600900", insert_date, "missing", 0, "no source"),
         ],
     )
     conn.commit()

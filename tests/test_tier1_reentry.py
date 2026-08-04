@@ -27,10 +27,6 @@ class TestStateFileIO:
         assert _load_state() == {}
         tier1_reentry.STATE_PATH = original_path
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="SANDBOX-001: macOS sandbox blocks /tmp/ writes. Passes outside sandbox; unrelated to B2/runner/isolation.",
-    )
     def test_load_invalid_json(self, monkeypatch):
         """损坏的 JSON 文件返回空字典"""
         monkeypatch.setattr('tier1_reentry.STATE_PATH', '/tmp/_test_bad.json')
@@ -40,10 +36,6 @@ class TestStateFileIO:
         assert result == {}
         os.remove('/tmp/_test_bad.json')
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="SANDBOX-001: macOS sandbox blocks /tmp/ writes. Passes outside sandbox; unrelated to B2/runner/isolation.",
-    )
     def test_save_and_load_roundtrip(self, monkeypatch):
         """保存后能正确加载"""
         monkeypatch.setattr('tier1_reentry.STATE_PATH', '/tmp/_test_round.json')
@@ -54,10 +46,6 @@ class TestStateFileIO:
         assert loaded["002281"]["last_push_date"] == "2026-06-08"
         os.remove('/tmp/_test_round.json')
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="SANDBOX-001: macOS sandbox blocks /tmp/ writes. Passes outside sandbox; unrelated to B2/runner/isolation.",
-    )
     def test_save_empty_dict(self, monkeypatch):
         """保存空字典不崩溃"""
         monkeypatch.setattr('tier1_reentry.STATE_PATH', '/tmp/_test_empty.json')
