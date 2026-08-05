@@ -1,0 +1,91 @@
+{
+ "anomalies": [
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 15:14:45",
+   "id": 605,
+   "level": "A",
+   "message": "止损触发 (atr_dynamic): -21.0% ≤ -9%",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "SELL_STOP"
+  },
+  {
+   "code": "600141",
+   "created_at": "2026-07-17 15:14:44",
+   "id": 604,
+   "level": "C",
+   "message": "⚠️ **兴发集团(600141) 连续下跌预警！**\n最近5个交易日中4次收跌\n累计跌幅 19.0%\n当前 29.02 元\n建议检查持仓逻辑是否改变",
+   "name": "兴发集团",
+   "price": 29.02,
+   "type": "consecutive_decline"
+  },
+  {
+   "code": "600141",
+   "created_at": "2026-07-17 15:14:44",
+   "id": 603,
+   "level": "C",
+   "message": "⚠️ **兴发集团(600141) 下跌 -3.5%**\n当前 29.02 元，成交量正常\n建议关注",
+   "name": "兴发集团",
+   "price": 29.02,
+   "type": "price_drop"
+  },
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 15:14:43",
+   "id": 602,
+   "level": "C",
+   "message": "⚠️ **华工科技(000988) 连续下跌预警！**\n最近5个交易日中4次收跌\n累计跌幅 31.6%\n当前 117.62 元\n建议检查持仓逻辑是否改变",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "consecutive_decline"
+  },
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 15:14:43",
+   "id": 601,
+   "level": "A",
+   "message": "🚨🔴 **华工科技(000988) 紧急卖出预警！**\n单日暴跌 -10.0%，当前 117.62 元\n建议立即评估止损！",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "price_drop"
+  }
+ ],
+ "count": 10,
+ "emergencies": [
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 15:14:45",
+   "id": 605,
+   "level": "A",
+   "message": "止损触发 (atr_dynamic): -21.0% ≤ -9%",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "SELL_STOP"
+  },
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 15:14:43",
+   "id": 601,
+   "level": "A",
+   "message": "🚨🔴 **华工科技(000988) 紧急卖出预警！**\n单日暴跌 -10.0%，当前 117.62 元\n建议立即评估止损！",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "price_drop"
+  },
+  {
+   "code": "000988",
+   "created_at": "2026-07-17 14:46:18",
+   "id": 600,
+   "level": "A",
+   "message": "止损触发 (atr_dynamic): -21.0% ≤ -9%",
+   "name": "华工科技",
+   "price": 117.62,
+   "type": "SELL_STOP"
+  }
+ ],
+ "emergency_count": 5,
+ "info_count": 5,
+ "ok": true,
+ "warning_count": 0
+}

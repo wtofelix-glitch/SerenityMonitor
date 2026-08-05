@@ -432,14 +432,13 @@ class SentinelEngine:
         }
 
     def get_portfolio_fusion(self) -> list[dict]:
-        """对 Serenity 当前持仓池 + 观察池逐一计算哨兵影响"""
-        from config import ALL_CODES, STOCK_MAP
+        from config import ALL_CODES, STOCK_MAP, get_stock_name
 
         results = []
         for code in ALL_CODES:
             fusion = self.compute_sentinel_bonus(code)
             if fusion["source_count"] > 0 or code in WATCHLIST_MAP:
-                name = STOCK_MAP.get(code, {}).get("name", code)
+                name = get_stock_name(code)
                 results.append({
                     "code": code,
                     "name": name,

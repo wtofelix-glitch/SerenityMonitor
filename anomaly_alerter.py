@@ -15,8 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, datetime
 from data_engine import fetch_realtime
-from portfolio import PortfolioManager
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 from db import get_conn
 
 
@@ -45,7 +44,7 @@ def check_anomalies():
         code = pos["code"]
         if code == "CASH":
             continue  # CASH 不是股票，不参与异常检测
-        name = pos.get("name", STOCK_MAP.get(code, {}).get("name", code))
+        name = pos.get("name", get_stock_name(code))
         rt = rt_map.get(code, {})
         price = rt.get("price", 0)
         change_pct = (price - rt.get("close_yesterday", price)) / rt.get("close_yesterday", price) * 100 if rt.get("close_yesterday", 0) > 0 else 0

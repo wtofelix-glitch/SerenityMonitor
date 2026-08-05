@@ -1,0 +1,50 @@
+{
+ "fusion": [
+  {
+   "bonus": 0.0,
+   "code": "002281",
+   "frozen": true,
+   "name": "光迅科技",
+   "resonance": 0.0,
+   "signals": [],
+   "source_count": 0
+  },
+  {
+   "bonus": 0.0,
+   "code": "600460",
+   "frozen": true,
+   "name": "士兰微",
+   "resonance": 0.0,
+   "signals": [],
+   "source_count": 0
+  },
+  {
+   "bonus": 0.0,
+   "code": "300502",
+   "frozen": true,
+   "name": "新易盛",
+   "resonance": 0.0,
+   "signals": [],
+   "source_count": 0
+  },
+  {
+   "bonus": 0.0,
+   "code": "300308",
+   "frozen": true,
+   "name": "中际旭创",
+   "resonance": 0.0,
+   "signals": [],
+   "source_count": 0
+  },
+  {
+   "bonus": 0.0,
+   "code": "300394",
+   "frozen": true,
+   "name": "天孚通信",
+   "resonance": 0.0,
+   "signals": [],
+   "source_count": 0
+  }
+ ],
+ "ok": true
+}

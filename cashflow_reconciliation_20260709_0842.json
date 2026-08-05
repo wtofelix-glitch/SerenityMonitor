@@ -1,0 +1,38 @@
+{
+  "window": {
+    "start": "2026-06-16",
+    "end": "2026-06-17",
+    "source": "diagnostic_nav_history"
+  },
+  "cash_reconciliation": {
+    "start_total": 67843.0,
+    "end_total": 49832.0,
+    "start_cash": 24125.0,
+    "end_cash": 15992.0,
+    "start_holdings": 43718.0,
+    "end_holdings": 33840.0,
+    "cash_change": -8133.0,
+    "recorded_sell_amount": 48111.0,
+    "recorded_buy_amount": 21154.4,
+    "recorded_net_trade_cashflow": 26956.6,
+    "unexplained_cash_effect": -35089.6,
+    "tolerance": 339.22,
+    "cash_effect_note": "negative cash_effect means cash decreased beyond recorded trades"
+  },
+  "evidence_items": [
+    {
+      "date": "2026-06-17",
+      "type": null,
+      "cash_effect": -35089.6,
+      "amount": 35089.6,
+      "code": "",
+      "shares": null,
+      "price": null,
+      "evidence_path": "",
+      "notes": ""
+    }
+  ],
+  "broker_snapshot_preferred": true,
+  "broker_snapshot_command": "python3 cli.py broker-snapshot-template --write",
+  "notes": "Use broker/account evidence first. Do not edit trade or NAV history without matching broker statement, screenshot, or export."
+}

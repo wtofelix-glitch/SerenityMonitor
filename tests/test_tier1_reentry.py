@@ -5,6 +5,8 @@ import json
 import os
 sys.path.insert(0, '/Users/mac/workspace/SerenityMonitor')
 
+import pytest
+
 from datetime import date, datetime
 from tier1_reentry import (
     _load_state, _save_state, _format_reentry_msg,

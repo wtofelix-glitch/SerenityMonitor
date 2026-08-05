@@ -12,8 +12,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import date
-from factor_engine import AlphaFactorEngine
-from config import ALL_CODES, STOCK_MAP
+from config import ALL_CODES, STOCK_MAP, get_stock_name
 import numpy as np
 
 
@@ -52,7 +51,7 @@ def compute_14factor_signal(code):
     signal = np.clip(avg * 2, -1.0, 1.0)
     score = round(signal * 50 + 50, 1)
 
-    name = STOCK_MAP.get(code, {}).get('name', code) if isinstance(STOCK_MAP.get(code), dict) else STOCK_MAP.get(code, code)
+    name = get_stock_name(code) if isinstance(STOCK_MAP.get(code), dict) else STOCK_MAP.get(code, code)
 
     return {
         'code': code,

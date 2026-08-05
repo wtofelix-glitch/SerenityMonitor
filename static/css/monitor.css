@@ -227,7 +227,7 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .session-badge.down  { background: rgba(52,199,89,0.12); color: var(--down); }
 .session-badge.gold  { background: rgba(255,214,10,0.12); color: var(--gold); animation: pulse 2s ease-in-out infinite; }
 .refresh-btn {
-  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
   background: var(--bg-card); border: 0.5px solid var(--border-color);
   color: var(--text-secondary); font-size: 15px; border-radius: 8px;
   cursor: pointer; transition: all 0.2s;
@@ -275,30 +275,62 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 /* ═══════════════════════════════════════════════════════
    MARKET TAPE — 紧凑信息条
    ═══════════════════════════════════════════════════════ */
-.market-tape {
+.market-bar {
   position: sticky; top: calc(var(--header-h) + var(--tab-h)); z-index: 150;
   max-width: var(--max-width); margin: 0 auto;
   padding: 6px var(--space-4);
-  display: flex; align-items: center; gap: var(--space-3);
-  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; gap: 0;
+  background: rgba(0,0,0,0.6);
   border-bottom: 0.5px solid var(--border-light);
+  backdrop-filter: blur(8px);
 }
-.tape-kicker {
-  font-family: var(--font-mono); font-size: 9px; font-weight: 800;
-  letter-spacing: 1.2px; color: var(--gold); opacity: 0.6; white-space: nowrap;
-}
-.tape-track {
-  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+.index-row {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 0;
   overflow-x: auto; scrollbar-width: none;
 }
-.tape-track span {
-  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
-  padding: 4px 10px; border-radius: 10px;
-  background: rgba(255,255,255,0.04); font-family: var(--font-num); font-size: 10px;
+.index-row::-webkit-scrollbar { display: none; }
+.idx-item {
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  padding: 3px 8px; font-family: var(--font-num); font-size: 10px;
+  border-right: 0.5px solid rgba(255,255,255,0.06);
 }
-.tape-track b { color: var(--text-tertiary); font-weight: 600; }
-.tape-track em { color: var(--text-primary); font-style: normal; }
-.tape-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); white-space: nowrap; }
+.idx-item:last-child { border-right: none; }
+.idx-item b { color: var(--text-tertiary); font-weight: 600; font-family: var(--font); font-size: 10px; }
+.idx-item em { color: var(--text-primary); font-style: normal; font-size: 11px; }
+.idx-loading { color: var(--text-tertiary); font-size: 11px; padding: 0 8px; }
+.idx-time {
+  font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary);
+  white-space: nowrap; padding-left: 8px; flex-shrink: 0;
+}
+
+/* ── Stock Pool Grid ──────────────────────────────────── */
+.pool-scroll {
+  display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  padding: 4px 0; scroll-snap-type: x mandatory;
+}
+.pool-scroll::-webkit-scrollbar { display: none; }
+.pool-chip {
+  flex: 0 0 auto; width: 88px; padding: 8px 6px; border-radius: 10px;
+  background: rgba(255,255,255,0.03); border: 0.5px solid rgba(255,255,255,0.06);
+  scroll-snap-align: start; display: flex; flex-direction: column; gap: 4px;
+  transition: background var(--transition-fast);
+}
+.pool-chip.held { border-color: rgba(255,214,10,0.2); background: rgba(255,214,10,0.05); }
+.pool-chip:hover { background: rgba(255,255,255,0.06); }
+.pool-chip-top, .pool-chip-mid, .pool-chip-bot {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.pool-name { font-size: 10px; font-weight: 600; color: var(--text-primary); max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool-code { font-size: 8px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.pool-score { font-size: 12px; font-weight: 700; font-family: var(--font-num); }
+.pool-score.score-hot { color: var(--up); }
+.pool-score.score-warm { color: var(--gold); }
+.pool-score.score-cool { color: var(--accent-orange); }
+.pool-score.score-cold { color: var(--down); }
+.pool-pct { font-size: 9px; font-family: var(--font-num); font-weight: 600; }
+.pool-sig { font-size: 8px; padding: 1px 4px; border-radius: 3px; background: rgba(255,255,255,0.06); color: var(--text-secondary); }
+.pool-held { font-size: 8px; color: var(--gold); }
+.pool-card { margin-bottom: var(--space-2); }
 
 /* ═══════════════════════════════════════════════════════
    CONTENT AREA
@@ -1055,8 +1087,8 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
     box-shadow: 0 0 0 0.5px rgba(255,214,10,0.12) inset;
   }
 
-  .market-tape { top: var(--header-h); padding: 5px var(--space-3); }
-  .tape-kicker, .tape-time { display: none; }
+  .market-bar { top: var(--header-h); padding: 5px var(--space-3); }
+  .idx-time { display: none; }
 
   .tab-content { padding: var(--space-3) var(--space-3) calc(var(--bottom-nav-h) + 24px + env(safe-area-inset-bottom, 0px)); }
 
@@ -1400,7 +1432,7 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
   background: var(--bg-card); color: var(--text-secondary);
   font-size: 12px; font-weight: 500; font-family: var(--font);
   cursor: pointer; transition: all var(--transition-fast);
-  white-space: nowrap; min-height: 36px;
+  white-space: nowrap; min-height: 44px;
 }
 .action-btn:active { background: var(--bg-card-hover); transform: scale(0.96); }
 .action-btn.primary { background: var(--gold-bg); border-color: var(--gold-border); color: var(--gold); }
@@ -1412,6 +1444,29 @@ body > :not(script) { -webkit-user-select: text; user-select: text; }
 .delta.pos { color: var(--up); }
 .delta.neg { color: var(--down); }
 .delta.flat { color: var(--text-tertiary); }
+.governance-note { font-size: var(--text-caption2); line-height: 1.4; }
+
+/* Compact financial metadata remains readable without changing data density. */
+.qd-code, .qd-row-meta, .pq-code, .pq-signal, .position-table .pos-code,
+.sc-rank, .sc-uzi, .sc-meta, .rg-label, .rg-limit, .anom-badge,
+.anom-time, .tc-footer, .advice-kelly, .nav-stat-label, .sfi-code,
+.sfi-sources, .sfi-quotes, .ssm-count, .rt-sector, .ssig-head,
+.ssig-tk, .nl-item-code, .nl-item-reason, .sig-code, .sig-meta-badge,
+.sig-label-pill, .sig-target, .compact-signal-code {
+  font-size: var(--text-caption2);
+}
+
+@media (max-width: 768px) {
+  .action-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--bottom-nav-h) + 20px + env(safe-area-inset-bottom, 0px));
+  }
+  .tab-content {
+    padding-bottom: calc(var(--bottom-nav-h) + 92px + env(safe-area-inset-bottom, 0px));
+  }
+}
 
 /* ═══════════════════════════════════════════════════════
    v5.1 通知横幅

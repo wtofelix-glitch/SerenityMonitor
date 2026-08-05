@@ -1,0 +1,53 @@
+name: hot_theme
+display_name: 热点题材策略
+category: framework
+description: >
+  追踪A股市场AI算力/CPO/硅光子等核心赛道的热点题材轮动。
+  基于新闻情绪、社交媒体热度、产业链催化事件，识别题材热度的启动-加速-退潮三阶段，
+  在题材启动期低位介入，退潮信号出现时及时离场。
+  适用于产业趋势明确、市场共识逐步形成的主题性行情。
+core_rules: [1, 2, 5, 6]
+required_data:
+  - get_daily_history
+  - get_news
+  - get_sentiment
+  - get_reference
+default_priority: 22
+market_regimes: [trending_up, volatile]
+serenity_dimensions:
+  - cpo_alignment: 0.35
+  - bottleneck: 0.25
+  - momentum: 0.25
+  - AIcapex: 0.10
+  - moat: 0.05
+scoring_rules:
+  - condition: "题材相关新闻24h内≥3条且情绪正向"
+    score_adjustment: +8
+    reason: "密集正面新闻印证题材热度升温"
+  - condition: "标的与当前最热题材的匹配度≥70%（serenity_tag命中）"
+    score_adjustment: +5
+    reason: "高题材匹配度带来资金聚焦效应"
+  - condition: "题材龙头标的单日涨幅>5%且放量"
+    score_adjustment: +3
+    reason: "龙头示范效应带动板块跟涨"
+  - condition: "题材热度连续3日衰减（新闻量/情绪双降）"
+    score_adjustment: -10
+    reason: "题材退潮风险，及时止盈"
+  - condition: "大盘处于下跌通道且题材无独立逻辑"
+    score_adjustment: -6
+    reason: "系统性风险下题材炒作难持续"
+instructions: |
+  **热点题材策略**
+  1. 分析步骤：
+     a) 扫描过去24小时的AI/CPO/光通信相关新闻和社交情绪，识别当前最热题材。
+     b) 用 serenity_tag 匹配候选池中与热点题材关联度最高的标的，计算题材匹配度(0-100)。
+     c) 评估题材所处阶段：启动期（新闻初现+低关注）→ 加速期（密集报道+放量）→ 退潮期（热度衰减+缩量）。
+     d) 仅在启动期或加速早期给出买入评分，退潮期信号触发时建议减仓。
+
+  2. 数据依赖：日K线（量价配合验证）、新闻（题材催化源）、情绪（市场共识温度计）。
+
+  3. 评分调整：
+     - 匹配度≥80% 且处于启动期 → +8分
+     - 加速期但量能健康（未天量）→ +5分
+     - 退潮信号（新闻量/情绪连续3日下降）→ -10分
+     - 无明确题材催化 → 不启用此策略

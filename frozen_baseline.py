@@ -27,7 +27,7 @@ from typing import Optional
 import json
 
 from config import (
-    STOCK_MAP, STOCK_DETAILS, ALL_CODES, SIGNAL_CONFIG,
+    STOCK_MAP, STOCK_DETAILS, ALL_CODES, SIGNAL_CONFIG, get_stock_name,
     compute_serenity_score,
 )
 from db import get_price_history, get_avg_volume, get_latest_scores
@@ -58,14 +58,47 @@ FROZEN_HOLD_HIGH = 50.0
 FROZEN_SELL = 45.0
 
 # 版本标识
-FROZEN_VERSION = "v1"
+FROZEN_VERSION = "v2"  # v4 Phase 3: 因子去冗余完成后升级
 FROZEN_SINCE = "2026-07-05"
+FROZEN_V2_SINCE = None  # 由因子审计完成时设置
+
+# 因子版本元数据
+_FROZEN_V2_METADATA = {
+    "version": "v2",
+    "description": "去冗余后独立因子集 (6-8 factors from factor_audit)",
+    "clock_reset": True,  # §6.3 判定时钟从 v2 上线后重置
+    "built_at": None,
+    "factor_count": None,
+    "de_redundancy_config": None,
+}
 
 # 因子引擎（复用）
 _FACTOR_ENGINE = None
 
 
-def _get_factor_engine():
+def get_frozen_metadata() -> dict:
+    """获取当前 Frozen Baseline 版本和时钟状态。"""
+    import os
+    config_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        ".de_redundancy_config.json"
+    )
+    meta = dict(_FROZEN_V2_METADATA)
+    meta["version"] = FROZEN_VERSION
+    meta["frozen_since"] = FROZEN_SINCE
+    if FROZEN_V2_SINCE:
+        meta["v2_since"] = FROZEN_V2_SINCE
+        meta["clock_reset_at"] = FROZEN_V2_SINCE
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            meta["de_redundancy_config"] = config
+            meta["factor_count"] = config.get("n_independent")
+            meta["built_at"] = config.get("generated_at")
+        except Exception:
+            pass
+    return meta
     global _FACTOR_ENGINE
     if _FACTOR_ENGINE is None:
         try:
@@ -92,7 +125,7 @@ class FrozenBaseline:
     # ── 评分（冻结版）────────────────────────────────────
 
     def score_one(self, code: str, price: float, change_pct: float,
-                  volume: float, snap: dict | None = None) -> dict:
+                  volume: float, snap: Optional[dict] = None) -> dict:
         """对单只标的做冻结版评分。
 
         仅使用价格/动量/成交量/factor/serenity/moat 等可量化维度。
@@ -179,6 +212,20 @@ class FrozenBaseline:
                 })
         results.sort(key=lambda x: x["total_score"], reverse=True)
         return results
+
+    def score_components(self, components: dict[str, float]) -> dict:
+        """仅用传入快照分量计算冻结基准，保证可回放。"""
+        normalized = {
+            key: float(components.get(key, 50.0))
+            for key in self.weights
+        }
+        total = sum(normalized[key] * weight for key, weight in self.weights.items())
+        return {
+            "total_score": round(total, 1),
+            "signal": self._score_to_signal(total),
+            "components": normalized,
+            "baseline_version": self.version,
+        }
 
     def generate_signals(self, snapshots: list[dict]) -> list[dict]:
         """生成 Frozen Baseline 的交易信号。"""
@@ -298,6 +345,50 @@ class BaselineComparator:
     def __init__(self):
         self._frozen = FrozenBaseline()
         self._weekly_records: list[dict] = []
+
+    @staticmethod
+    def _components_from_score(row: dict) -> dict[str, float]:
+        return {
+            "zone": row.get("zone_score", 50),
+            "momentum": row.get("momentum_score", 50),
+            "volume": row.get("volume_score", 50),
+            "serenity": row.get("serenity_score", 50),
+            "factor": row.get("factor_score", 50),
+            "technical": row.get("technical_score", 50),
+            "moat": row.get("moat_score", 50),
+            "capital": row.get("capital_score", 50),
+        }
+
+    def get_signals_today(self) -> list[dict]:
+        """用最新 Adaptive 快照重放 Frozen 规则。"""
+        signals = []
+        for row in get_latest_scores(ALL_CODES):
+            result = self._frozen.score_components(self._components_from_score(row))
+            signals.append({
+                "code": row["code"],
+                "name": get_stock_name(row["code"]),
+                "total_score": result["total_score"],
+                "signal": result["signal"],
+            })
+        return sorted(signals, key=lambda item: item["total_score"], reverse=True)
+
+    def get_adaptive_signals(self) -> list[dict]:
+        """读取与 Frozen 同日期、同标的的最新 Adaptive 结果。"""
+        signals = []
+        for row in get_latest_scores(ALL_CODES):
+            details = row.get("details") or "{}"
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except (TypeError, ValueError):
+                    details = {}
+            signals.append({
+                "code": row["code"],
+                "name": get_stock_name(row["code"]),
+                "total_score": float(row.get("total_score") or 0),
+                "signal": details.get("signal_action", "HOLD"),
+            })
+        return sorted(signals, key=lambda item: item["total_score"], reverse=True)
 
     def compare_signals(self, market_data: list[dict],
                         adaptive_signals: list[dict]) -> dict:

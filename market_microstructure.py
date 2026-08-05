@@ -85,15 +85,16 @@ class MarketMicrostructure:
     确保所有交易建议在 A 股实际规则下可执行。
     """
 
-    def __init__(self):
-        # T+1 锁定的持仓记录 (code → PositionLock)
-        self._t1_locks: dict[str, PositionLock] = {}
+    def __init__(self, load_existing_locks: bool = True):
+        # T+1 锁定的持仓记录，同一标的允许同日多笔成交。
+        self._t1_locks: dict[str, list[PositionLock]] = {}
         # 当日的涨跌停缓存 (code → LimitStatus)
         self._limit_cache: dict[str, LimitStatus] = {}
         # 停牌缓存
         self._suspended_cache: set[str] = set()
         # 加载已有的 T+1 锁定记录
-        self._load_existing_locks()
+        if load_existing_locks:
+            self._load_existing_locks()
 
     # ── T+1 锁定 ──────────────────────────────────────────
 
@@ -113,31 +114,32 @@ class MarketMicrostructure:
                 # 计算解锁日（下一个交易日）
                 from check_trading_day import next_trading_day
                 unlock = next_trading_day(date.today())
-                self._t1_locks[code] = PositionLock(
+                self._t1_locks.setdefault(code, []).append(PositionLock(
                     code=code,
                     buy_date=row["date"],
                     buy_price=row["price"],
                     shares=row["quantity"],
                     unlock_date=unlock.isoformat(),
-                )
+                ))
                 log.debug(f"T+1 锁定: {code} {row['quantity']}股 @{row['price']}, 解锁日 {unlock}")
         except Exception as e:
             log.warning(f"加载 T+1 锁定记录失败: {e}")
         finally:
             conn.close()
 
-    def is_t1_locked(self, code: str, check_date: date | None = None) -> bool:
+    def is_t1_locked(self, code: str, check_date: Optional[date] = None) -> bool:
         """检查指定标的在指定日期是否受 T+1 锁定（当日买入不可卖出）。"""
         if check_date is None:
             check_date = date.today()
-        lock = self._t1_locks.get(code)
-        if lock is None:
-            return False
-        return lock.unlock_date > check_date.isoformat() and lock.unlock_date >= check_date.isoformat()
+        return any(
+            lock.unlock_date > check_date.isoformat()
+            for lock in self._t1_locks.get(code, [])
+        )
 
     def get_t1_lock(self, code: str) -> Optional[PositionLock]:
         """获取 T+1 锁定信息。"""
-        return self._t1_locks.get(code)
+        locks = self._t1_locks.get(code, [])
+        return locks[-1] if locks else None
 
     def add_t1_lock(self, code: str, buy_date: date, buy_price: float, shares: int) -> PositionLock:
         """记录一笔新的 T+1 锁定（买入成交后调用）。"""
@@ -150,16 +152,20 @@ class MarketMicrostructure:
             shares=shares,
             unlock_date=unlock.isoformat(),
         )
-        self._t1_locks[code] = lock
+        self._t1_locks.setdefault(code, []).append(lock)
         log.info(f"新增 T+1 锁定: {code} {shares}股 @{buy_price}, 解锁日 {unlock}")
         return lock
 
     def get_total_t1_locked_value(self, price_map: dict[str, float]) -> float:
         """计算所有 T+1 锁定仓位的当前市值。"""
         total = 0.0
-        for code, lock in self._t1_locks.items():
-            price = price_map.get(code, lock.buy_price)
-            total += price * lock.shares
+        today = date.today().isoformat()
+        for code, locks in self._t1_locks.items():
+            for lock in locks:
+                if lock.unlock_date <= today:
+                    continue
+                price = price_map.get(code, lock.buy_price)
+                total += price * lock.shares
         return total
 
     def get_total_t1_locked_pct(self, total_nav: float, price_map: dict[str, float]) -> float:
@@ -170,10 +176,10 @@ class MarketMicrostructure:
 
     # ── 涨跌停 ────────────────────────────────────────────
 
-    def get_limit_status(self, code: str, price: float | None = None,
-                         change_pct: float | None = None,
-                         volume: float | None = None,
-                         avg_volume: float | None = None) -> LimitStatus:
+    def get_limit_status(self, code: str, price: Optional[float] = None,
+                         change_pct: Optional[float] = None,
+                         volume: Optional[float] = None,
+                         avg_volume: Optional[float] = None) -> LimitStatus:
         """检测涨跌停状态。
 
         涨停判断：change_pct >= 9.9%（主板 ±10%，留 0.1% 容差）
@@ -237,7 +243,7 @@ class MarketMicrostructure:
     # ── 综合可成交性检查 ──────────────────────────────────
 
     def can_buy(self, code: str, check_date: date, price: float,
-                quantity: int, snapshot: dict | None = None) -> TradeabilityResult:
+                quantity: int, snapshot: Optional[dict] = None) -> TradeabilityResult:
         """检查是否可以买入。
 
         Args:
@@ -302,8 +308,8 @@ class MarketMicrostructure:
         return result
 
     def can_sell(self, code: str, position_shares: int, check_date: date,
-                 price: float, quantity: int | None = None,
-                 snapshot: dict | None = None) -> TradeabilityResult:
+                 price: float, quantity: Optional[int] = None,
+                 snapshot: Optional[dict] = None) -> TradeabilityResult:
         """检查是否可以卖出。
 
         Args:
@@ -320,21 +326,7 @@ class MarketMicrostructure:
         result = TradeabilityResult()
         sell_qty = quantity if quantity is not None else position_shares
 
-        # 检查 1: T+1 锁定
-        lock = self._t1_locks.get(code)
-        if lock and lock.unlock_date > check_date.isoformat():
-            result.executable = False
-            result.t1_locked = True
-            result.t1_locked_shares = lock.shares
-            result.block_reason = (
-                f"{code} 受 T+1 锁定（{lock.buy_date} 买入 {lock.shares}股），"
-                f"最早 {lock.unlock_date} 才能卖出"
-            )
-            result.checks_failed.append("t1_lock")
-            return result
-        result.checks_passed.append("t1_lock")
-
-        # 检查 2: 持仓充足
+        # 先验证基础持仓，避免把无持仓误报成 T+1 锁定。
         if position_shares <= 0:
             result.executable = False
             result.block_reason = f"{code} 当前无持仓"
@@ -342,13 +334,34 @@ class MarketMicrostructure:
             return result
         result.checks_passed.append("has_position")
 
-        # 检查 3: 卖出数量不超过持仓
         if sell_qty > position_shares:
             result.executable = False
             result.block_reason = f"委托数量 {sell_qty} 超过持仓 {position_shares}"
             result.checks_failed.append("sufficient_shares")
             return result
         result.checks_passed.append("sufficient_shares")
+
+        # 检查 1: T+1 锁定
+        active_locks = [
+            lock for lock in self._t1_locks.get(code, [])
+            if lock.unlock_date > check_date.isoformat()
+        ]
+        locked_shares = sum(lock.shares for lock in active_locks)
+        unlocked_shares = max(0, position_shares - locked_shares)
+        if sell_qty > unlocked_shares:
+            result.executable = False
+            result.t1_locked = True
+            result.t1_locked_shares = locked_shares
+            lock = active_locks[-1] if active_locks else None
+            result.block_reason = (
+                f"{code} 可卖 {unlocked_shares} 股，委托 {sell_qty} 股；"
+                f"另有 {locked_shares} 股受 T+1 锁定"
+            )
+            if lock is not None:
+                result.block_reason += f"，最早 {lock.unlock_date} 解锁"
+            result.checks_failed.append("t1_lock")
+            return result
+        result.checks_passed.append("t1_lock")
 
         # 检查 4: 是否停牌
         if self.is_suspended(code):
@@ -422,9 +435,8 @@ class MarketMicrostructure:
 
     @staticmethod
     def _is_mainboard(code: str) -> bool:
-        """检查是否为主板标的（600/601/603/605/000/001/002/003 开头）。"""
-        mainboard_prefixes = ("600", "601", "603", "605",
-                              "000", "001", "002", "003")
+        """检查是否为项目允许的主板标的。"""
+        mainboard_prefixes = ("600", "601", "603", "605", "000", "002")
         return any(code.startswith(p) for p in mainboard_prefixes)
 
     def clear_day_cache(self) -> None:

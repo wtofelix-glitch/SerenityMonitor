@@ -28,6 +28,7 @@ import json
 from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG
 from db import get_conn, get_price_history, get_latest_snapshot
 from serenity_logger import get_logger
+from frozen_baseline import FROZEN_SINCE
 
 log = get_logger(__name__)
 
@@ -53,34 +54,116 @@ class EqualWeightBasket:
     收益基准，用于判定策略是否有 Alpha。
     """
 
-    def __init__(self, initial_capital: float | None = None):
+    def __init__(self, initial_capital: Optional[float] = None):
         self.initial_capital = initial_capital or INITIAL_CAPITAL
         self.n_stocks = len(ALL_CODES)
         self.weight = 1.0 / self.n_stocks
         self._nav: float = self.initial_capital
-        self._last_rebalance: str | None = None
+        self._last_rebalance: Optional[str] = None
+        self._curve_cache: Optional[tuple[str, list[dict]]]= None
 
     # ── 净值计算 ─────────────────────────────────────────
 
-    def get_nav(self, as_of: date | None = None) -> float:
-        """获取当前净值。使用最新快照价格计算。"""
+    def get_nav(self, as_of: Optional[date] = None) -> float:
+        """获取基于真实逐日持仓账本的净值。"""
         if as_of is None:
             as_of = date.today()
+        curve = self._build_nav_curve(as_of)
+        return curve[-1]["nav"] if curve else self.initial_capital
 
-        total = 0.0
-        per_stock_capital = self.initial_capital / self.n_stocks
+    def _build_nav_curve(self, as_of: Optional[date] = None) -> list[dict]:
+        """按开盘调仓、收盘计价，记录现金、持仓和交易成本。"""
+        as_of = as_of or date.today()
+        cache_key = as_of.isoformat()
+        if self._curve_cache and self._curve_cache[0] == cache_key:
+            return self._curve_cache[1]
 
+        by_code: dict[str, dict[str, dict]] = {}
+        all_dates: set[str] = set()
         for code in ALL_CODES:
-            snap = get_latest_snapshot(code)
-            if snap:
-                price = getattr(snap, "close", 0) or 0
-                if price > 0:
-                    shares = int(per_stock_capital / price / 100) * 100
-                    total += shares * price
+            rows = get_price_history(code, days=800)
+            code_rows = {
+                row["date"]: row for row in rows
+                if FROZEN_SINCE <= row["date"] <= cache_key
+                and float(row.get("open") or 0) > 0
+                and float(row.get("close") or 0) > 0
+            }
+            by_code[code] = code_rows
+            all_dates.update(code_rows)
 
-        return total if total > 0 else self.initial_capital
+        cash = float(self.initial_capital)
+        shares = {code: 0 for code in ALL_CODES}
+        last_close: dict[str, float] = {}
+        curve: list[dict] = []
+        last_rebalance_month = ""
 
-    def get_daily_return(self, snapshots: list[dict] | None = None) -> float:
+        for date_str in sorted(all_dates):
+            available = {
+                code: rows[date_str] for code, rows in by_code.items()
+                if date_str in rows
+            }
+            if not available:
+                continue
+
+            month = date_str[:7]
+            should_rebalance = not curve or month != last_rebalance_month
+            cost_today = 0.0
+            if should_rebalance:
+                open_nav = cash + sum(
+                    shares[code] * float(
+                        available.get(code, {}).get("open") or last_close.get(code, 0)
+                    )
+                    for code in ALL_CODES
+                )
+                target = open_nav / len(available)
+
+                # 先卖后买，卖出所得可以用于当日其他标的调仓。
+                for code, row in available.items():
+                    px = float(row["open"])
+                    target_shares = int(target / px / 100) * 100
+                    sell_qty = max(0, shares[code] - target_shares)
+                    if sell_qty:
+                        proceeds = sell_qty * px
+                        fee = proceeds * (COMMISSION + STAMP_TAX + SLIPPAGE)
+                        cash += proceeds - fee
+                        cost_today += fee
+                        shares[code] -= sell_qty
+
+                for code, row in available.items():
+                    px = float(row["open"])
+                    target_shares = int(target / px / 100) * 100
+                    buy_qty = max(0, target_shares - shares[code])
+                    buy_qty = min(buy_qty, int(cash / (px * (1 + COMMISSION + SLIPPAGE)) / 100) * 100)
+                    if buy_qty:
+                        amount = buy_qty * px
+                        fee = amount * (COMMISSION + SLIPPAGE)
+                        cash -= amount + fee
+                        cost_today += fee
+                        shares[code] += buy_qty
+
+                last_rebalance_month = month
+
+            for code, row in available.items():
+                last_close[code] = float(row["close"])
+            nav = cash + sum(shares[code] * last_close.get(code, 0) for code in ALL_CODES)
+            curve.append({
+                "date": date_str,
+                "nav": round(nav, 2),
+                "cash": round(cash, 2),
+                "cost": round(cost_today, 2),
+                "positions": sum(1 for qty in shares.values() if qty > 0),
+            })
+
+        self._curve_cache = (cache_key, curve)
+        return curve
+
+    def _period_return(self, start: date, end: date) -> float:
+        curve = [row for row in self._build_nav_curve(end) if row["date"] >= start.isoformat()]
+        if len(curve) < 2 or curve[0]["nav"] <= 0:
+            return 0.0
+        return curve[-1]["nav"] / curve[0]["nav"] - 1.0
+
+    def get_daily_return(self, snapshots: Optional[list[dict]] = None) -> float:
         """计算当日等权平均收益率。
 
         如果 snapshots 为空，从 daily_snapshots 表获取。
@@ -93,7 +176,7 @@ class EqualWeightBasket:
                     chg = s.get("change_pct", 0) or 0
                     returns.append(chg)
             if returns:
-                return sum(returns) / len(returns)
+                return sum(returns) / len(returns) / 100.0
 
         # 回退到数据库
         conn = get_conn()
@@ -106,7 +189,7 @@ class EqualWeightBasket:
                 (today, *ALL_CODES)
             ).fetchall()
             returns = [r["change_pct"] or 0 for r in rows]
-            return sum(returns) / len(returns) if returns else 0.0
+            return sum(returns) / len(returns) / 100.0 if returns else 0.0
         except Exception:
             return 0.0
         finally:
@@ -114,53 +197,17 @@ class EqualWeightBasket:
 
     def get_weekly_return(self) -> float:
         """获取本周累计收益率。"""
-        conn = get_conn()
-        try:
-            today = date.today()
-            # 找本周第一个交易日
-            start = today - timedelta(days=7)
-            rows = conn.execute(
-                "SELECT date, AVG(change_pct) as avg_ret FROM daily_snapshots "
-                "WHERE code IN ({}) AND date >= ? AND date <= ? "
-                "GROUP BY date ORDER BY date".format(
-                    ",".join("?" * len(ALL_CODES))
-                ),
-                (*ALL_CODES, start.isoformat(), today.isoformat())
-            ).fetchall()
-            if rows:
-                # 累计收益（简单累加）
-                return sum(r["avg_ret"] or 0 for r in rows)
-        except Exception:
-            pass
-        finally:
-            conn.close()
-        return 0.0
+        today = date.today()
+        return self._period_return(today - timedelta(days=today.weekday()), today)
 
     def get_monthly_return(self) -> float:
         """获取本月累计收益率。"""
-        conn = get_conn()
-        try:
-            today = date.today()
-            start = today.replace(day=1)
-            rows = conn.execute(
-                "SELECT date, AVG(change_pct) as avg_ret FROM daily_snapshots "
-                "WHERE code IN ({}) AND date >= ? AND date <= ? "
-                "GROUP BY date ORDER BY date".format(
-                    ",".join("?" * len(ALL_CODES))
-                ),
-                (*ALL_CODES, start.isoformat(), today.isoformat())
-            ).fetchall()
-            if rows:
-                return sum(r["avg_ret"] or 0 for r in rows)
-        except Exception:
-            pass
-        finally:
-            conn.close()
-        return 0.0
+        today = date.today()
+        return self._period_return(today.replace(day=1), today)
 
     # ── 再平衡 ────────────────────────────────────────────
 
-    def is_rebalance_day(self, d: date | None = None) -> bool:
+    def is_rebalance_day(self, d: Optional[date] = None) -> bool:
         """判断是否为月度再平衡日（每月首个交易日）。"""
         if d is None:
             d = date.today()
@@ -175,12 +222,8 @@ class EqualWeightBasket:
 
     def rebalance_cost_estimate(self) -> float:
         """估算月度再平衡的交易成本。"""
-        # 估算每只标的偏离等权后需调整的比例
-        # 简化：假设 15 只标的中 5 只需要调整，每只调整 1% 权重
-        nav = self.get_nav()
-        adjusted_amount = nav * 0.01 * 5  # 5 只 × 1% 权重调整
-        cost = adjusted_amount * (COMMISSION * 2 + STAMP_TAX + SLIPPAGE)
-        return cost
+        curve = self._build_nav_curve()
+        return curve[-1]["cost"] if curve else 0.0
 
     # ── 快照 ──────────────────────────────────────────────
 
@@ -191,9 +234,11 @@ class EqualWeightBasket:
             "date": date.today().isoformat(),
             "nav": round(nav, 2),
             "total_return_pct": round((nav - self.initial_capital) / self.initial_capital * 100, 2),
-            "daily_return": round(self.get_daily_return(), 3),
-            "weekly_return": round(self.get_weekly_return(), 3),
-            "monthly_return": round(self.get_monthly_return(), 3),
+            "daily_return": round(self.get_daily_return() * 100, 3),
+            "weekly_return": round(self.get_weekly_return() * 100, 3),
+            "monthly_return": round(self.get_monthly_return() * 100, 3),
+            "data_points": len(self._build_nav_curve()),
+            "method": "event_ledger_raw_prices",
             "n_stocks": self.n_stocks,
             "equal_weight_pct": round(self.weight * 100, 2),
             "is_rebalance_day": self.is_rebalance_day(),

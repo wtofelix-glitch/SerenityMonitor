@@ -25,8 +25,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
-
-from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS
+from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS, get_stock_name
 from db import (
     get_price_history,
     get_recent_signals,
@@ -376,7 +375,7 @@ def explain_anomaly(code: str, trigger_type: str, data: dict) -> str:
     生成 150-200 字异动解读。
     包含：价格变化% + 信号变化 + 因子归因 + 新闻头条
     """
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     now = datetime.now().strftime("%m/%d")
 
     # 1. 价格变化
@@ -551,7 +550,7 @@ def run_anomaly_check() -> list[dict]:
         if not _can_push(code, trigger_type, state):
             continue
 
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         data = anomaly["data"]
 
         # 生成解读
@@ -633,7 +632,7 @@ def cmd_check_anomalies() -> None:
     }
 
     for r in results:
-        name = STOCK_MAP.get(r["code"], {}).get("name", r["code"])
+        name = get_stock_name(r["code"])
         tl = trigger_labels.get(r["trigger_type"], r["trigger_type"])
         status = "✅" if r.get("pushed") else "❌"
         level_icon = {"A": "🔴", "B": "🟡", "C": "🟢"}.get(r["level"], "⚪")

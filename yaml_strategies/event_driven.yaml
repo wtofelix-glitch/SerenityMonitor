@@ -1,0 +1,52 @@
+name: event_driven
+display_name: 事件驱动策略
+category: framework
+description: >
+  基于产业关键事件（英伟达GTC/财报、台积电法说会、CPO技术突破、政策发布等）
+  进行短期事件性交易。事件前布局预期差，事件后验证并快速了结。
+  核心逻辑：重大产业事件会引发市场对AI供应链的价值重估，
+  尤其是CPO/光模块/硅光子等Serenity框架核心赛道。
+core_rules: [1, 3, 5, 6]
+required_data:
+  - get_daily_history
+  - get_news
+  - get_sentiment
+  - get_reference
+default_priority: 25
+market_regimes: [trending_up, volatile, range_bound]
+serenity_dimensions:
+  - cpo_alignment: 0.30
+  - bottleneck: 0.30
+  - AIcapex: 0.25
+  - momentum: 0.10
+  - moat: 0.05
+scoring_rules:
+  - condition: "未来7日内有确定性产业催化事件（财报/产品发布/政策）"
+    score_adjustment: +10
+    reason: "确定性事件提供短期交易窗口"
+  - condition: "事件影响范围覆盖≥3只候选标的"
+    score_adjustment: +5
+    reason: "板块性事件比个股事件更可靠"
+  - condition: "事件前标的处于买点区间且未透支预期"
+    score_adjustment: +4
+    reason: "低位的预期差最有利可图"
+  - condition: "事件落地后利好兑现且股价已反映"
+    score_adjustment: -8
+    reason: "利好出尽是利空，及时了结"
+  - condition: "事件不及预期或出现负面反转"
+    score_adjustment: -12
+    reason: "预期落空需立即止损"
+instructions: |
+  **事件驱动策略**
+  1. 分析步骤：
+     a) 维护未来2周的产业关键事件日历（英伟达/台积电财报、GTC大会、CPO技术路线图更新、工信部政策等）。
+     b) 事件前5-7日评估预期差：当前股价是否已充分反映事件预期？若市场预期不足，提前布局相关标的。
+     c) 事件后24小时内验证结果：超预期→持有/加仓，符合预期→逐步减仓，不及预期→立即清仓。
+
+  2. 数据依赖：新闻（事件源追踪）、日K线（事件前布局参考价位）、参考数据（历史同类事件的影响分析）。
+
+  3. 评分调整：
+     - 确定性事件+预期差>10% → +10分
+     - 事件落地超预期+估值仍有空间 → +5分
+     - 利好兑现且股价透支 → -8分
+     - 事件黑天鹅（负面反转）→ -12分，无条件止损

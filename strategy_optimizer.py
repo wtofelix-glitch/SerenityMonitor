@@ -1,8 +1,7 @@
 """策略参数网格搜索 — 自动寻优止损/止盈/仓位"""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from backtest_engine import run_backtest, TrendFollowingStrategy, MeanReversionStrategy
-from config import ALL_CODES, STOCK_MAP
+from config import ALL_CODES, STOCK_MAP, get_stock_name
 from itertools import product
 import json
 
@@ -49,7 +48,7 @@ def grid_search(code, strategy_name='trend', capital=50000):
     if not results:
         return {"error": "no valid results"}
 
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     return {"code": code, "name": name, "strategy": strategy_name,
             "best": best, "results": sorted(results, key=lambda x: x["return"], reverse=True)[:10],
             "total_combos": len(results)}

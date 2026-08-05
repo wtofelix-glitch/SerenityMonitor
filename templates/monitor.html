@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="{{ theme }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -9,11 +9,13 @@
   <meta name="description" content="Serenity — A股量化交易监控看板">
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <title>Serenity</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor.css') }}?v=5.1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/monitor-base.css') }}?v=7.0">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/theme-' + theme + '.css') }}?v=7.0">
   <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 </head>
 <body>
+  <a href="#tab-bar" class="sr-only focusable" aria-label="跳到主菜单">跳到导航</a>
   <header class="top-header">
     <div class="header-inner">
       <div class="header-brand"><div class="header-logo">S</div><span class="header-title">Serenity</span></div>
@@ -34,7 +36,7 @@
     <button id="tab-button-live" class="tab-btn" data-tab="live" role="tab" tabindex="-1" aria-selected="false" aria-controls="tab-live"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span>盯盘</span></button>
     <button id="tab-button-governance" class="tab-btn" data-tab="governance" role="tab" tabindex="-1" aria-selected="false" aria-controls="tab-governance"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><span>治理</span></button>
   </nav>
-  <div class="market-tape" id="market-tape"><span class="tape-kicker">MARKET</span><div class="tape-track"><span>加载中...</span></div><span class="tape-time">--</span></div>
+  <div class="market-bar" id="market-bar"><div class="index-row" id="index-row"><span class="idx-loading">⏳ 加载指数...</span></div><span class="idx-time" id="idx-time">--</span></div>
   <div class="tab-content active" id="tab-overview" role="tabpanel" aria-labelledby="tab-button-overview"><div class="dashboard-skeleton" aria-label="正在加载总览"><span></span><span></span><span></span></div></div>
   <div class="action-bar" id="action-bar" style="display:none">
     <button class="action-btn primary" onclick="refresh(true)">🔄 刷新数据</button>
@@ -47,7 +49,7 @@
   <div class="tab-content" id="tab-operations" role="tabpanel" aria-labelledby="tab-button-operations" hidden></div>
   <div class="tab-content" id="tab-live" role="tabpanel" aria-labelledby="tab-button-live" hidden></div>
   <div class="tab-content" id="tab-governance" role="tabpanel" aria-labelledby="tab-button-governance" hidden></div>
-  <script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/monitor.js') }}?v=7.0"></script>
   <script>
     if('serviceWorker' in navigator){
       navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}");

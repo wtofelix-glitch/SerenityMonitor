@@ -49,3 +49,10 @@ xcrun_db
 launchd.log
 launchd.log.old
 *.log.old
+.shadow_state.json
+.b2_runner.lock
+shadow_data/b2/.b2_runner.lock
+shadow_data/b2/*_report.json
+shadow_data/b2/*.db
+shadow_data/b2/*.db-wal
+shadow_data/b2/*.db-shm

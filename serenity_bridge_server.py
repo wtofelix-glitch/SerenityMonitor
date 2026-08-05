@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 
 # --- Config ---
 SERENITY_DIR = os.path.expanduser("~/workspace/SerenityMonitor")
-HOST = "0.0.0.0"
+HOST = os.environ.get("SERENITY_BRIDGE_HOST", "127.0.0.1")
 PORT = 9388
 MAX_BODY = 1024 * 512          # 512KB max request body
 REQUEST_TIMEOUT = 60           # seconds per request
@@ -44,15 +44,15 @@ SEND_TIMEOUT = 30              # seconds per hermes send
 BRIDGE_TOKEN = os.environ.get("SERENITY_BRIDGE_TOKEN") or os.environ.get("SERENITY_API_TOKEN") or ""
 
 TASKS = {
-    "fetch-history":   ["python3", "fetch_history.py"],
-    "rescore":         ["python3", "cli.py", "rescore"],
-    "adjust-weights":  ["python3", "cli.py", "adjust-weights"],
-    "factor-report":   ["python3", "cli.py", "factor-report"],
-    "daily-report":    ["python3", "daily_report.py"],
-    "daily-workflow":  ["python3", "daily_workflow.py"],
-    "record-real-data": ["python3", "cli.py", "record-real-data"],
-    "auto-gate":       ["python3", "cli.py", "auto-gate"],
-    "status":          ["python3", "cli.py", "status"],
+    "fetch-history":   [sys.executable, "fetch_history.py"],
+    "rescore":         [sys.executable, "cli.py", "rescore"],
+    "adjust-weights":  [sys.executable, "cli.py", "adjust-weights"],
+    "factor-report":   [sys.executable, "cli.py", "factor-report"],
+    "daily-report":    [sys.executable, "daily_report.py"],
+    "daily-workflow":  [sys.executable, "daily_workflow.py"],
+    "record-real-data": [sys.executable, "cli.py", "record-real-data"],
+    "auto-gate":       [sys.executable, "cli.py", "auto-gate"],
+    "status":          [sys.executable, "cli.py", "status"],
 }
 
 _SHUTDOWN = False

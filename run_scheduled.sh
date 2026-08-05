@@ -43,6 +43,11 @@ run_task() {
 # ── 时段分发 ──────────────────────────────────────────
 case "$HOUR" in
     07)
+        # ── 周六 07:30: 周度三系统对比报告 ──────────────
+        if [ $(date +%u) -eq 6 ]; then
+            run_task "周度三系统对比报告" "weekly_comparison_report.py --push"
+            exit 0
+        fi
         run_task "盘前准备" "auto_execute.py --premarket"
         # 后台静默任务（日志记录，不推送）:
         $PYTHON -c "from sentinel_engine import get_sentinel; e=get_sentinel(); e.settle_outcomes(5); e.update_source_weights()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
@@ -63,9 +68,12 @@ case "$HOUR" in
         $PYTHON -c "from sentinel_engine import get_sentinel; get_sentinel().sync_guru_quotes()" >> "$LOG_DIR/scheduler.log" 2>&1 || true
         # 价格告警 (仅记录日志)
         $PYTHON -c "from price_alert import check; t=check(); print(f'告警: {len(t)}条') if t else None" >> "$LOG_DIR/scheduler.log" 2>&1 || true
-        # 持仓复盘教练 (仅周日)
+        # 持仓复盘教练 + 周度复盘 (仅周日 / 周六)
         if [ $(date +%u) -eq 7 ]; then
             $PYTHON -c "from trade_coach import coach_report; print(coach_report())" >> "$LOG_DIR/scheduler.log" 2>&1 || true
+        fi
+        if [ $(date +%u) -eq 6 ]; then
+            $PYTHON weekly_review.py >> "$LOG_DIR/scheduler.log" 2>&1 || true
         fi
         ;;
     *)

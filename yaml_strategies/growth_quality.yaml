@@ -1,0 +1,51 @@
+name: growth_quality
+display_name: 成长质量策略
+category: framework
+description: >
+  基于基本面成长性与质量因子，筛选业绩增速与估值匹配度高的标的。
+  关注营收/利润增速、毛利率趋势、研发投入强度、经营现金流质量等维度，
+  对标Serenity框架中的瓶颈地位和护城河深度。
+  适用于中长期持有，追求业绩驱动而非情绪驱动的可持续回报。
+core_rules: [2, 4, 5, 6]
+required_data:
+  - get_daily_history
+  - get_news
+  - get_reference
+default_priority: 18
+market_regimes: [trending_up, range_bound, trending_down]
+serenity_dimensions:
+  - moat: 0.30
+  - bottleneck: 0.25
+  - cpo_alignment: 0.20
+  - AIcapex: 0.20
+  - momentum: 0.05
+scoring_rules:
+  - condition: "营收增速>20% 且 毛利率同比改善≥2个百分点"
+    score_adjustment: +10
+    reason: "量价齐升，成长质量最优"
+  - condition: "研发投入/营收>8% 且 专利壁垒明确"
+    score_adjustment: +7
+    reason: "高研发壁垒构筑长期护城河"
+  - condition: "经营现金流/净利润>0.8（利润真实性强）"
+    score_adjustment: +5
+    reason: "真金白银的利润，排除纸面富贵"
+  - condition: "营收增速<5% 或 毛利率连续2季度下滑"
+    score_adjustment: -8
+    reason: "成长降速，估值面临收缩风险"
+  - condition: "PEG>2 且 营收增速<15%"
+    score_adjustment: -6
+    reason: "高估值低成长，性价比差"
+instructions: |
+  **成长质量策略**
+  1. 分析步骤：
+     a) 提取最新财报数据：营收同比增速、毛利率及趋势、扣非净利润增速、经营现金流。
+     b) 计算成长质量综合评分：Growth Score =（营收增速×0.4 + 毛利率趋势×0.3 + 研发强度×0.2 + 现金流质量×0.1）。
+     c) 交叉验证 Serenity 瓶颈维度：标的在产业链中是否占据不可替代的瓶颈位置？瓶颈地位越强，成长持续性越高。
+
+  2. 数据依赖：参考数据（财报/基本面）、日K线（估值参考）、新闻（行业趋势验证）。
+
+  3. 评分调整：
+     - Growth Score≥80 + 瓶颈地位强 → +10分
+     - Growth Score 60-79 → +5分
+     - Growth Score<40 或 连续2季恶化 → -8分
+     - PEG>2 估值透支成长 → -6分

@@ -477,11 +477,11 @@ class ResearchEngine:
             lines.append("")
 
         # 对持仓池影响
-        from config import ALL_CODES, STOCK_MAP
+        from config import ALL_CODES, STOCK_MAP, get_stock_name
         impacted = []
         for s in signals:
             if s["ticker"] in ALL_CODES:
-                name = STOCK_MAP.get(s["ticker"], {}).get("name", s["ticker"])
+                name = get_stock_name(s["ticker"])
                 impacted.append(f"  {name}({s['ticker']}): {'🟢' if s['signal_type']=='bullish' else '🔴'} {s['reason']}")
 
         if impacted:

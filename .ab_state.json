@@ -1,0 +1,27 @@
+{
+  "active_variant": "B_balanced",
+  "promoted_at": null,
+  "history": [
+    {
+      "date": "2026-07-04",
+      "ranking": [
+        {
+          "variant": "B_balanced",
+          "sharpe": 5.652,
+          "win_rate": 100.0
+        },
+        {
+          "variant": "C_aggressive",
+          "sharpe": 5.648,
+          "win_rate": 100.0
+        },
+        {
+          "variant": "A_conservative",
+          "sharpe": 0,
+          "win_rate": 0
+        }
+      ],
+      "winner": "B_balanced"
+    }
+  ]
+}

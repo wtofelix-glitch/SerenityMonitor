@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from db import get_conn
@@ -45,37 +45,52 @@ def _load_signal_stats(system: str, start: str, end: str) -> dict:
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT action, COUNT(*) as n, AVG(outcome_5d) as avg_ret_5d "
-            "FROM signal_log WHERE date >= ? AND date <= ? "
-            "GROUP BY action",
+            "SELECT action, outcome_5d FROM signal_log "
+            "WHERE date >= ? AND date <= ?",
             (start, end)
         ).fetchall()
-        total = sum(r["n"] for r in rows)
-        wins = sum(r["n"] for r in rows if (r["avg_ret_5d"] or 0) > 0)
+        settled = [r for r in rows if r["outcome_5d"] is not None]
+        total = len(rows)
+        wins = sum(1 for r in settled if float(r["outcome_5d"]) > 0)
+        by_action = {}
+        for row in rows:
+            action = row["action"]
+            bucket = by_action.setdefault(action, {"n": 0, "settled": 0, "sum": 0.0})
+            bucket["n"] += 1
+            if row["outcome_5d"] is not None:
+                bucket["settled"] += 1
+                bucket["sum"] += float(row["outcome_5d"])
         return {
             "total_signals": total,
-            "by_action": {r["action"]: {"n": r["n"], "avg_ret_5d": round(r["avg_ret_5d"] or 0, 4)}
-                          for r in rows},
-            "win_rate": round(wins / max(total, 1), 4),
+            "settled_signals": len(settled),
+            "by_action": {
+                action: {
+                    "n": values["n"],
+                    "avg_ret_5d": round(values["sum"] / max(values["settled"], 1), 4),
+                }
+                for action, values in by_action.items()
+            },
+            "win_rate": round(wins / max(len(settled), 1), 4),
         }
     finally:
         conn.close()
 
 
-def _load_nav_weekly_return() -> float:
-    """从 nav_history 获取本周累计收益。"""
+def _load_nav_weekly_return() -> Optional[float]:
+    """只用不可变券商快照计算周收益；不足两点则不出数。"""
     conn = get_conn()
     try:
         ws = _get_week_start()
         rows = conn.execute(
-            "SELECT profit_pct FROM nav_history WHERE date >= ? AND date <= ?",
-            (ws.isoformat(), date.today().isoformat())
+            "SELECT snapshot_at, total_assets FROM portfolio_reconciliations "
+            "WHERE date(snapshot_at) >= ? AND date(snapshot_at) <= ? ORDER BY snapshot_at",
+            (ws.isoformat(), date.today().isoformat()),
         ).fetchall()
-        if rows:
-            return sum(r["profit_pct"] or 0 for r in rows)
+        if len(rows) >= 2 and float(rows[0]["total_assets"] or 0) > 0:
+            return float(rows[-1]["total_assets"]) / float(rows[0]["total_assets"]) - 1.0
     finally:
         conn.close()
-    return 0.0
+    return None
 
 
 def _load_weekly_returns_since(start_date: str) -> list[float]:
@@ -108,14 +123,14 @@ def generate_weekly_report() -> str:
     week_label = f"{ws.isoformat()} ~ {today.isoformat()}"
 
     # 系统 A: Adaptive (当前系统 — 从 nav_history)
-    adaptive_return = round(_load_nav_weekly_return() * 100, 2)
+    adaptive_raw = _load_nav_weekly_return()
+    adaptive_return = round(adaptive_raw * 100, 2) if adaptive_raw is not None else None
     adaptive_signals = _load_signal_stats("adaptive", ws.isoformat(), today.isoformat())
 
     # 系统 B: Frozen Baseline
     try:
-        from frozen_baseline import FrozenBaseline
-        fb = FrozenBaseline()
-        frozen_signals_count = len(fb.score_all([{"code": c, "close": 0, "change_pct": 0, "volume": 0} for c in ALL_CODES]))
+        from frozen_baseline import BaselineComparator
+        frozen_signals_count = len(BaselineComparator().get_signals_today())
     except Exception:
         frozen_signals_count = 0
 
@@ -126,6 +141,9 @@ def generate_weekly_report() -> str:
         eq_return = round(eq.get_weekly_return() * 100, 2)
         eq_nav = eq.get_nav()
         eq_monthly = round(eq.get_monthly_return() * 100, 2)
+        eq_snapshot = eq.snapshot()
+        if eq_snapshot.get("data_points", 0) < 2:
+            eq_return = None
     except Exception:
         eq_return = 0.0
         eq_nav = 0.0
@@ -157,6 +175,8 @@ def generate_weekly_report() -> str:
 
     # 判定规则评估
     verdict = _evaluate_verdict(adaptive_return, eq_return)
+    adaptive_text = "—" if adaptive_return is None else f"{adaptive_return:+.2f}%"
+    eq_text = "—" if eq_return is None else f"{eq_return:+.2f}%"
 
     lines = [
         "# SerenityMonitor 三系统并跑周报",
@@ -171,13 +191,13 @@ def generate_weekly_report() -> str:
         "## 三系统本周对比",
         "| 系统 | 周收益 | 信号数 | 胜率(5d) | 备注 |",
         "|------|--------|--------|---------|------|",
-        f"| A: Adaptive | {adaptive_return:+.2f}% | {adaptive_signals['total_signals']} | {adaptive_signals['win_rate']:.0%} | 当前系统 (冻结中) |",
+        f"| A: Adaptive | {adaptive_text} | {adaptive_signals['total_signals']} | {adaptive_signals['win_rate']:.0%} ({adaptive_signals['settled_signals']}) | 券商快照口径 |",
         f"| B: Frozen | — | ~{frozen_signals_count} | — | 固定规则, 无自适应 |",
-        f"| C: Equal Weight | {eq_return:+.2f}% | — | — | 月频再平衡, NAV ¥{eq_nav:,.0f} |",
+        f"| C: Equal Weight | {eq_text} | — | — | 真实逐日账本, NAV ¥{eq_nav:,.0f} |",
         "",
         "## 判定规则",
-        f"  Adaptive {adaptive_return:+.2f}% vs Frozen — (Frozen 收益数据待分数历史积累)",
-        f"  Frozen vs Equal Weight {eq_return:+.2f}% — (Frozen 分数历史积累中)",
+        f"  Adaptive {adaptive_text} vs Frozen — (Frozen 收益数据待分数历史积累)",
+        f"  Frozen vs Equal Weight {eq_text} (Frozen 分数历史积累中)",
         f"  规则: 连续 {FROZEN_WINDOW_WEEKS} 周 Adaptive < Frozen → 冻结",
         f"  规则: 连续 {FROZEN_EQ_WINDOW_WEEKS} 周 Frozen < Equal Weight → 暂停评分",
         f"  要求: 窗口内覆盖 ≥{MIN_WEEKS_NON_BULL} 周非单边上涨",
@@ -209,8 +229,10 @@ def generate_weekly_report() -> str:
     return "\n".join(lines)
 
 
-def _evaluate_verdict(adaptive_return: float, eq_return: float) -> str:
+def _evaluate_verdict(adaptive_return: Optional[float], eq_return: Optional[float]) -> str:
     """评估本周判定规则（当前为初始状态，Frozen 数据积累中）。"""
+    if adaptive_return is None or eq_return is None:
+        return "⏳ 真实账本不足两个时点，本周不做收益优劣判定"
     if adaptive_return < 0 and eq_return > 0:
         return "⚠️ Adaptive 亏损 + Equal Weight 盈利 — 关注后续趋势"
     if adaptive_return > 0 and eq_return > 0:

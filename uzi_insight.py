@@ -11,9 +11,9 @@ v3.0 重新定位：从评分因子降级为纯信息模块。
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Optional, Any
 
-from config import STOCK_DETAILS, STOCK_MAP
+from config import STOCK_DETAILS, STOCK_MAP, get_stock_name
 
 
 AI_CHAIN_KEYWORDS = (
@@ -182,12 +182,12 @@ def _detect_traps(
 def evaluate_uzi_insight(
     code: str,
     *,
-    snapshot: dict | None = None,
-    detail: dict | None = None,
-    moat_result: dict | None = None,
-    serenity_score: float | None = None,
-    sentiment_score: float | None = None,
-    evidence_summary: dict | None = None,
+    snapshot: Optional[dict] = None,
+    detail: Optional[dict] = None,
+    moat_result: Optional[dict] = None,
+    serenity_score: Optional[float] = None,
+    sentiment_score: Optional[float] = None,
+    evidence_summary: Optional[dict] = None,
 ) -> dict:
     """Return UZI-style bottleneck/evidence/penalty insight for one stock."""
     detail = detail if detail is not None else STOCK_DETAILS.get(code, {})
@@ -200,7 +200,7 @@ def evaluate_uzi_insight(
         except Exception:
             evidence_summary = {"grade": "none", "counts": {}, "total": 0, "titles": [], "records": []}
 
-    name = STOCK_MAP.get(code, {}).get("name", code)
+    name = get_stock_name(code)
     evidence_text = _text_blob(
         evidence_summary.get("titles", []),
         [r.get("summary", "") for r in evidence_summary.get("records", [])],
@@ -401,7 +401,7 @@ def get_uzi_chain_dashboard(code: str) -> dict:
 
     return {
         "code": code,
-        "name": STOCK_MAP.get(code, {}).get("name", code),
+        "name": get_stock_name(code),
         "chain_tier": result["ai_chain_tier"],
         "chain_keywords": result["ai_chain_keywords"][:5],
         "evidence_grade": result["evidence_grade"],
@@ -417,7 +417,7 @@ def get_uzi_chain_dashboard(code: str) -> dict:
 def _empty_dashboard(code: str) -> dict:
     return {
         "code": code,
-        "name": STOCK_MAP.get(code, {}).get("name", code),
+        "name": get_stock_name(code),
         "chain_tier": "未知",
         "chain_keywords": [],
         "evidence_grade": "none",

@@ -214,15 +214,20 @@ def compute_rank_ic(days: int = 30, window: int = 20, offset_days: int = 0) -> d
         result["n_days"][dim] = len(wdw)
         result["all_ics"][dim] = [round(v, 4) for v in ics]
 
-    # 按最新 IC 绝对值排序
+    # ── v4 Phase 3: ICIR 主排序 + IC 均值备份排序 ──
+    # 主排序：按 |ICIR| 降序（ICIR 同时衡量效应大小和稳定性）
     dims_with_data = [
-        (dim, result["latest"][dim])
+        (dim, result["ic_ir"].get(dim, 0), result["mean_ic"].get(dim, 0))
         for dim in dimensions
         if result["n_days"].get(dim, 0) > 0
     ]
-    dims_sorted = sorted(dims_with_data, key=lambda x: abs(x[1]), reverse=True)
-    result["rankings"]["best"] = dims_sorted[:5]
-    result["rankings"]["worst"] = dims_sorted[-5:] if len(dims_sorted) > 5 else []
+    dims_icir_sorted = sorted(dims_with_data, key=lambda x: abs(x[1]), reverse=True)
+    dims_ic_sorted = sorted(dims_with_data, key=lambda x: abs(x[2]), reverse=True)
+
+    result["rankings"]["best"] = [(t[0], t[1]) for t in dims_icir_sorted[:5]]
+    result["rankings"]["worst"] = [(t[0], t[1]) for t in dims_icir_sorted[-5:]]
+    result["rankings"]["best_by_ic"] = [(t[0], t[2]) for t in dims_ic_sorted[:5]]
+    result["rankings"]["metric"] = "icir"  # 标记主排序指标
 
     return result
 
@@ -339,6 +344,27 @@ if __name__ == "__main__":
 
 
 # ============================================================
+# 🆕 v6.0 进化内核证据导出 — 供 serenity_evolution 消费
+# ============================================================
+
+
+def export_evolution_evidence(days: int = 60, window: int = 20) -> dict:
+    """导出 IC 证据供进化内核使用。
+
+    返回格式对齐 evolution_bridge.collect_ic_evidence()。
+    只写证据，绝不修改权重。
+    """
+    result = compute_rank_ic(days=days, window=window)
+    return {
+        "all_ics": result.get("all_ics", {}),
+        "mean_ic": result.get("mean_ic", {}),
+        "n_days": result.get("n_days", {}),
+        "rankings": result.get("rankings", {}),
+        "collected_at": __import__("datetime").datetime.now().isoformat(),
+    }
+
+
+# ============================================================
 # 🆕 v3.0 维度自动建议 — 基于 IC 趋势的淘汰/降权推荐
 # ============================================================
 
@@ -368,12 +394,13 @@ def recommend_dimension_changes(days: int = 30, window: int = 14,
     - mean_IC < nag_threshold 且有效天数 >= nag_days → 建议降权或移除
     - IC 连续 N 天为负且 N >= nag_days → 警告
 
-    提权信号：
-    - mean_IC > promote_threshold 且 IC_IR > 0.5 → 建议提权
+    提权信号（v4 Phase 3: ICIR 主指标）：
+    - |ICIR| > 0.5 且 mean_IC > 0 → 建议提权
+    - |ICIR| < 0.2 或 CI 含零 → 噪声因子
 
     Returns:
         {
-            "warnings": [{dim, mean_ic, nag_days, action, reason}, ...],
+            "warnings": [{dim, mean_ic, ic_ir, nag_days, action, reason}, ...],
             "promotions": [{dim, mean_ic, ic_ir, action}, ...],
             "summary": str,
         }
@@ -393,40 +420,42 @@ def recommend_dimension_changes(days: int = 30, window: int = 14,
 
         weight_key = _WEIGHT_MAP.get(dim, dim)
 
-        # 淘汰检查
-        if mic < nag_threshold and nd >= nag_days:
+        # v4 Phase 3: 淘汰检查 — 以 ICIR 为主，mean_IC 为辅
+        if ir < -0.3 and nd >= nag_days:
             warnings.append({
                 "dim": dim,
                 "weight_key": weight_key,
                 "mean_ic": round(mic, 4),
                 "n_days": nd,
                 "ic_ir": round(ir, 3),
-                "action": "DEGRADE" if mic > -0.06 else "ELIMINATE",
+                "action": "ELIMINATE",
                 "reason": (
-                    f"mean_IC={mic:.3f} < {nag_threshold:.2f} 持续{nd}天 → "
-                    + ("建议降权" if mic > -0.06 else "建议淘汰")
+                    f"ICIR={ir:.3f} < -0.3 持续{nd}天 → 建议淘汰"
                 ),
             })
-        elif mic < 0 and nd >= nag_days:
+        elif ir < 0 and nd >= nag_days:
             warnings.append({
                 "dim": dim,
                 "weight_key": weight_key,
                 "mean_ic": round(mic, 4),
                 "n_days": nd,
                 "ic_ir": round(ir, 3),
-                "action": "MONITOR",
-                "reason": f"mean_IC={mic:.3f} 持续为负{nd}天 → 关注，暂不调整",
+                "action": "DEGRADE" if ir < -0.1 else "MONITOR",
+                "reason": (
+                    f"ICIR={ir:.3f} 持续{nd}天 → "
+                    + ("建议降权" if ir < -0.1 else "关注，暂不调整")
+                ),
             })
 
-        # 提权检查
-        if mic > promote_threshold and ir > 0.5:
+        # v4 Phase 3: 提权检查 — ICIR > 0.5 为主条件
+        if ir > 0.5 and mic > 0:
             promotions.append({
                 "dim": dim,
                 "weight_key": weight_key,
                 "mean_ic": round(mic, 4),
                 "ic_ir": round(ir, 3),
                 "action": "PROMOTE",
-                "reason": f"mean_IC={mic:+.3f} IR={ir:.2f} → 建议提权",
+                "reason": f"ICIR={ir:.2f} mean_IC={mic:+.3f} → 建议提权",
             })
 
     # 按严重性排序

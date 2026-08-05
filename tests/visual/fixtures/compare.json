@@ -1,0 +1,20 @@
+{
+ "benchmark": {
+  "name": "沪深300",
+  "return": 29.4
+ },
+ "diff_paper_vs_real": 3.28,
+ "ok": true,
+ "paper": {
+  "cash": 51066.41,
+  "pnl": 0.0,
+  "positions": 0,
+  "total": 51066.41
+ },
+ "real": {
+  "cash": 2652.31,
+  "pnl": -3.28,
+  "positions": 2,
+  "total": 49392.31
+ }
+}

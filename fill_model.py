@@ -63,8 +63,8 @@ class FillModel:
 
     def prob_fill_at_limit_up(self, code: str,
                                is_hard: bool = False,
-                               volume: float | None = None,
-                               turnover_amount: float | None = None) -> FillProbability:
+                               volume: Optional[float] = None,
+                               turnover_amount: Optional[float] = None) -> FillProbability:
         """涨停板买入成交概率。
 
         一字板（is_hard=True）：约 3%
@@ -100,7 +100,7 @@ class FillModel:
 
     def prob_fill_at_limit_down(self, code: str,
                                  is_hard: bool = False,
-                                 volume: float | None = None) -> FillProbability:
+                                 volume: Optional[float] = None) -> FillProbability:
         """跌停板卖出成交概率。
 
         一字板（is_hard=True）：约 3%
@@ -142,8 +142,8 @@ class FillModel:
         )
 
     def prob_fill(self, code: str, limit_status: str,
-                  volume: float | None = None,
-                  turnover_amount: float | None = None) -> FillProbability:
+                  volume: Optional[float] = None,
+                  turnover_amount: Optional[float] = None) -> FillProbability:
         """统一接口：根据涨跌停状态返回成交概率。"""
         if limit_status == "limit_up_hard":
             return self.prob_fill_at_limit_up(code, is_hard=True, volume=volume)

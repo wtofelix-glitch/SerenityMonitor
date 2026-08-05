@@ -18,7 +18,7 @@ from db import (
     get_latest_scores,
     get_recent_signals,
 )
-from config import STOCK_MAP, STOCK_DETAILS
+from config import STOCK_MAP, STOCK_DETAILS, get_stock_name
 from weight_adjuster import load_adjusted_weights, DEFAULT_WEIGHTS
 
 
@@ -45,7 +45,7 @@ def _week_range() -> tuple[str, str]:
 
 def _get_stock_name(code: str) -> str:
     """从 STOCK_MAP 获取股票中文名"""
-    return STOCK_MAP.get(code, {}).get("name", code)
+    return get_stock_name(code)
 
 
 def _fetch_weekly_signals(days: int = 7) -> list[dict]:

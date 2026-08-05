@@ -5,9 +5,9 @@
 from datetime import date, datetime
 from typing import Optional
 
-from db import get_conn
-from config import CAPITAL_CONFIG, STOCK_MAP
+from config import CAPITAL_CONFIG, STOCK_MAP, get_stock_name
 from data_engine import fetch_realtime
+from db import get_conn
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -185,7 +185,7 @@ class PaperTrader:
 
             positions.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "avg_cost": round(avg_cost, 2),
                 "current_price": current_price,
                 "shares": shares,
@@ -257,7 +257,7 @@ class PaperTrader:
         conn.commit()
         conn.close()
 
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         log.info("纸面%s: %s(%s) %d股 @%.2f", action, name, code, shares, price)
 
         return {
@@ -556,6 +556,37 @@ class PaperTrader:
             "snapshots": [{"date": r["date"], "value": r["current_value"],
                            "pnl_pct": r["pnl_pct"]} for r in rows],
         }
+
+    # ── 🆕 v6.0 进化内核权重读取 ──────────────────────────────
+
+    def get_evolution_paper_weights(self) -> dict | None:
+        """读取 evolution_active_v2 中 paper 环境的活跃候选权重。
+
+        进化内核通过闸门后写入 paper 环境，paper_trader 读取该权重
+        用于纸面金丝雀阶段的交易决策。
+
+        Returns:
+            None 如果没有活跃的进化候选（退回 Frozen Baseline）
+        """
+        try:
+            from evolution_bridge import get_active_paper_weights
+            return get_active_paper_weights()
+        except Exception:
+            return None
+
+    def get_active_weights(self) -> dict:
+        """获取当前应使用的权重（进化候选优先，否则退回 Frozen Baseline）。"""
+        evo = self.get_evolution_paper_weights()
+        if evo is not None:
+            log.info("纸面交易使用进化候选权重: %s", evo)
+            return evo
+        # 退回到 weight_adjuster 的动态权重或默认
+        try:
+            from weight_adjuster import load_adjusted_weights
+            return load_adjusted_weights()
+        except Exception:
+            from evolution_bridge import FROZEN_DEFAULT_WEIGHTS
+            return dict(FROZEN_DEFAULT_WEIGHTS)
 
 
 # 全局单例

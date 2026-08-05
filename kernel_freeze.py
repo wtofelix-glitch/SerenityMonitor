@@ -25,11 +25,18 @@ from typing import Optional
 
 # ═══════════════════════════════════════════════════════════════
 # 冻结清单 — v4 §2.2
+#
+# freeze_type 分类:
+#   "switch"     — 运行时标志位分支，改一个 flag 即可切换冻结/解冻
+#                  （解冻成本低，Phase 5 可快速验证）
+#   "structural" — 模块未接入评分/信号管线，无运行时调用入口
+#                  （解冻前需先写接入代码 + 补测试，工作量大）
 # ═══════════════════════════════════════════════════════════════
 
 FROZEN_MANIFEST = {
     "weight_adjuster": {
         "frozen": True,
+        "freeze_type": "switch",
         "description": "IC 驱动权重自进化 — 冻结后使用默认固定权重（_SCORE_WEIGHT_DEFAULTS）",
         "frozen_behavior": "scorer.py 的 score_weight 直接使用 _SCORE_WEIGHT_DEFAULTS，不从 weight_adjuster 加载",
         "frozen_since": "2026-07-05",
@@ -42,6 +49,7 @@ FROZEN_MANIFEST = {
     },
     "signal_thresholds": {
         "frozen": True,
+        "freeze_type": "structural",
         "description": "信号阈值自校准 — 冻结后使用固定阈值，不做周期性重校准",
         "frozen_behavior": "SIGNAL_CONFIG 中的阈值不变，不根据历史胜率自动调整",
         "frozen_since": "2026-07-05",
@@ -53,6 +61,7 @@ FROZEN_MANIFEST = {
     },
     "sentinel_weights": {
         "frozen": True,
+        "freeze_type": "switch",
         "description": "哨兵信源权重自进化 — 冻结后权重只记录不生效，不影响评分",
         "frozen_behavior": "sentinel_engine 继续采集和记录，但 compute_sentinel_bonus() 始终返回 0",
         "frozen_since": "2026-07-05",
@@ -64,6 +73,7 @@ FROZEN_MANIFEST = {
     },
     "conviction": {
         "frozen": True,
+        "freeze_type": "switch",
         "description": "Conviction 动态阈值 — 冻结后只输出辩论结果，不调整买卖门槛",
         "frozen_behavior": "conviction_engine 继续生成辩论，但 _apply_conviction_to_signal_config() 返回原值不做修改",
         "frozen_since": "2026-07-05",
@@ -75,6 +85,7 @@ FROZEN_MANIFEST = {
     },
     "llm_sentiment": {
         "frozen": True,
+        "freeze_type": "switch",
         "description": "LLM 情绪引擎 — 冻结后 LLM 情绪不进核心评分，仅用于日报/复盘",
         "frozen_behavior": "sentiment_engine LLM 模式暂停。关键词情绪模式作为观察信号运行但不参与 technical_score 融合",
         "frozen_since": "2026-07-05",
@@ -86,6 +97,7 @@ FROZEN_MANIFEST = {
     },
     "serenity_council": {
         "frozen": True,
+        "freeze_type": "structural",
         "description": "5-Agent 投委会 — 冻结后只输出委员会意见，不改变任何信号",
         "frozen_behavior": "serenity_council 继续生成委员会报告，但不注入评分或修改信号",
         "frozen_since": "2026-07-05",
@@ -96,6 +108,7 @@ FROZEN_MANIFEST = {
     },
     "debate_engine": {
         "frozen": True,
+        "freeze_type": "structural",
         "description": "辩论引擎 — 冻结后只输出辩论摘要，不注入评分",
         "frozen_behavior": "debate_engine 继续生成辩论，但 inject_debate_into_score() 不修改评分",
         "frozen_since": "2026-07-05",
@@ -105,6 +118,7 @@ FROZEN_MANIFEST = {
     },
     "ensemble_voting": {
         "frozen": True,
+        "freeze_type": "structural",
         "description": "多源融合投票 — 冻结后只输出融合结果作为参考，不作为交易依据",
         "frozen_behavior": "ensemble_voting 继续输出结果，但不影响信号生成",
         "frozen_since": "2026-07-05",
@@ -114,6 +128,7 @@ FROZEN_MANIFEST = {
     },
     "market_sense_regime_shifts": {
         "frozen": True,
+        "freeze_type": "switch",
         "description": "市场体制权重偏移 — 冻结后不使用 REGIME_WEIGHT_SHIFTS 动态修改评分权重",
         "frozen_behavior": "scorer.py 使用固定权重，不叠加市场状态偏移",
         "frozen_since": "2026-07-05",

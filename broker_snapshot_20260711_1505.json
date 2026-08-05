@@ -1,0 +1,40 @@
+{
+  "snapshot_at": "2026-07-11 15:05:00",
+  "source": "broker_manual",
+  "total_assets": 62549.0,
+  "holdings_value": 55235.0,
+  "cash": 7314.06,
+  "daily_profit": null,
+  "daily_profit_pct": null,
+  "total_profit_pct": 22.49,
+  "positions": [
+    {
+      "code": "600036",
+      "name": "招商银行",
+      "shares": 700,
+      "cost": 35.8,
+      "price": 36.88,
+      "market_value": 25816.0,
+      "profit_pct": 3.0
+    },
+    {
+      "code": "000988",
+      "name": "华工科技",
+      "shares": 100,
+      "cost": 139.4,
+      "price": 158.07,
+      "market_value": 15807.0,
+      "profit_pct": 13.4
+    },
+    {
+      "code": "600141",
+      "name": "兴发集团",
+      "shares": 400,
+      "cost": 34.05,
+      "price": 34.03,
+      "market_value": 13612.0,
+      "profit_pct": -0.1
+    }
+  ],
+  "notes": "2026-07-11 收盘券商数据"
+}

@@ -323,7 +323,8 @@ class TestForceExecute:
             "sells": [{"code": "600487", "shares": 100, "estimated_proceeds": 9500,
                        "reasons": ["评分低"]}],
             "buys": [{"code": "002281", "price": 200.0, "shares": 100,
-                      "amount": 20000, "reason": "龙头标的"}],
+                      "amount": 20000, "reason": "龙头标的",
+                      "net_edge": {"ready": True, "samples": 50, "net_pct": 0.8}}],
         }
 
         ae._record_execution_orders(plan)
@@ -332,6 +333,25 @@ class TestForceExecute:
         assert len(rows) == 2
         actions = {r["action"] for r in rows}
         assert actions == {"BUY", "SELL"}
+
+    def test_record_execution_orders_skips_buy_without_net_edge(self, monkeypatch):
+        """force-execute 只记录有净期望证据的买单"""
+        import auto_execute as ae
+        _conn = self._mock_db(monkeypatch)
+        today = date.today().isoformat()
+
+        plan = {
+            "date": today,
+            "sells": [],
+            "buys": [{"code": "002281", "price": 200.0, "shares": 100,
+                      "amount": 20000, "reason": "龙头标的",
+                      "net_edge": {"ready": False, "samples": 0, "net_pct": None}}],
+        }
+
+        ae._record_execution_orders(plan)
+
+        rows = _conn.execute("SELECT * FROM execution_log").fetchall()
+        assert rows == []
 
     def test_retry_pending_dry_run(self, monkeypatch):
         """dry-run 重试不修改数据库"""
@@ -356,6 +376,38 @@ class TestForceExecute:
         n = ae._retry_pending_executions(dry_run=True)
         assert n == 1
 
+    def test_retry_pending_requires_live_gate_when_not_dry_run(self, monkeypatch):
+        """直接调用 retry 非 dry-run 也必须经过 P0-aware gate"""
+        import auto_execute as ae
+        import auto_gate
+        import data_engine
+        _conn = self._mock_db(monkeypatch)
+
+        today = date.today().isoformat()
+        _conn.execute("""
+            INSERT INTO execution_log
+                (date, code, action, status, shares, amount, reason, attempt)
+            VALUES (?, ?, 'SELL', 'pending', 100, 9500, 'test', 1)
+        """, (today, "600487"))
+        _conn.commit()
+
+        monkeypatch.setattr(auto_gate, "evaluate_auto_gate", lambda explain=False: {
+            "state": "LOCKED",
+            "p0_alpha_validation": {"verdict": "P0_DATA_INVALID"},
+        })
+        monkeypatch.setattr(auto_gate, "format_gate_report", lambda gate: "gate LOCKED")
+        monkeypatch.setattr(
+            data_engine,
+            "fetch_single",
+            lambda code: (_ for _ in ()).throw(AssertionError("must not fetch")),
+        )
+
+        n = ae._retry_pending_executions(dry_run=False)
+
+        assert n == 0
+        row = _conn.execute("SELECT status FROM execution_log").fetchone()
+        assert row["status"] == "pending"
+
     def test_execution_stats_output(self, monkeypatch, capsys):
         """--stats 输出格式正确（无记录时）"""
         monkeypatch.setattr('auto_execute.cmd_execution_stats', lambda: print(
@@ -373,6 +425,78 @@ class TestForceExecute:
         auto_execute.cmd_premarket_push()
         captured = capsys.readouterr()
         assert "盘前" in captured.out or "自动执行" in captured.out
+
+
+class TestAutoGateExecution:
+    def test_force_execute_blocks_before_plan_when_gate_locked(self, monkeypatch):
+        import auto_gate
+
+        monkeypatch.setattr(auto_execute.sys, "argv", ["auto_execute.py", "--force-execute"])
+        monkeypatch.setattr(auto_gate, "evaluate_auto_gate", lambda explain=False: {
+            "state": "LOCKED",
+            "p0_alpha_validation": {"verdict": "P0_DATA_INVALID"},
+        })
+        monkeypatch.setattr(auto_gate, "format_gate_report", lambda gate: "gate LOCKED")
+        monkeypatch.setattr(
+            auto_execute,
+            "generate_execution_plan",
+            lambda dry_run=False: (_ for _ in ()).throw(AssertionError("must not generate mutating plan")),
+        )
+
+        result = auto_execute.cmd_force_execute()
+
+        assert result["blocked"] is True
+        assert result["gate"]["state"] == "LOCKED"
+
+    def test_direct_execute_delegates_to_gate_state_machine(self, monkeypatch):
+        plan = {
+            "date": date.today().isoformat(),
+            "sells": [],
+            "buys": [{"code": "002281", "price": 10, "shares": 100, "amount": 1000}],
+            "summary": "plan",
+        }
+        calls = []
+
+        monkeypatch.setattr(auto_execute.sys, "argv", ["auto_execute.py", "--execute"])
+        monkeypatch.setattr(auto_execute, "generate_execution_plan", lambda dry_run=False: plan)
+        monkeypatch.setattr(
+            auto_execute,
+            "auto_execute_if_gate_allows",
+            lambda received: calls.append(received) or {"state": "LOCKED", "executed": False},
+        )
+
+        auto_execute.main()
+
+        assert calls == [plan]
+
+    def test_auto_execute_uses_live_p0_gate_not_stale_latest_result(self, monkeypatch):
+        import auto_gate
+        import paper_trader
+
+        class FakePaperTrader:
+            def auto_trade_from_signals(self, trade_date):
+                return []
+
+        monkeypatch.setattr(auto_gate, "evaluate_auto_gate", lambda explain=False: {
+            "state": "LOCKED",
+            "p0_alpha": {"verdict": "P0_DATA_INVALID"},
+        })
+        monkeypatch.setattr(auto_gate, "format_gate_report", lambda gate: "gate LOCKED")
+        monkeypatch.setattr(
+            auto_gate,
+            "get_latest_gate_result",
+            lambda: {"state": "SEMI_AUTO"},
+        )
+        monkeypatch.setattr(paper_trader, "PaperTrader", FakePaperTrader)
+
+        result = auto_execute.auto_execute_if_gate_allows({
+            "sells": [],
+            "buys": [{"code": "002281", "price": 10, "shares": 100, "amount": 1000}],
+        })
+
+        assert result["state"] == "LOCKED"
+        assert result["executed"] is False
+        assert result["paper_trades"] == 0
 
 
 class TestParseDetails:

@@ -27,7 +27,7 @@ from collections import defaultdict
 import math
 
 from db import get_conn, get_price_history
-from config import ALL_CODES, STOCK_MAP
+from config import ALL_CODES, STOCK_MAP, get_stock_name
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -53,18 +53,18 @@ class CorrelationCluster:
         self._corr_matrix: dict[str, dict[str, float]] = {}  # code → {code: corr}
         self._clusters: dict[int, list[str]] = {}             # cluster_id → [codes]
         self._code_to_cluster: dict[str, int] = {}            # code → cluster_id
-        self._daily_returns: dict[str, list[float]] = {}      # code → [daily_returns]
+        self._daily_returns: dict[str, dict[str, float]] = {}  # code → {date: return}
         self._last_update: str = ""
 
     # ── 数据获取 ──────────────────────────────────────────
 
-    def _load_returns(self, codes: list[str] | None = None) -> dict[str, list[float]]:
+    def _load_returns(self, codes: Optional[list[str]] = None) -> dict[str, dict[str, float]]:
         """从 daily_snapshots 加载近 N 日收益率序列。"""
         if codes is None:
             codes = list(ALL_CODES)
 
         conn = get_conn()
-        returns: dict[str, list[float]] = {c: [] for c in codes}
+        returns: dict[str, dict[str, float]] = {c: {} for c in codes}
         try:
             start_date = (date.today() - timedelta(days=self.lookback_days * 2)).isoformat()
             placeholders = ",".join("?" * len(codes))
@@ -84,7 +84,7 @@ class CorrelationCluster:
             # 取最近 N 天
             for code, data in by_code.items():
                 data.sort(key=lambda x: x[0])
-                returns[code] = [d[1] for d in data[-self.lookback_days:]]
+                returns[code] = dict(data[-self.lookback_days:])
         except Exception as e:
             log.warning(f"加载收益率数据失败: {e}")
         finally:
@@ -118,7 +118,7 @@ class CorrelationCluster:
         r = cov / (std_x * std_y)
         return max(-1.0, min(1.0, r))  # clamp
 
-    def compute_correlation_matrix(self, codes: list[str] | None = None,
+    def compute_correlation_matrix(self, codes: Optional[list[str]] = None,
                                    force_refresh: bool = False) -> dict[str, dict[str, float]]:
         """计算近 N 日收益相关矩阵。
 
@@ -137,14 +137,18 @@ class CorrelationCluster:
         matrix: dict[str, dict[str, float]] = {}
         for code in codes:
             matrix[code] = {}
-            ret_a = self._daily_returns.get(code, [])
+            ret_a = self._daily_returns.get(code, {})
             if len(ret_a) < 5:
                 continue
             for other in codes:
                 if other <= code:
                     continue
-                ret_b = self._daily_returns.get(other, [])
-                corr = self._pearson(ret_a, ret_b)
+                ret_b = self._daily_returns.get(other, {})
+                common_dates = sorted(set(ret_a) & set(ret_b))
+                corr = self._pearson(
+                    [ret_a[d] for d in common_dates],
+                    [ret_b[d] for d in common_dates],
+                )
                 matrix[code][other] = round(corr, 4)
                 if other not in matrix:
                     matrix[other] = {}
@@ -157,7 +161,7 @@ class CorrelationCluster:
     # ── 聚类 ──────────────────────────────────────────────
 
     def identify_clusters(self, threshold: float = CORRELATION_THRESHOLD,
-                          codes: list[str] | None = None) -> dict[int, list[str]]:
+                          codes: Optional[list[str]] = None) -> dict[int, list[str]]:
         """识别相关性簇。
 
         |r| > threshold → 同一簇。
@@ -351,7 +355,7 @@ class CorrelationCluster:
         ]
 
         for cid, members in sorted(self._clusters.items()):
-            names = [f"{c}({STOCK_MAP.get(c, {}).get('name', c)})" for c in members]
+            names = [f"{c}({get_stock_name(c)})" for c in members]
             lines.append(f"## 簇 {cid}: {len(members)} 只")
             lines.append(f"  {', '.join(names)}")
             # 簇内平均相关度

@@ -6,7 +6,7 @@ from datetime import date
 import json
 
 from data_engine import get_all_today_snapshots
-from config import STOCK_DETAILS, STOCK_MAP, ALL_CODES, compute_serenity_score
+from config import STOCK_DETAILS, STOCK_MAP, ALL_CODES, get_stock_name, compute_serenity_score
 from db import save_score_history, save_price_history, get_price_history, get_avg_volume
 from factor_engine import AlphaFactorEngine
 from moat_factor import compute_moat_score  # v2.0 护城河因子
@@ -17,8 +17,7 @@ from uzi_insight import evaluate_uzi_insight
 
 log = get_logger(__name__)
 
-# v3.0: UZI 不再作为评分维度，仅用于看板信息展示
-_UZI_INFO_ONLY = True
+# v3.0: UZI 不参与评分计算，仅用于看板信息展示和 audit_log 上下文
 
 try:
     from metrics import observe_score_duration, SCORE_COUNT, SCORE_ERRORS, SIGNAL_ACTIONS
@@ -48,9 +47,11 @@ except ImportError:
 # 动态权重 — 优先加载 weight_adjuster 的调整后权重
 # v4 Phase 1 内核冻结: 权重固定为默认值, 不从 weight_adjuster 加载
 _KERNEL_FROZEN = True  # 由 kernel_freeze.is_frozen("weight_adjuster") 控制
+_LLM_SENTIMENT_FROZEN = True
 try:
     from kernel_freeze import is_frozen as _kf_is_frozen
     _KERNEL_FROZEN = _kf_is_frozen("weight_adjuster") or _kf_is_frozen("market_sense_regime_shifts")
+    _LLM_SENTIMENT_FROZEN = _kf_is_frozen("llm_sentiment")
 except ImportError:
     pass
 
@@ -134,7 +135,10 @@ _EVOLVED_WEIGHTS_CACHE = None
 _EVOLVED_WEIGHTS_CACHE_TS = 0
 
 def refresh_weights():
-    """v5.5 刷新模块级权重状态 — Flask长期运行时调用"""
+    """[DEPRECATED v4 Phase 1] 内核冻结后权重不再动态调整，此函数无调用者。
+
+    保留用于将来可能的 Phase 5 解冻后使用。"""
+    log.warning("refresh_weights() called but kernel is frozen — no-op")
     global score_weight, _active_regime, _OPERATIONAL_MODE
     try:
         from weight_adjuster import load_adjusted_weights
@@ -747,7 +751,11 @@ def score_all() -> list[dict]:
 
         # v3.0 7维简化加权总分（移除 base: IC=-0.13）
         # sentiment 合并入 technical（80% 技术面 + 20% 情绪）
-        _merged_technical = technical_score * 0.80 + sentiment_score * 0.20
+        _merged_technical = (
+            technical_score
+            if _LLM_SENTIMENT_FROZEN
+            else technical_score * 0.80 + sentiment_score * 0.20
+        )
         # v3.3 资金面评分（轻量, 数据不可用时中性50分）
         try:
             from capital_flow import compute_capital_score
@@ -844,28 +852,49 @@ def score_all() -> list[dict]:
         # ── v4 Phase 2: 决策审计链 ──
         try:
             from audit_logger import get_audit_logger as _get_al
+            from auto_gate import estimate_net_expected_return
+            from frozen_baseline import FrozenBaseline
             _al = _get_al()
+            _components = {
+                "zone": round(zone_score, 1),
+                "momentum": round(momentum_score, 1),
+                "volume": round(volume_score, 1),
+                "serenity": serenity_score,
+                "factor": round(factor_score, 1),
+                "technical": round(technical_score, 1),
+                "moat": moat_score,
+                "capital": round(capital_score, 1),
+            }
+            _baseline = FrozenBaseline().score_components(_components)
+            _risk_checks = {
+                "valid_price": price > 0,
+                "mainboard_scope": code.startswith(("000", "002", "600", "601", "603", "605")),
+                "kernel_frozen": _KERNEL_FROZEN,
+            }
+            _can_execute = all(_risk_checks.values())
+            _edge = estimate_net_expected_return(code, signal_action)
             _al.log_signal(
                 code=code,
                 signal_type=signal_action,
                 total_score=round(total, 1),
-                score_components={
-                    "zone": round(zone_score, 1),
-                    "momentum": round(momentum_score, 1),
-                    "volume": round(volume_score, 1),
-                    "serenity": serenity_score,
-                    "factor": round(factor_score, 1),
-                    "technical": round(technical_score, 1),
-                    "moat": moat_score,
-                    "capital": round(capital_score, 1) if 'capital_score' in dir() else 50,
-                },
+                score_components=_components,
                 market_regime=_label,
-                baseline_signal="",  # Frozen Baseline 信号（由 Phase 2b 填充）
+                baseline_signal=_baseline["signal"],
                 adaptive_signal=signal_action,
-                risk_checks={},
+                risk_checks=_risk_checks,
+                can_execute=_can_execute,
+                cannot_execute_reason="" if _can_execute else "评分快照基础校验失败",
+                expected_return_gross=(
+                    _edge["gross_pct"] / 100 if _edge.get("gross_pct") is not None else None
+                ),
+                expected_return_net=(
+                    _edge["net_pct"] / 100 if _edge.get("net_pct") is not None else None
+                ),
+                expected_cost=_edge.get("expected_cost_pct", 0.302) / 100,
+                feature_snapshot={"market": snap, "components": _components},
             )
-        except Exception:
-            pass  # 审计日志写入失败不影响主流程
+        except Exception as exc:
+            log.error("[scorer] %s: 决策审计写入失败: %s", code, exc, exc_info=True)
 
         # P5: 实时回写评分到 stocks 表 (v5.5: errors logged)
         try:
@@ -878,7 +907,7 @@ def score_all() -> list[dict]:
 
         result = {
             "code": code,
-            "name": STOCK_MAP.get(code, {}).get("name", code),
+            "name": get_stock_name(code),
             "total_score": round(total, 1),
             "base_score": base_score,
             "zone_score": round(zone_score, 1),

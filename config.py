@@ -27,19 +27,75 @@ STOCK_MAP = {
     "601006": {"name": "大秦铁路", "market": "sh", "tier": 4},
     # 实盘持仓（全盘扫描推荐）
     "000938": {"name": "紫光股份", "market": "sz", "tier": 2},
+    # 机器人/自动化（2026-07-06 入池，宇树IPO+特斯拉Optimus量产催化）
+    "601689": {"name": "拓普集团", "market": "sh", "tier": 2},
+    "002050": {"name": "三花智控", "market": "sz", "tier": 2},
+    "601100": {"name": "恒立液压", "market": "sh", "tier": 2},
+    "600580": {"name": "卧龙电驱", "market": "sh", "tier": 2},
+    "002896": {"name": "中大力德", "market": "sz", "tier": 2},
 }
 
 # Tier 1 首选（光通信/AI算力最核心）
 TIER_1_CODES = ["002281", "000988"]
-TIER_2_CODES = ["600141", "603083", "600487", "000938"]
+TIER_2_CODES = ["600141", "603083", "600487", "000938", "601689", "002050", "601100", "600580", "002896"]
 TIER_3_CODES = ["002428", "600460", "603986", "600176"]
 TIER_4_CODES = ["600036", "600585", "600900", "601398", "601006"]  # 防御组合
 
 # 实盘扩展标的（不在原始14只池中但已持仓）
 EXTENDED_CODES = ["000938"]
 
-# 所有标的代码
+# 所有标的代码（v6.1: 20 只 — 15 + 5 机器人）
 ALL_CODES = list(STOCK_MAP.keys())
+
+
+def get_stock_name(code: str) -> str:
+    """统一的标的名称解析 — 所有模块都应使用此函数，禁止裸 code 显示。
+
+    优先级：
+    1. STOCK_MAP 中的中文名称
+    2. 数据库 stocks 表的 name 字段
+    3. 返回 code 本身（最终兜底）
+    """
+    # 优先从 STOCK_MAP 获取
+    info = STOCK_MAP.get(code)
+    if info and info.get("name"):
+        return info["name"]
+    # 尝试从数据库 stocks 表获取
+    try:
+        from db import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT name FROM stocks WHERE code=? AND name IS NOT NULL AND name != '' LIMIT 1",
+            (code,)
+        ).fetchone()
+        conn.close()
+        if row and row["name"]:
+            return row["name"]
+    except Exception:
+        pass
+    # 兜底：返回代码本身
+    return code
+
+# ═══════════════════════════════════════════════════════════════
+# 基准组合配置（v4 Frozen Baseline 治理）
+# ═══════════════════════════════════════════════════════════════
+# BENCHMARK_UNIVERSE_SIZE 不自动跟随 len(STOCK_MAP)。
+# 每次扩容 STOCK_MAP 时需显式决定是否同步扩大基准范围，
+# 该决定必须通过 audit_logger.log_pool_change() 留痕。
+#
+# Frozen Baseline 判定计时窗口重置规则：
+# ═══════════════════════════════════════════════════════════════
+# 以下任一条件触发计时重置（8 周/12 周窗口重新起算）：
+#   1. BENCHMARK_UNIVERSE_SIZE 数值发生变化（如 15→N）
+#   2. STOCK_MAP 成员变更导致 config_hash 变化
+#      → auto_gate.ensure_current_strategy_version() 自动创建新版本次元
+#      → strategy_versions.change_source 记录变更根因
+#   3. 任何直接修改 default_strategy_config() 返回值的参数调整
+#
+# 原则：基准组合成分股或评分参数发生任何变化时，
+#       累积的 Frozen vs Adaptive 对比周数不再可比，
+#       必须在新的参数纪元下重新累积。
+BENCHMARK_UNIVERSE_SIZE = 15
 
 # 新浪 API 前缀
 SINA_PREFIX = "http://hq.sinajs.cn/list="
@@ -166,6 +222,47 @@ STOCK_DETAILS = {
         "reason": "AI算力交换机龙头，新华三核心资产 — 数据中心交换机+服务器双主线，AI基建核心受益",
         "serenity_tag": "ai_switch",
     },
+    # 机器人/自动化（2026-07-06 入池）
+    "601689": {
+        "score": 72,
+        "buy_zone_low": 80.0,
+        "buy_zone_high": 105.0,
+        "target_sell": 135.0,
+        "reason": "特斯拉Optimus执行器模组核心供应商 — 机器人+汽车双主线，公募持仓40亿+",
+        "serenity_tag": "robot_actuator",
+    },
+    "002050": {
+        "score": 70,
+        "buy_zone_low": 28.0,
+        "buy_zone_high": 38.0,
+        "target_sell": 48.0,
+        "reason": "热管理/执行器龙头 — 特斯拉供应链核心，公募持仓60亿+，机器人+汽零双驱动",
+        "serenity_tag": "robot_thermal",
+    },
+    "601100": {
+        "score": 68,
+        "buy_zone_low": 55.0,
+        "buy_zone_high": 72.0,
+        "target_sell": 92.0,
+        "reason": "液压件龙头→人形机器人丝杠 — 技术壁垒高，国产替代+机器人新增量逻辑",
+        "serenity_tag": "robot_ballscrew",
+    },
+    "600580": {
+        "score": 65,
+        "buy_zone_low": 18.0,
+        "buy_zone_high": 25.0,
+        "target_sell": 32.0,
+        "reason": "伺服电机龙头 — 机器人动力系统核心供应商，国产伺服替代受益",
+        "serenity_tag": "robot_servo",
+    },
+    "002896": {
+        "score": 66,
+        "buy_zone_low": 35.0,
+        "buy_zone_high": 48.0,
+        "target_sell": 62.0,
+        "reason": "RV减速器+电机一体化 — 国产减速器替代，机器人关节核心部件",
+        "serenity_tag": "robot_reducer",
+    },
 
     "600176": {
         "score": 55,
@@ -208,6 +305,12 @@ SERENITY_DIMENSIONS = {
     "600900": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 98, "momentum_fit": 70},
     "601398": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 95, "momentum_fit": 65},
     "601006": {"cpo_alignment": 5, "bottleneck_position": 5, "ai_capex_exposure": 0, "defensive_moat": 85, "momentum_fit": 60},
+    # 机器人/自动化（2026-07-06 入池）
+    "601689": {"cpo_alignment": 10, "bottleneck_position": 70, "ai_capex_exposure": 75, "defensive_moat": 65, "momentum_fit": 70},
+    "002050": {"cpo_alignment": 10, "bottleneck_position": 70, "ai_capex_exposure": 75, "defensive_moat": 70, "momentum_fit": 65},
+    "601100": {"cpo_alignment": 5, "bottleneck_position": 65, "ai_capex_exposure": 60, "defensive_moat": 75, "momentum_fit": 60},
+    "600580": {"cpo_alignment": 5, "bottleneck_position": 60, "ai_capex_exposure": 65, "defensive_moat": 55, "momentum_fit": 70},
+    "002896": {"cpo_alignment": 5, "bottleneck_position": 65, "ai_capex_exposure": 65, "defensive_moat": 60, "momentum_fit": 75},
 
 }
 

@@ -15,7 +15,7 @@ from typing import Optional
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 from db import get_latest_scores, get_latest_snapshot, get_price_history
 from signal_engine import _factor_engine, _fund_engine
 
@@ -839,7 +839,7 @@ def scan_mainboard(top_n: int = 10) -> list[dict]:
                 total = ds.get("total_score", 0) or 0
                 known_results.append({
                     "code": code,
-                    "name": STOCK_MAP.get(code, {}).get("name", snap.get("name", code)),
+                    "name": snap.get("name") or get_stock_name(code),
                     "total_score": total,
                     "serenity_score": ds.get("serenity_score", 0) or 0,
                     "factor_score": ds.get("factor_score", 0) or 0,

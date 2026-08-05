@@ -1241,12 +1241,12 @@ def get_current_signals() -> list[dict]:
     遍历所有监控标的，计算因子信号，返回统一列表格式。
     每个元素: { code, name, factors: {...}, signal: float }
     """
-    from config import STOCK_DETAILS, STOCK_MAP
+    from config import STOCK_DETAILS, STOCK_MAP, get_stock_name
 
     engine = get_engine()
     results = []
     for code in STOCK_DETAILS:
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         try:
             factors = engine.compute_all_factors(code)
             signals = factors.get("signals", {})

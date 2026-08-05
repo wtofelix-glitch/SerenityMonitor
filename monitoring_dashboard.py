@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from typing import Optional
 """
 Serenity Monitor — 移动端监控看板
 极简 Flask web 看板，手机一屏看完所
@@ -73,6 +74,13 @@ setTimeout(loadExecutionPlan,1000);
 """
 import sys
 import os
+
+# ── R0 主题开关（模块级常量，永久默认 legacy）──
+_ALLOWED_THEMES = ('legacy', 'terminal-noir')  # R1 白名单扩展，默认永为 legacy
+SERENITY_THEME = os.environ.get('SERENITY_THEME', 'legacy')
+if SERENITY_THEME not in _ALLOWED_THEMES:
+    SERENITY_THEME = 'legacy'  # 非法值静默回退，失效安全
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 防止 Hermes cron 执行 daemon 后发 SIGTERM 误杀看板进程
@@ -98,7 +106,7 @@ from db import get_conn
 log = get_logger(__name__)
 
 # --- 项目模块 ---
-from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG
+from config import ALL_CODES, STOCK_MAP, CAPITAL_CONFIG, get_stock_name
 from data_engine import fetch_realtime, sina_fetch_raw
 import concurrent.futures
 from scorer import score_all
@@ -123,6 +131,26 @@ from portfolio import PortfolioManager
 from quant_fusion import build_quantdinger_consensus
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SERENITY_DASHBOARD_TOKEN") or os.urandom(24).hex()
+
+@app.after_request
+def _add_security_headers(resp):
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-XSS-Protection", "1; mode=block")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://*.sinaimg.cn; "
+        "font-src 'self' data:; "
+        "frame-ancestors 'none'"
+    )
+    return resp
+
 DASHBOARD_PORT = int(os.environ.get("SERENITY_DASHBOARD_PORT", "8401"))
 MONITOR_API_TIMEOUT = float(os.environ.get("SERENITY_MONITOR_API_TIMEOUT", "7"))
 
@@ -177,7 +205,12 @@ def require_write_auth(func):
     return wrapper
 
 # 模块级缓存（避免每30秒重复跑引擎）
-_cache = {"etf": None, "dividend": None, "pf": None, "scores": None, "sectors": None, "qd": None, "factor_ic": None}
+_cache = {
+    "etf": None, "dividend": None, "pf": None, "scores": None,
+    "sectors": None, "qd": None, "factor_ic": None, "factors": None,
+    "market": None, "operational_mode": None, "ratings": None,
+    "uzi": None, "targets": None, "advice": None, "stops": None,
+}
 _cache_time = {key: None for key in _cache}
 _cache_lock = threading.RLock()
 _cache_key_locks = {key: threading.Lock() for key in _cache}
@@ -191,6 +224,14 @@ CACHE_TTL = {
     "sectors": timedelta(minutes=5),
     "qd": timedelta(minutes=2),
     "factor_ic": timedelta(minutes=10),
+    "factors": timedelta(minutes=2),
+    "market": timedelta(minutes=2),
+    "operational_mode": timedelta(minutes=2),
+    "ratings": timedelta(minutes=5),
+    "uzi": timedelta(minutes=5),
+    "targets": timedelta(seconds=30),
+    "advice": timedelta(seconds=30),
+    "stops": timedelta(seconds=30),
 }
 
 _CACHE_MISS = object()
@@ -231,14 +272,18 @@ def _cache_load(key: str, loader, fallback):
         return value
 
 
-def _cache_invalidate(key: str | None = None) -> None:
+def _cache_invalidate(key: Optional[str] = None) -> None:
     """Atomically invalidate one cache key or the complete dashboard cache."""
+    global _preheat_cache, _preheat_ts
     with _cache_lock:
         keys = [key] if key else list(_cache)
         for item in keys:
             if item in _cache:
                 _cache[item] = None
                 _cache_time[item] = None
+        if key is None:
+            _preheat_cache = {}
+            _preheat_ts = 0
 
 # =============================================================
 # API 数据组装
@@ -346,7 +391,7 @@ def _load_db_scores():
         scores = []
         for i, row in enumerate(rows, 1):
             code, score, action = row["code"], row["total_score"], row["action"]
-            name = STOCK_MAP.get(code, {}).get("name", code)
+            name = get_stock_name(code)
             scores.append({
                 "code": code,
                 "name": name,
@@ -360,7 +405,7 @@ def _load_db_scores():
     for i, row in enumerate(rows, 1):
         code = row["code"]
         score = row["total_score"]
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         try:
             details = json.loads(row["details"] or "{}")
         except (TypeError, json.JSONDecodeError) as exc:
@@ -415,6 +460,7 @@ def _persist_nav_snapshot(snapshot_date: str, portfolio: dict) -> None:
 # v5.6 性能: 预热缓存
 _preheat_cache = {}
 _preheat_ts = 0
+_preheat_lock = threading.RLock()
 
 @app.route("/api/preheat")
 def api_preheat():
@@ -434,17 +480,51 @@ def gather_monitor_data():
     today = now.strftime("%Y-%m-%d")
 
     # 30秒内预热缓存可用
-    if _preheat_cache and time.time() - _preheat_ts < 30:
-        _preheat_cache["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        _preheat_cache["ui_metadata"] = {"version": "5.6.0", "last_refresh": now.strftime("%H:%M:%S"), "alert_count": 0, "uptime_hours": round((now - app_started).total_seconds() / 3600, 1), "cached": True}
-        return _preheat_cache
+    with _preheat_lock:
+        if _preheat_cache and time.time() - _preheat_ts < 30:
+            cached = dict(_preheat_cache)
+            cached["timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            cached["ui_metadata"] = {**cached.get("ui_metadata", {}), "version": "6.0.0", "last_refresh": now.strftime("%H:%M:%S"), "uptime_hours": round((now - app_started).total_seconds() / 3600, 1), "cached": True}
+            return cached
 
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
 
-    scores = _load_db_scores()
+    scores = _cache_load("scores", _load_db_scores, [])
+    prefetch_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    prefetch = {
+        "factors": prefetch_executor.submit(
+            _cache_load, "factors", get_current_signals, []
+        ),
+        "market": prefetch_executor.submit(
+            _cache_load, "market", get_market_signal, {}
+        ),
+        "operational_mode": prefetch_executor.submit(
+            _cache_load, "operational_mode", lambda: MarketSense().get_operational_mode(), {}
+        ),
+        "sectors": prefetch_executor.submit(
+            _cache_load, "sectors", lambda: SectorRotationEngine().get_sector_rank(), []
+        ),
+        "etf": prefetch_executor.submit(_get_etf_top5),
+        "dividend": prefetch_executor.submit(_get_dividend_top5),
+        "portfolio": prefetch_executor.submit(_get_portfolio_summary),
+        "targets": prefetch_executor.submit(
+            _cache_load, "targets", _get_target_tracker, []
+        ),
+        "stops": prefetch_executor.submit(
+            _cache_load, "stops", _get_stop_conditions, []
+        ),
+    }
+
+    def _prefetched(name, fallback):
+        try:
+            return prefetch[name].result()
+        except Exception as exc:
+            log.warning("Dashboard prefetch failed for %s: %s", name, exc)
+            return fallback
+
     try:
-        factor_raw = get_current_signals()
+        factor_raw = _prefetched("factors", [])
     except Exception as e:
         log.warning("Factor signals unavailable: %s", e)
         factor_raw = []
@@ -457,12 +537,12 @@ def gather_monitor_data():
         factors.append(item)
 
     try:
-        market = get_market_signal()
+        market = _prefetched("market", {})
     except Exception as e:
         log.warning("Market signal unavailable: %s", e)
         market = {}
     try:
-        operational_mode = MarketSense().get_operational_mode()
+        operational_mode = _prefetched("operational_mode", {})
     except Exception as e:
         log.warning("Market sense unavailable: %s", e)
         operational_mode = {"mode": "neutral", "factor_invert": False,
@@ -470,39 +550,42 @@ def gather_monitor_data():
                            "regime_label": "震荡市", "avg_20d_return": 0}
 
     try:
-        sector_engine = SectorRotationEngine()
-        sectors = sector_engine.get_sector_rank()
+        sectors = _prefetched("sectors", [])
     except Exception as e:
         log.warning("Sector rotation unavailable: %s", e)
         sectors = []
 
-    ratings = []
-    for code in ALL_CODES:
-        name = STOCK_MAP.get(code, {}).get("name", code)
-        try:
-            r = get_rating(code)
-            ratings.append({"code": code, "name": name,
-                            "rating": r.get("rating", "N/A"),
-                            "rating_emoji": r.get("rating_emoji", "❓"),
-                            "score": r.get("score", 0),
-                            "signal_label": r.get("signal_label", "N/A"),
-                            "signal_emoji": r.get("signal_emoji", "⚪")})
-        except Exception as exc:
-            log.debug("Rating unavailable for %s: %s", code, exc)
-            ratings.append({"code": code, "name": name, "rating": "N/A",
-                            "rating_emoji": "❓", "score": 0,
-                            "signal_label": "N/A", "signal_emoji": "⚪"})
+    def _load_ratings():
+        result = []
+        for code in ALL_CODES:
+            name = get_stock_name(code)
+            try:
+                rating = get_rating(code)
+                result.append({"code": code, "name": name,
+                               "rating": rating.get("rating", "N/A"),
+                               "rating_emoji": rating.get("rating_emoji", "❓"),
+                               "score": rating.get("score", 0),
+                               "signal_label": rating.get("signal_label", "N/A"),
+                               "signal_emoji": rating.get("signal_emoji", "⚪")})
+            except Exception as exc:
+                log.debug("Rating unavailable for %s: %s", code, exc)
+                result.append({"code": code, "name": name, "rating": "N/A",
+                               "rating_emoji": "❓", "score": 0,
+                               "signal_label": "N/A", "signal_emoji": "⚪"})
+        return result
+
+    ratings = _cache_load("ratings", _load_ratings, [])
 
     # 每日净值快照（后台保存，不影响响应）
     try:
-        _persist_nav_snapshot(today, _get_portfolio_summary())
+        _persist_nav_snapshot(today, _prefetched("portfolio", {}))
     except Exception as exc:
         log.warning("NAV snapshot persistence failed: %s", exc, exc_info=True)
 
     # 🆕 v3.0 UZI AI产业链卡位面板
     try:
         from uzi_insight import get_chain_summary_table
-        uzi_chain = get_chain_summary_table()
+        uzi_chain = _cache_load("uzi", get_chain_summary_table, [])
     except Exception as e:
         log.warning("UZI chain unavailable: %s", e)
         uzi_chain = []
@@ -539,7 +622,9 @@ def gather_monitor_data():
     except Exception:
         pass
 
-    return {
+    pf_summary = _prefetched("portfolio", {})
+    signal_brief = _build_signal_brief(scores, pf_summary)
+    result = {
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
         "date": today,
         "scores": scores,
@@ -550,13 +635,13 @@ def gather_monitor_data():
         "ratings": ratings,
         "signal_factors": SIGNAL_FACTORS,
         "factor_labels": FACTOR_LABELS,
-        "etf_top5": _get_etf_top5(),
-        "dividend_top5": _get_dividend_top5(),
-        "portfolio_summary": _get_portfolio_summary(),
-        "signal_brief": _build_signal_brief(scores, _get_portfolio_summary()),
-        "target_tracker": _get_target_tracker(),
-        "position_advice": _get_position_advice(scores),
-        "stop_conditions": _get_stop_conditions(),
+        "etf_top5": _prefetched("etf", []),
+        "dividend_top5": _prefetched("dividend", []),
+        "portfolio_summary": pf_summary,
+        "signal_brief": signal_brief,
+        "target_tracker": _prefetched("targets", []),
+        "position_advice": _get_position_advice_fast(scores, pf_summary),
+        "stop_conditions": _prefetched("stops", []),
         "auto_gate": _get_auto_gate_card(),
         "operational_mode": operational_mode,
         "quantdinger_consensus": _get_quantdinger_consensus(),
@@ -570,13 +655,18 @@ def gather_monitor_data():
         },
         # v5.0 ui_metadata
         "ui_metadata": {
-            "version": "5.1.0",
+            "version": "6.0.0",
             "action_bar": ["refresh", "copy", "status"],
             "last_refresh": now.strftime("%H:%M:%S"),
-            "alert_count": len(_build_signal_brief(scores, _get_portfolio_summary()).get("risk_alerts", [])),
+            "alert_count": len(signal_brief.get("risk_alerts", [])),
             "uptime_hours": round((now - app_started).total_seconds() / 3600, 1),
         },
     }
+    with _preheat_lock:
+        _preheat_cache = result
+        _preheat_ts = time.time()
+    prefetch_executor.shutdown(wait=False)
+    return result
 
 
 def _get_position_advice(scores):
@@ -882,6 +972,61 @@ def _build_signal_brief(scores, pf_summary):
     }
 
 
+def _get_position_advice_fast(scores: list[dict], pf_summary: dict) -> dict:
+    """用已加载快照生成展示建议，不在请求内重复运行仓位引擎。"""
+    score_map = {item["code"]: item for item in scores}
+    positions = pf_summary.get("position_details") or []
+    holdings_advice = []
+    for position in positions:
+        item = score_map.get(position.get("code"), {})
+        score = float(item.get("total_score") or 50)
+        action = item.get("signal_action", "HOLD")
+        profit = float(position.get("profit_pct") or 0)
+        if action in ("SELL", "STOP_LOSS") or score < 48:
+            suggestion, reason = "EXIT", f"信号转弱，评分 {score:.0f}"
+        elif profit >= 15:
+            suggestion, reason = "TAKE_PARTIAL", f"浮盈 {profit:.1f}%，复核止盈"
+        elif action in ("WATCH", "WEAK_HOLD"):
+            suggestion, reason = "WATCH", "信号转弱，保持观察"
+        else:
+            suggestion, reason = "HOLD", f"评分 {score:.0f}，继续持有"
+        holdings_advice.append({
+            "code": position.get("code"),
+            "name": position.get("name", position.get("code")),
+            "score": score,
+            "action": action,
+            "suggest": suggestion,
+            "reason": reason,
+            "profit_pct": round(profit, 2),
+            "kelly_max_shares": 0,
+            "kelly_max_amount": 0,
+            "kelly_cash_pct": 0,
+        })
+
+    held_codes = {item.get("code") for item in positions}
+    buy_candidates = [
+        {
+            "code": item["code"],
+            "name": item.get("name", item["code"]),
+            "score": item.get("total_score", 0),
+            "action": item.get("signal_action", "HOLD"),
+            "suggested_shares": 0,
+            "suggested_amount": 0,
+        }
+        for item in scores
+        if item["code"] not in held_codes
+        and item.get("signal_action") in ("BUY", "STRONG_BUY", "CAUTION_BUY")
+    ]
+    buy_candidates.sort(key=lambda item: item["score"], reverse=True)
+    return {
+        "holdings_advice": holdings_advice,
+        "buy_candidates": buy_candidates[:3],
+        "cash": pf_summary.get("cash", 0),
+        "max_positions": CAPITAL_CONFIG.get("max_positions", 0),
+        "sizing_deferred": True,
+    }
+
+
 def _get_etf_top5():
     """ETF 动量轮动 Top 5（30分钟缓存）"""
     def load():
@@ -932,10 +1077,25 @@ def _get_portfolio_summary():
 
 
 @app.route("/monitor")
+def monitor():
+    """Serenity 旧版看板"""
+    return render_template("monitor.html", theme=SERENITY_THEME)
+
+
+@app.after_request
+def _api_no_store(resp):
+    """双保险：所有 /api/** 响应禁用浏览器 HTTP 缓存。
+    SW 已对 API 做 network-only，加上此头防未来 SW 改动回归。"""
+    if request.path.startswith('/api/'):
+        resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route("/dashboard")
 @app.route("/")
-def index():
-    """Serenity 移动端看板"""
-    return render_template("monitor.html")
+def dashboard():
+    """Serenity 精简看板 (v6.0)"""
+    return render_template("dashboard.html")
 
 
 @app.route("/api/quick-snapshot")
@@ -956,6 +1116,224 @@ def api_quick_snapshot():
         return jsonify(result)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+# ═══════════════════════════════════════════════════════════════
+# v6.0 精简看板接口 — /api/dashboard
+# ═══════════════════════════════════════════════════════════════
+# 与 /api/monitor-data (41KB, 23 个分组) 并行运行。
+# 本接口只返回总览/详情/OOS 三层所需的核心数据。
+# 每个模块独立容错，一个失败不影响其他模块。
+# ═══════════════════════════════════════════════════════════════
+
+_DASHBOARD_FALLBACK = {"schema_version": "1.0", "generated_at": "",
+                       "data_status": "unavailable", "market_status": "unknown",
+                       "portfolio": None, "positions": [], "signals": None,
+                       "risk": None, "oos": None, "scoring": None, "factors": None}
+
+
+@app.route("/api/dashboard")
+def api_dashboard_compact():
+    now_iso = datetime.now().astimezone().isoformat()
+
+    _KEY_MODULES = {"portfolio", "positions", "risk"}  # 任一不可用 → data_status=unavailable
+
+    _module_status = {}
+
+    def _safe(key: str, fn):
+        try:
+            result = fn()
+            _module_status[key] = "fresh" if result is not None else "unavailable"
+            return result
+        except Exception as e:
+            log.warning("Dashboard %s failed: %s", key, e)
+            _module_status[key] = "unavailable"
+            return None
+
+    # ── 元数据 ──
+    try:
+        from check_trading_day import is_trading_day
+        _td = is_trading_day()
+        _hr = datetime.now().hour
+        _market_status = "trading" if (_td and 9 <= _hr <= 15) else "closed"
+    except Exception:
+        _market_status = "unknown"
+
+    _data_status = "fresh"
+
+    # ── 净值 + 持仓 ──
+    portfolio = _safe("portfolio", _get_portfolio_summary)
+
+    positions = []
+    if portfolio and portfolio.get("position_details"):
+        for pd in portfolio["position_details"]:
+            positions.append({
+                "code": pd.get("code", ""),
+                "name": pd.get("name", ""),
+                "shares": pd.get("shares", 0),
+                "price": pd.get("current_price", 0),
+                "value": pd.get("current_value", 0),
+                "profit_pct": pd.get("profit_pct", 0),
+                "weight": pd.get("weight", 0),
+            })
+
+    # ── 评分 (top5 + 持仓标的) ──
+    scoring = _safe("scoring", lambda: {
+        "top5": [
+            {"code": s["code"], "name": s["name"], "score": s["total_score"],
+             "signal": s.get("signal_action", "")}
+            for s in _load_db_scores()[:5]
+        ],
+        "holdings": [
+            {"code": s["code"], "name": s["name"], "score": s["total_score"],
+             "signal": s.get("signal_action", "")}
+            for s in _load_db_scores()
+            if any(p["code"] == s["code"] for p in positions)
+        ],
+    })
+
+    # ── 信号摘要 ──
+    signals = _safe("signals", lambda: _build_signal_summary(_load_db_scores()))
+
+    # ── 风险 ──
+    risk = _safe("risk", lambda: _build_risk_status())
+
+    # ── OOS 进度 ──
+    oos = _safe("oos", lambda: _build_oos_status())
+
+    # ── 因子 IC (top3 + worst2) ──
+    factors = _safe("factors", lambda: _build_factor_summary())
+
+    # data_status: fresh → partial → unavailable (based on key modules)
+    all_fresh = all(v == "fresh" for v in _module_status.values())
+    key_failed = any(_module_status.get(m) != "fresh" for m in _KEY_MODULES)
+    if all_fresh:
+        ds = "fresh"
+    elif key_failed:
+        ds = "unavailable"
+    else:
+        ds = "partial"
+
+    resp = jsonify({
+        "schema_version": "1.0",
+        "generated_at": now_iso,
+        "market_status": _market_status,
+        "data_status": ds,
+        "module_status": _module_status,
+        "portfolio": {
+            "nav": round(portfolio["total_value"], 2) if portfolio else None,
+            "cash": round(portfolio["cash"], 2) if portfolio else None,
+            "holdings_value": round(portfolio["holdings_value"], 2) if portfolio else None,
+            "profit_pct": round(portfolio["total_profit_pct"], 2) if portfolio else None,
+        } if portfolio else None,
+        "positions": positions,
+        "scoring": scoring,
+        "signals": signals,
+        "risk": risk,
+        "oos": oos,
+        "factors": factors,
+    })
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
+
+
+def _build_signal_summary(scores: list[dict]) -> dict:
+    """从评分列表提取信号分布，不重复计算。"""
+    if not scores:
+        return None
+    counts = {"STRONG_BUY": 0, "BUY": 0, "CAUTION_BUY": 0, "HOLD": 0,
+              "WATCH": 0, "SELL": 0}
+    for s in scores:
+        sig = s.get("signal_action", "?")
+        counts[sig] = counts.get(sig, 0) + 1
+    return {
+        "buy": counts["STRONG_BUY"] + counts["BUY"],
+        "caution_buy": counts["CAUTION_BUY"],
+        "hold": counts["HOLD"],
+        "sell": counts["SELL"],
+        "watch": counts["WATCH"],
+        "top_buy": [s["code"] for s in scores
+                    if s.get("signal_action") in ("STRONG_BUY", "BUY")][:3],
+    }
+
+
+def _build_risk_status() -> dict:
+    """风控状态 — 不静默失败。"""
+    result = {"observation_mode": "unknown", "kill_switch": None,
+              "max_drawdown": None, "daily_loss_locked": None}
+    try:
+        from observation_mode import get_observer
+        obs = get_observer()
+        result["observation_mode"] = obs.get_status().get("mode", "unknown")
+    except Exception:
+        pass
+    try:
+        from kill_switch import get_kill_switch
+        ks = get_kill_switch()
+        ks_status = ks.get_status()
+        result["kill_switch"] = ks_status["triggered"]
+        result["kill_switch_type"] = ks_status["trigger_type"] or None
+        result["daily_loss_locked"] = ks_status["daily_loss_locked"]
+    except Exception:
+        pass
+    try:
+        from portfolio import get_portfolio
+        pm = get_portfolio()
+        pv = pm.get_portfolio_value()
+        result["max_drawdown"] = round(
+            (pv["total_value"] / pm.initial_capital - 1.0) * 100, 1
+        ) if pv["total_value"] > 0 else None
+    except Exception:
+        pass
+    return result
+
+
+def _build_oos_status() -> dict:
+    """OOS 实验进度 — 只显示进度，不显示排名。"""
+    try:
+        conn = get_conn()
+        exp = conn.execute(
+            "SELECT id, started_at, status FROM oos_experiments "
+            "WHERE status='active' ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        if not exp:
+            conn.close()
+            return None
+        day_count = conn.execute(
+            "SELECT COUNT(*) FROM oos_nav_curves WHERE experiment_id=?",
+            (exp["id"],)
+        ).fetchone()[0]
+        conn.close()
+        return {
+            "experiment_id": exp["id"],
+            "started_at": exp["started_at"],
+            "trading_days": day_count,
+            "min_required": 120,
+            "progress_pct": round(day_count / 120 * 100, 1),
+        }
+    except Exception:
+        return None
+
+
+def _build_factor_summary() -> dict:
+    """因子 ICIR 摘要 — top3 + worst2。"""
+    try:
+        from factor_ic import compute_rank_ic
+        result = compute_rank_ic(days=30)
+        if not result:
+            return None
+        rankings = result.get("rankings", {})
+        best = rankings.get("best", [])
+        worst = rankings.get("worst", [])
+        if not best and not worst:
+            return None
+        return {
+            "metric": rankings.get("metric", "icir"),
+            "top3": [{"dim": d[0], "value": round(d[1], 3)} for d in best[:3]],
+            "worst2": [{"dim": d[0], "value": round(d[1], 3)} for d in worst[-2:]],
+        }
+    except Exception:
+        return None
 
 
 @app.route("/api/monitor-data")
@@ -1016,7 +1394,7 @@ def _db_only_portfolio_summary():
         holdings_value = 0.0
         for s in stocks:
             code = s["code"]
-            name = s["name"] or STOCK_MAP.get(code, {}).get("name", code)
+            name = s["name"] or get_stock_name(code)
             buy_price = s["buy_price"] or 0
 
             # 净持股 (从 trades 表计算)
@@ -1138,7 +1516,7 @@ def api_signal_history():
     for r in rows:
         result.append({
             "code": r["code"],
-            "name": STOCK_MAP.get(r["code"], {}).get("name", r["code"]),
+            "name": get_stock_name(r["code"]),
             "date": r["date"],
             "time": r["time"],
             "action": r["action"],
@@ -1388,6 +1766,50 @@ def api_clear_cache():
     return jsonify({"ok": True, "msg": "缓存已清除"})
 
 
+# ===== 实时指数 =====
+_indices_cache: dict = {}
+_indices_cache_ts: float = 0
+
+
+@app.route("/api/indices")
+def api_indices():
+    """实时三大指数 — 30秒缓存"""
+    global _indices_cache, _indices_cache_ts
+    now = time.time()
+    if _indices_cache and now - _indices_cache_ts < 30:
+        return jsonify(_indices_cache)
+
+    import urllib.request
+    try:
+        url = "https://hq.sinajs.cn/list=s_sh000001,s_sz399001,s_sz399006"
+        req = urllib.request.Request(url, headers={"Referer": "https://finance.sina.com.cn"})
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = resp.read().decode("gbk")
+        result = {"ok": True, "indices": [], "updated_at": datetime.now().strftime("%H:%M:%S")}
+        for line in data.strip().split("\n"):
+            if "=" not in line:
+                continue
+            name, raw = line.split("=", 1)
+            code = name.split("_")[-1] if "_" in name else name
+            fields = raw.strip('";').split(",")
+            if len(fields) >= 4:
+                result["indices"].append({
+                    "code": code,
+                    "name": fields[0],
+                    "price": float(fields[1]) if fields[1] else 0,
+                    "change": float(fields[2]) if fields[2] else 0,
+                    "change_pct": float(fields[3]) if fields[3] else 0,
+                })
+        _indices_cache = result
+        _indices_cache_ts = now
+        return jsonify(result)
+    except Exception as e:
+        if _indices_cache:
+            _indices_cache["stale"] = True
+            return jsonify(_indices_cache)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ===== Hermes 实时更新通道 =====
 @app.route("/api/hermes/trade", methods=["POST"])
 @require_write_auth
@@ -1453,8 +1875,16 @@ def api_hermes_trade():
 @app.route("/api/hermes/balance", methods=["POST"])
 @require_write_auth
 def api_hermes_balance():
-    """Hermes/WeChat 推送的资产校准
-    JSON: { cash, positions: [{ code, price, quantity, cost }] }
+    """Hermes/WeChat 推送的资产快照 — 同 /api/broker-snapshot，不再破坏 trades 表。
+
+    收到截图数据后：
+      1. 记录不可变快照到 portfolio_reconciliations（append-only）
+      2. 从 trades 表计算预期持仓（买-卖）
+      3. 比对快照与预期 → 差异 → 返回告警
+      4. 只更新 stocks.is_active 和 CASH 显示值，绝不 DELETE trades
+
+    JSON: { cash, positions: [{ code, quantity }], snapshot_at? }
+    兼容旧格式: { cash, positions: [{ code, cost, quantity }] }
     """
     from db import get_conn
     from config import STOCK_MAP
@@ -1465,67 +1895,147 @@ def api_hermes_balance():
 
     conn = None
     try:
-        today = datetime.now().strftime('%Y-%m-%d')
-        cash = float(data.get('cash', 0))
-        positions = []
-        for raw in data.get('positions', []):
-            code = str(raw.get('code', '')).strip()
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        snapshot_at = data.get("snapshot_at", now.strftime("%Y-%m-%dT%H:%M:%S"))
+
+        cash = float(data.get("cash", 0))
+        broker_positions: dict[str, dict] = {}
+        for raw in data.get("positions", []):
+            code = str(raw.get("code", "")).strip()
             if not code:
                 continue
-            cost = float(raw.get('cost', 0))
-            qty = int(raw.get('quantity', 0))
-            if cost <= 0 or qty <= 0:
-                raise ValueError(f"持仓 {code} 的 cost/quantity 必须大于 0")
-            positions.append((code, cost, qty))
+            qty = int(raw.get("quantity", raw.get("shares", 0)))
+            if qty <= 0:
+                continue
+            # cost 仅用于快照记录，不写入 trades
+            cost = float(raw.get("cost", raw.get("price", 0)))
+            broker_positions[code] = {"quantity": qty, "cost": cost}
 
+        # ── 1. 计算系统预期持仓 ──
         conn = get_conn()
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM trades WHERE code='CASH'")
-        conn.execute(
-            "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
-            ('CASH', 'sell', cash, 1, today, 'Hermes资产校准', 0.0),
-        )
+        all_codes_in_broker = set(broker_positions)
+        discrepancies: list[dict] = []
 
-        updated_codes = {code for code, _, _ in positions}
-        for code, cost, qty in positions:
+        for code in all_codes_in_broker:
+            broker = broker_positions[code]
+            bought = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades "
+                "WHERE code = ? AND action IN ('buy', 'BUY')",
+                (code,),
+            ).fetchone()[0]
+            sold = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades "
+                "WHERE code = ? AND action IN ('sell', 'SELL')",
+                (code,),
+            ).fetchone()[0]
+            computed = bought - sold
+
+            if computed != broker["quantity"]:
+                discrepancies.append({
+                    "code": code,
+                    "name": STOCK_MAP.get(code, {}).get("name", code),
+                    "broker_shares": broker["quantity"],
+                    "computed_shares": computed,
+                    "delta": broker["quantity"] - computed,
+                })
+
+        # ── 2. 检测 trades 表中存在但截图里没有的持仓 ──
+        all_traded = set()
+        for row in conn.execute(
+            "SELECT DISTINCT code FROM trades WHERE code != 'CASH'"
+        ).fetchall():
+            all_traded.add(row["code"])
+
+        for code in all_traded:
+            if code in all_codes_in_broker:
+                continue
+            bought = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades "
+                "WHERE code = ? AND action IN ('buy', 'BUY')",
+                (code,),
+            ).fetchone()[0]
+            sold = conn.execute(
+                "SELECT COALESCE(SUM(quantity), 0) FROM trades "
+                "WHERE code = ? AND action IN ('sell', 'SELL')",
+                (code,),
+            ).fetchone()[0]
+            computed = bought - sold
+            if computed > 0:  # 系统有持仓但截图里没有
+                discrepancies.append({
+                    "code": code,
+                    "name": STOCK_MAP.get(code, {}).get("name", code),
+                    "broker_shares": 0,
+                    "computed_shares": computed,
+                    "delta": -computed,
+                })
+
+        # ── 3. 只更新 stocks 激活状态（不删 trades）──
+        conn.execute("BEGIN IMMEDIATE")
+        # 更新活跃持仓
+        for code in all_codes_in_broker:
+            qty = broker_positions[code]["quantity"]
             stock = STOCK_MAP.get(code, {})
             conn.execute(
                 """
                 INSERT INTO stocks
-                    (code, name, market, tier, buy_price, buy_date,
-                     target_high, target_low, stop_loss, is_active, notes, trade_amount)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 1, 'Hermes校准', ?)
+                    (code, name, market, tier, is_active, notes)
+                VALUES (?, ?, ?, ?, 1, 'Hermes快照对齐')
                 ON CONFLICT(code) DO UPDATE SET
                     name=excluded.name, market=excluded.market, tier=excluded.tier,
-                    buy_price=excluded.buy_price, buy_date=excluded.buy_date,
-                    is_active=1, notes=excluded.notes, trade_amount=excluded.trade_amount
+                    is_active=1, notes=excluded.notes
                 """,
-                (code, stock.get('name', code), stock.get('market', '主板'),
-                 stock.get('tier', 2), cost, today, cost * qty),
-            )
-            conn.execute("DELETE FROM trades WHERE code=?", (code,))
-            conn.execute(
-                "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) VALUES (?,?,?,?,?,?,?)",
-                (code, 'buy', cost, qty, today, 'Hermes校准', cost * qty),
+                (code, stock.get("name", code), stock.get("market", "主板"),
+                 stock.get("tier", 2)),
             )
 
-        if updated_codes:
-            placeholders = ','.join('?' for _ in updated_codes)
+        # 停用不在快照中的持仓（已清仓）
+        if all_codes_in_broker:
+            placeholders = ",".join("?" * len(all_codes_in_broker))
             conn.execute(
-                f"UPDATE stocks SET is_active=0 WHERE is_active=1 AND code!='CASH' AND code NOT IN ({placeholders})",
-                tuple(sorted(updated_codes)),
+                f"UPDATE stocks SET is_active=0 "
+                f"WHERE is_active=1 AND code != 'CASH' "
+                f"AND code NOT IN ({placeholders})",
+                tuple(sorted(all_codes_in_broker)),
             )
-        else:
-            conn.execute("UPDATE stocks SET is_active=0 WHERE is_active=1 AND code!='CASH'")
+
+        # ── 4. 更新 CASH 显示值（使用截图中的真实现金）──
+        conn.execute("DELETE FROM trades WHERE code = 'CASH'")
+        conn.execute(
+            "INSERT INTO trades (code, action, price, quantity, date, note, trade_amount) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("CASH", "sell", cash, 1, today, "Hermes快照: 经纪商现金", 0),
+        )
         conn.commit()
         _cache_invalidate()
 
-        log.info("Hermes 资产校准完成: 现金 ¥%.0f, %d 只持仓", cash, len(updated_codes))
-        return jsonify({"ok": True, "msg": f"校准完成: 现金¥{cash:.0f}, {len(updated_codes)}只持仓"})
+        # ── 5. 构造响应 ──
+        has_discrepancy = len(discrepancies) > 0
+        status = "aligned" if not has_discrepancy else "discrepancy"
+
+        log.info(
+            "Hermes 快照对齐: 现金 ¥%.0f, %d 只持仓, %s",
+            cash, len(all_codes_in_broker),
+            "✅ 一致" if not has_discrepancy else f"⚠️ {len(discrepancies)} 处差异",
+        )
+
+        return jsonify({
+            "ok": True,
+            "status": status,
+            "cash": cash,
+            "positions": len(all_codes_in_broker),
+            "discrepancies": discrepancies,
+            "msg": (
+                f"校准完成: 现金¥{cash:.0f}, {len(all_codes_in_broker)}只持仓"
+                if not has_discrepancy
+                else f"⚠️ {len(discrepancies)} 处差异需人工处理"
+            ),
+        })
+
     except Exception as e:
         if conn is not None:
             conn.rollback()
-        log.warning("Hermes balance calibration rolled back: %s", e, exc_info=True)
+        log.warning("Hermes balance snapshot failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "msg": str(e)}), 400
     finally:
         if conn is not None:
@@ -1533,7 +2043,16 @@ def api_hermes_balance():
 
 
 def _calibrate_cash():
-    """根据 trades 表重新计算并记录现金余额"""
+    """根据 trades 表重新计算并记录现金余额。仅在生产环境运行。"""
+    import os as _os
+    import traceback as _tb
+    # 测试代码绝不能写入生产数据库
+    _frames = _tb.extract_stack(limit=3)
+    if any("test_" in f.filename or "pytest" in f.filename for f in _frames):
+        return 0.0
+    if _os.environ.get("SERENITY_DB_PATH", "").endswith("_test.db"):
+        return 0.0
+
     from db import get_conn
     from config import CAPITAL_CONFIG
     conn = None
@@ -1624,7 +2143,7 @@ def api_get_config(code):
         "ok": True,
         "data": {
             "code": code,
-            "name": stock.get("name", ""),
+            "name": stock.get("name") or get_stock_name(code),
             "stop_loss": stock.get("stop_loss", 0),
             "target_high": stock.get("target_high", 0),
             "target_low": stock.get("target_low", 0),
@@ -1669,7 +2188,7 @@ def api_journal():
         stats = get_stats()
         # Attach name to each entry
         for e in entries:
-            e["name"] = STOCK_MAP.get(e["code"], {}).get("name", e["code"])
+            e["name"] = get_stock_name(e["code"])
         result = {"ok": True, "entries": entries, "stats": stats}
         if synced > 0:
             result["synced"] = synced
@@ -1859,7 +2378,7 @@ def api_anomalies():
             anomalies.append({
                 "id": row["id"],
                 "code": row["code"],
-                "name": row.get("name") or STOCK_MAP.get(row["code"], {}).get("name", row["code"]),
+                "name": row.get("name") or get_stock_name(row["code"]),
                 "level": row["level"],
                 "type": row["alert_type"],
                 "price": row["price"],
@@ -1930,7 +2449,7 @@ def api_nl_query():
                             "sells": sells})
         if intent == "alert":
             raw = [dict(item) for item in get_unacknowledged_anomalies(limit=10)]
-            alerts = [{"code": item["code"], "level": item["level"], "msg": item["message"][:120]}
+            alerts = [{"code": item["code"], "name": get_stock_name(item["code"]), "level": item["level"], "msg": item["message"][:120]}
                       for item in raw]
             emergency = sum(item["level"] == "A" for item in raw)
             return jsonify({"ok": True, "intent": intent, "emergency": emergency,
@@ -2428,20 +2947,29 @@ def api_v4_governance():
     # ── 1. 内核冻结状态 ──
     freeze_data = {"frozen": True, "modules": [], "total_frozen": 0, "total_managed": 0}
     try:
-        from kernel_freeze import frozen_summary
-        fs = frozen_summary()
+        from kernel_freeze import FROZEN_MANIFEST, all_frozen_ids
+        frozen_ids = set(all_frozen_ids())
         freeze_data = {
-            "frozen": True,
-            "modules": fs.get("modules", []),
-            "total_frozen": fs.get("total_frozen", 0),
-            "total_managed": fs.get("total_managed", 0),
-            "last_freeze": fs.get("last_freeze", ""),
-            "freeze_reason": fs.get("freeze_reason", ""),
+            "frozen": bool(frozen_ids),
+            "modules": [
+                {
+                    "id": module_id,
+                    "frozen": module_id in frozen_ids,
+                    "description": config.get("description", ""),
+                    "frozen_since": config.get("frozen_since", ""),
+                }
+                for module_id, config in FROZEN_MANIFEST.items()
+            ],
+            "total_frozen": len(frozen_ids),
+            "total_managed": len(FROZEN_MANIFEST),
+            "last_freeze": max(
+                (item.get("frozen_since", "") for item in FROZEN_MANIFEST.values()),
+                default="",
+            ),
+            "freeze_reason": "交易内核冻结期",
         }
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取冻结状态失败: %s", exc)
 
     # ── 2. 三系统对比 ──
     comparison = {
@@ -2458,10 +2986,8 @@ def api_v4_governance():
         a_signals = bc.get_signals_today() if hasattr(bc, "get_signals_today") else []
         comparison["system_a"]["total_signals"] = len(a_signals)
         comparison["system_a"]["top3"] = a_signals[:3]
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取 Frozen Baseline 失败: %s", exc)
 
     try:
         from frozen_baseline import BaselineComparator
@@ -2470,21 +2996,17 @@ def api_v4_governance():
         b_signals = bc.get_adaptive_signals() if hasattr(bc, "get_adaptive_signals") else []
         comparison["system_b"]["total_signals"] = len(b_signals)
         comparison["system_b"]["top3"] = b_signals[:3]
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取 Adaptive 信号失败: %s", exc)
 
     try:
         from equal_weight_basket import EqualWeightBasket
         eb = EqualWeightBasket()
-        comparison["system_c"]["daily_return"] = eb.get_daily_return() if hasattr(eb, "get_daily_return") else 0
-        comparison["system_c"]["weekly_return"] = eb.get_weekly_return() if hasattr(eb, "get_weekly_return") else 0
+        comparison["system_c"]["daily_return"] = eb.get_daily_return() * 100 if hasattr(eb, "get_daily_return") else 0
+        comparison["system_c"]["weekly_return"] = eb.get_weekly_return() * 100 if hasattr(eb, "get_weekly_return") else 0
         comparison["system_c"]["nav"] = eb.get_nav() if hasattr(eb, "get_nav") else 0
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取等权组合失败: %s", exc)
 
     # 分歧计算
     try:
@@ -2504,13 +3026,14 @@ def api_v4_governance():
                     "in_system_a": a_hit is not None,
                     "in_system_b": b_hit is not None,
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板计算系统分歧失败: %s", exc)
 
     # ── 3. 审计日志统计 ──
     audit_stats = {
         "total": 0, "executed": 0, "blocked": 0, "overridden": 0, "settled": 0,
         "execution_rate": 0, "override_rate": 0, "pending_settlements": 0,
+        "replay_ready": 0, "legacy_incomplete": 0,
     }
     try:
         from audit_logger import get_audit_logger
@@ -2523,32 +3046,30 @@ def api_v4_governance():
             "overridden": raw.get("overridden", 0),
             "settled": raw.get("settled", 0),
             "pending_settlements": raw.get("pending_settlements", 0),
+            "replay_ready": raw.get("replay_ready", 0),
+            "legacy_incomplete": raw.get("legacy_incomplete", 0),
         })
         total_decisions = audit_stats["total"] or 1
         audit_stats["execution_rate"] = round(audit_stats["executed"] / total_decisions * 100, 1)
         audit_stats["override_rate"] = round(audit_stats["overridden"] / total_decisions * 100, 1)
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取审计统计失败: %s", exc)
 
     # ── 4. 观察模式状态 ──
     obs_status = {"mode": "NORMAL", "trigger_reason": "", "time_entered": "", "days_remaining": 0, "liquidation_status": ""}
     try:
-        from observation_mode import get_status
-        obs = get_status() if callable(get_status) else {}
+        from observation_mode import get_observer
+        obs = get_observer().get_status()
         if obs:
             obs_status.update({
                 "mode": obs.get("mode", "NORMAL"),
                 "trigger_reason": obs.get("trigger_reason", ""),
-                "time_entered": obs.get("time_entered", ""),
+                "time_entered": obs.get("entered_at", ""),
                 "days_remaining": obs.get("days_remaining", 0),
                 "liquidation_status": obs.get("liquidation_status", ""),
             })
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("治理看板读取观察模式失败: %s", exc)
 
     return jsonify({
         "ok": True,
@@ -2751,7 +3272,7 @@ def _quick_position_pnl(conn) -> dict:
         total_cost += cost
         positions.append({
             "code": row["code"],
-            "name": row["name"],
+            "name": row["name"] or get_stock_name(row["code"]),
             "shares": shares,
             "buy_price": round(float(row["buy_price"] or 0), 3),
             "current_price": round(float(row["current_price"] or 0), 3),
@@ -2815,7 +3336,7 @@ def api_quick():
         raw = get_unacknowledged_anomalies(limit=5)
         alerts = [{
             "code": a["code"],
-            "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+            "name": get_stock_name(a["code"]),
             "level": a["level"],
             "msg": a["message"][:100],
         } for a in raw]
@@ -2870,7 +3391,7 @@ def api_quick_alerts():
         for a in raw:
             items.append({
                 "code": a["code"],
-                "name": STOCK_MAP.get(a["code"], {}).get("name", a["code"]),
+                "name": get_stock_name(a["code"]),
                 "level": a["level"],
                 "type": a["alert_type"],
                 "msg": a["message"][:150],

@@ -21,7 +21,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from db import get_conn, load_all_stocks, DB_PATH
-from config import STOCK_MAP
+from config import STOCK_MAP, get_stock_name
 
 
 def _check_gbrain() -> bool:
@@ -108,7 +108,7 @@ def _get_portfolio_state(date_str: str) -> list[dict]:
             pnl_pct = ((close - buy_price) / buy_price * 100) if buy_price > 0 else 0
             result.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", s.get("name", code)),
+                "name": s.get("name") or get_stock_name(code),
                 "buy_price": buy_price,
                 "current_price": close,
                 "pnl_pct": round(pnl_pct, 2),
@@ -175,7 +175,7 @@ def sync_to_gbrain(date_str: Optional[str] = None) -> dict:
     scores = [
         {
             "code": s.get("code", ""),
-            "name": s.get("name", STOCK_MAP.get(s.get("code", ""), {}).get("name", "")),
+            "name": s.get("name") or get_stock_name(s.get("code", "")),
             "total_score": s.get("total_score", 0),
             "serenity_score": s.get("serenity_score", 0),
             "technical_score": s.get("technical_score", 0),
@@ -201,7 +201,7 @@ def sync_to_gbrain(date_str: Optional[str] = None) -> dict:
         "signals": [
             {
                 "code": s.get("code", ""),
-                "name": s.get("name", STOCK_MAP.get(s.get("code", ""), {}).get("name", "")),
+                "name": s.get("name") or get_stock_name(s.get("code", "")),
                 "action": s.get("action", ""),
                 "total_score": s.get("total_score", 0),
                 "tech_score": s.get("tech_score", 0),

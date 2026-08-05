@@ -14,10 +14,20 @@ import json
 import urllib.request
 import sys
 from datetime import datetime
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config import STOCK_MAP
 from db import save_price_history
+
+BENCHMARK_INFO = {
+    "000300": {"name": "沪深300", "market": "sh"},
+    "000905": {"name": "中证500", "market": "sh"},
+}
+
+
+def _instrument_info(code: str) -> Optional[dict]:
+    return STOCK_MAP.get(code) or BENCHMARK_INFO.get(code)
 
 # A 股数据不走代理
 proxy_handler = urllib.request.ProxyHandler({})
@@ -30,7 +40,7 @@ SINA_KLINE_URL = (
 
 
 def fetch_kline(code: str) -> list[dict]:
-    info = STOCK_MAP.get(code)
+    info = _instrument_info(code)
     if not info:
         print(f"  ⚠ 未知代码 {code}，跳过")
         return []
@@ -111,6 +121,12 @@ def save_to_db(code: str, data_rows: list[dict]) -> int:
             "high": r["high"], "low": r["low"],
             "volume": r["volume"], "change_pct": r["change_pct"],
         }
+        if code in BENCHMARK_INFO:
+            record.update({
+                "source": "sina_kline_backfill",
+                "adjustment_mode": "raw",
+                "quality_status": "diagnostic_only",
+            })
         try:
             save_price_history(code, record)
             count += 1
@@ -120,7 +136,7 @@ def save_to_db(code: str, data_rows: list[dict]) -> int:
 
 
 def fetch_and_save(code: str) -> dict:
-    info = STOCK_MAP.get(code)
+    info = _instrument_info(code)
     if not info:
         return {"code": code, "status": "skip", "reason": "未知代码"}
 

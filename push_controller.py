@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import os
 from datetime import date, datetime
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,7 +31,7 @@ from serenity_logger import get_logger
 log = get_logger(__name__)
 
 
-def _is_trading_day(d: date | None = None) -> bool:
+def _is_trading_day(d: Optional[date] = None) -> bool:
     try:
         from check_trading_day import is_trading_day
         return is_trading_day(d)
@@ -61,7 +62,7 @@ def _mark_pushed() -> None:
         json.dump({"date": date.today().isoformat(), "pushed": True, "at": datetime.now().isoformat()}, f)
 
 
-def _build_nav_section() -> str | None:
+def _build_nav_section() -> Optional[str]:
     """净值概览"""
     try:
         from portfolio import get_portfolio
@@ -102,7 +103,7 @@ def _build_nav_section() -> str | None:
         return f"⚠️ 净值获取失败: {e}"
 
 
-def _build_signal_section() -> str | None:
+def _build_signal_section() -> Optional[str]:
     """今日信号摘要（仅可执行信号）"""
     try:
         from scorer import score_all
@@ -127,7 +128,7 @@ def _build_signal_section() -> str | None:
         return f"⚠️ 信号获取失败: {e}"
 
 
-def _build_execution_section() -> str | None:
+def _build_execution_section() -> Optional[str]:
     """调仓建议"""
     try:
         from auto_execute import generate_execution_plan
@@ -156,7 +157,7 @@ def _build_execution_section() -> str | None:
         return f"⚠️ 调仓计划获取失败: {e}"
 
 
-def _build_alert_section() -> str | None:
+def _build_alert_section() -> Optional[str]:
     """告警摘要"""
     alerts = []
     try:
@@ -173,7 +174,7 @@ def _build_alert_section() -> str | None:
     return "## 🚨 告警\n" + "\n".join(alerts)
 
 
-def _build_frozen_section() -> str | None:
+def _build_frozen_section() -> Optional[str]:
     """内核冻结状态（仅状态变更时推送）"""
     try:
         from kernel_freeze import all_frozen_ids, FROZEN_MANIFEST
@@ -186,7 +187,7 @@ def _build_frozen_section() -> str | None:
         return None
 
 
-def build_daily_brief() -> str | None:
+def build_daily_brief() -> Optional[str]:
     """构建每日简报。返回 None 表示今日无需推送。"""
     sections = []
 

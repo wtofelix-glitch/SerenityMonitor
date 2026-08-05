@@ -1,0 +1,33 @@
+{
+ "code": "000988",
+ "ok": true,
+ "strategies": [
+  {
+   "final_value": 49403.18,
+   "max_dd": 0,
+   "sharpe": 0,
+   "strategy": "trend",
+   "total_return": -3.26,
+   "trades": 0,
+   "win_rate": 66.7
+  },
+  {
+   "final_value": 48052.89,
+   "max_dd": 0,
+   "sharpe": 0,
+   "strategy": "multifactor",
+   "total_return": -5.9,
+   "trades": 0,
+   "win_rate": 50.0
+  },
+  {
+   "final_value": 54415.4,
+   "max_dd": 0,
+   "sharpe": 0,
+   "strategy": "mean_revert",
+   "total_return": 6.56,
+   "trades": 0,
+   "win_rate": 50.0
+  }
+ ]
+}

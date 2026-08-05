@@ -20,8 +20,7 @@ from datetime import date, timedelta
 from typing import Optional
 from collections import defaultdict
 
-from db import get_conn, get_price_history
-from config import ALL_CODES, STOCK_MAP, STOCK_DETAILS
+from config import ALL_CODES, STOCK_MAP, STOCK_DETAILS, get_stock_name
 from serenity_logger import get_logger
 
 log = get_logger(__name__)
@@ -71,8 +70,17 @@ POOL_V4 = {
     "000938": {"entered": "2026-01-10", "reason": "实盘扩展: 紫光股份 AI交换机"},
 }
 
-# 当前池（ALL_CODES 中的 15 只）
-CURRENT_POOL = {**POOL_V2, **POOL_V3, **POOL_V4}
+# 第五期: 机器人/自动化（宇树IPO+特斯拉Optimus量产催化）
+POOL_V5 = {
+    "601689": {"entered": "2026-07-06", "reason": "Tier 2: 拓普集团 Tesla Optimus执行器模组"},
+    "002050": {"entered": "2026-07-06", "reason": "Tier 2: 三花智控 热管理/执行器"},
+    "601100": {"entered": "2026-07-06", "reason": "Tier 2: 恒立液压 液压件→人形机器人丝杠"},
+    "600580": {"entered": "2026-07-06", "reason": "Tier 2: 卧龙电驱 伺服电机龙头"},
+    "002896": {"entered": "2026-07-06", "reason": "Tier 2: 中大力德 RV减速器+电机一体化"},
+}
+
+# 当前池（20 只）
+CURRENT_POOL = {**POOL_V2, **POOL_V3, **POOL_V4, **POOL_V5}
 # 移除 V1 中已不在当前池的标的（创业板/科创板）
 REMOVED_FROM_V1 = ["688361", "300308", "600206", "300661", "300502", "300394", "300281", "688256", "002371", "688012"]
 
@@ -113,7 +121,7 @@ class StockPoolAudit:
             info = CURRENT_POOL.get(code, {})
             timeline.append({
                 "code": code,
-                "name": STOCK_MAP.get(code, {}).get("name", code),
+                "name": get_stock_name(code),
                 "entered": info.get("entered", "unknown"),
                 "reason": info.get("reason", "unknown"),
                 "pre_theme": code in self.pre_theme_pool,
@@ -178,66 +186,130 @@ class StockPoolAudit:
     # ── 反事实回测 ────────────────────────────────────────
 
     def counterfactual_backtest(self) -> dict:
-        """反事实回测：固定池 vs 当前池。
+        """反事实回测：固定池 vs 当前池 vs 主题池的等权收益对比。
 
-        由于当前系统只有 15 只标的的历史数据,
-        这里做一个简化的版本：比较"纯 T1 标的"vs"全池"的收益特征。
+        用实际价格数据计算：如果只用主题启动前的候选范围，
+        同等配置的等权组合收益会有什么区别。
+
+        Returns:
+            三池对比 + 归因分析
         """
+        import math
+        from db import get_conn
+
         conn = get_conn()
         results = {
-            "pre_theme_pool": {"codes": self.pre_theme_pool, "avg_return": 0, "volatility": 0, "sharpe": 0},
-            "full_pool": {"codes": self.current_pool, "avg_return": 0, "volatility": 0, "sharpe": 0},
-            "theme_stocks": {"codes": [
-                c for c in self.current_pool
-                if STOCK_MAP.get(c, {}).get("tier", 0) <= 3
-            ], "avg_return": 0, "volatility": 0, "sharpe": 0},
+            "pre_theme_2stocks": {
+                "codes": self.pre_theme_pool,
+                "label": "固定池(主题前, 2只)",
+                "cumulative_return": 0.0,
+                "annualized_return": 0.0,
+                "annualized_vol": 0.0,
+                "sharpe": 0.0,
+                "max_drawdown": 0.0,
+            },
+            "t1_t3_13stocks": {
+                "codes": [c for c in self.current_pool
+                          if STOCK_MAP.get(c, {}).get("tier", 0) <= 3],
+                "label": "主题池(T1-T3, 13只)",
+                "cumulative_return": 0.0,
+                "annualized_return": 0.0,
+                "annualized_vol": 0.0,
+                "sharpe": 0.0,
+                "max_drawdown": 0.0,
+            },
+            "full_pool": {
+                "codes": self.current_pool,
+                "label": f"当前池(全{len(self.current_pool)}只)",
+                "cumulative_return": 0.0,
+                "annualized_return": 0.0,
+                "annualized_vol": 0.0,
+                "sharpe": 0.0,
+                "max_drawdown": 0.0,
+            },
         }
 
         try:
-            start = self.theme_start
             for pool_name, pool_info in results.items():
                 codes = pool_info["codes"]
-                if not codes:
+                if len(codes) < 2:
                     continue
+
                 placeholders = ",".join("?" * len(codes))
+                # Get daily returns for all codes in pool
                 rows = conn.execute(
-                    f"SELECT code, AVG(change_pct) as avg_ret, "
-                    f"  (SELECT AVG(change_pct*change_pct) FROM daily_snapshots ds2 "
-                    f"   WHERE ds2.code = ds.code AND ds2.date >= ?) as var "
-                    f"FROM daily_snapshots ds "
+                    f"SELECT date, AVG(change_pct) as pool_return "
+                    f"FROM daily_snapshots "
                     f"WHERE code IN ({placeholders}) AND date >= ? "
-                    f"GROUP BY code",
-                    (*codes, start, start)
+                    f"GROUP BY date ORDER BY date",
+                    (*codes, self.theme_start)
                 ).fetchall()
 
-                if rows:
-                    returns = [r["avg_ret"] or 0 for r in rows]
-                    pool_info["avg_return"] = round(sum(returns) / len(returns), 4)
-                    pool_info["volatility"] = round(
-                        (sum((r or 0) ** 2 for r in returns) / len(returns)) ** 0.5 * (252 ** 0.5), 4
-                    )
+                if not rows or len(rows) < 20:
+                    continue
+
+                daily_rets = [r["pool_return"] or 0 for r in rows]
+                n_days = len(daily_rets)
+
+                # Cumulative return
+                cum = 1.0
+                for r in daily_rets:
+                    cum *= (1.0 + r / 100.0)
+                pool_info["cumulative_return"] = round((cum - 1.0) * 100, 2)
+
+                # Annualized
+                mean_daily = sum(daily_rets) / n_days
+                pool_info["annualized_return"] = round(mean_daily * 252, 2)
+
+                var_daily = sum((r - mean_daily) ** 2 for r in daily_rets) / (n_days - 1)
+                std_daily = math.sqrt(var_daily) if var_daily > 0 else 0
+                pool_info["annualized_vol"] = round(std_daily * math.sqrt(252), 2)
+
+                if pool_info["annualized_vol"] > 0:
                     pool_info["sharpe"] = round(
-                        pool_info["avg_return"] * 252 / max(pool_info["volatility"], 0.01), 4
+                        pool_info["annualized_return"] / pool_info["annualized_vol"], 2
                     )
+
+                # Max drawdown (from peak)
+                peak = 1.0
+                max_dd = 0.0
+                cum_val = 1.0
+                for r in daily_rets:
+                    cum_val *= (1.0 + r / 100.0)
+                    peak = max(peak, cum_val)
+                    dd = (cum_val - peak) / peak
+                    max_dd = min(max_dd, dd)
+                pool_info["max_drawdown"] = round(max_dd * 100, 2)
+
         except Exception as e:
-            log.warning(f"反事实回测数据加载失败: {e}")
+            log.warning(f"反事实回测失败: {e}")
         finally:
             conn.close()
 
-        # 归因
-        theme_ret = results["theme_stocks"]["avg_return"]
-        pre_theme_ret = results["pre_theme_pool"]["avg_return"]
-        if abs(theme_ret) > 1e-9:
-            selection_effect = (theme_ret - pre_theme_ret) / abs(theme_ret) if theme_ret != 0 else 0
+        # ── 归因分析 ──
+        theme_ret = results["t1_t3_13stocks"]["cumulative_return"]
+        pre_ret = results["pre_theme_2stocks"]["cumulative_return"]
+        full_ret = results["full_pool"]["cumulative_return"]
+
+        if abs(theme_ret) > 0.1:
+            selection_effect = (theme_ret - pre_ret) / abs(theme_ret)
         else:
             selection_effect = 0
 
         results["attribution"] = {
-            "selection_effect_pct": round(selection_effect * 100, 1),
-            "interpretation": (
-                "选池效应占比较大 → 策略收益中相当一部分来自主题走强后的池扩充"
-                if abs(selection_effect) > 0.3 else
-                "池内择时能力成立 → 池扩充未引入实质性后见之明偏差"
+            "pre_theme_cumulative_pct": pre_ret,
+            "theme_pool_cumulative_pct": theme_ret,
+            "full_pool_cumulative_pct": full_ret,
+            "pool_expansion_effect_pct": round(selection_effect * 100, 1),
+            "selection_vs_timing": (
+                "选池效应主导 → 超额收益大部分来自主题走强后的池扩充(Beta)"
+                if abs(selection_effect) > 0.3
+                else "择时能力成立 → 池扩充未引入实质性后见之明偏差(Alpha)"
+            ),
+            "caveat": (
+                "固定池仅 2 只标的，统计结论受小样本限制。"
+                "建议：等 Frozen Baseline 积累 ≥8 周后，用 frozen_comparison_history "
+                "表的 divergence 数据做更可靠的 Alpha/Beta 分离。"
             ),
         }
 

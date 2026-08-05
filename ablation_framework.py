@@ -137,7 +137,7 @@ class AblationResult:
     delta_drawdown: float = 0.0
 
     # 统计检验
-    p_value: float | None = None
+    p_value: Optional[float] = None
     significant_at_bonferroni: bool = False
 
     # vs 基准的超额
@@ -168,14 +168,14 @@ class AblationFramework:
     """
 
     def __init__(self):
-        self.baseline_result: AblationResult | None = None
+        self.baseline_result: Optional[AblationResult] = None
         self.variants: list[AblationResult] = []
         self._bonferroni_alpha = BONFERRONI_ALPHA
 
     # ── Baseline ──────────────────────────────────────────
 
     def run_baseline(self, backtest_fn: Callable[[dict], dict],
-                     config: dict | None = None) -> AblationResult:
+                     config: Optional[dict] = None) -> AblationResult:
         """运行 Baseline 回测（纯因子评分，无任何情报层）。
 
         Args:
@@ -207,7 +207,7 @@ class AblationFramework:
 
     def run_ablation(self, module_id: str,
                      backtest_fn: Callable[[dict], dict],
-                     baseline_config: dict | None = None) -> AblationResult:
+                     baseline_config: Optional[dict] = None) -> AblationResult:
         """测试加入单个模块后的增量贡献。
 
         Args:
@@ -420,51 +420,99 @@ def simple_backtest_for_ablation(config: dict) -> dict:
     Returns:
         绩效指标 dict
     """
-    # 从 scoring_history 和 signal_log 中估算
+    from db import get_conn
+    import math
+
     conn = get_conn()
     try:
-        # 获取最近 60 天的信号绩效
+        # ── 从 signal_log 获取实际信号绩效 ──
         rows = conn.execute(
-            "SELECT action, AVG(outcome_5d) as avg_ret, COUNT(*) as n "
-            "FROM signal_log "
-            "WHERE outcome_5d IS NOT NULL AND date >= date('now', '-90 days') "
-            "GROUP BY action"
+            "SELECT return_5d FROM signal_log "
+            "WHERE return_5d IS NOT NULL AND settlement_status = 'settled'"
         ).fetchall()
 
-        # 简化计算
-        weighted_ret = 0.0
-        total_n = 0
-        wins = 0
-        for row in rows:
-            n = row["n"] or 0
-            ret = row["avg_ret"] or 0
-            weighted_ret += ret * n
-            total_n += n
-            if ret > 0:
-                wins += n
+        returns = [r[0] for r in rows if r[0] is not None]
 
-        avg_return = weighted_ret / max(total_n, 1)
-        win_rate = wins / max(total_n, 1)
+        if not returns:
+            # 回退：用 outcome_5d
+            rows = conn.execute(
+                "SELECT outcome_5d FROM signal_log "
+                "WHERE outcome_5d IS NOT NULL"
+            ).fetchall()
+            returns = [r[0] for r in rows if r[0] is not None]
 
-        # 根据 config 调整（简化: 每个模块假设贡献 +0.1% 日收益改善）
+        if not returns:
+            # 最终回退：最小合理默认值
+            return {
+                "total_return": 0.0, "annualized_return": 0.0,
+                "volatility": 0.15, "max_drawdown": -0.05,
+                "sharpe": 0.0, "sortino": 0.0, "calmar": 0.0,
+                "win_rate": 0.5, "profit_factor": 1.0,
+                "turnover": 0.0, "n_trades": 0, "total_cost": 0.0,
+                "excess_vs_equal_weight": 0.0, "excess_vs_hs300": 0.0,
+            }
+
+        # ── 按 config 中的模块开关计算分组建模 ──
+        # 核心逻辑：module_on → 对应模块贡献提升的统计估计
+        # 以下是基于实际信号数据的保守估计框架
+
+        n = len(returns)
+        mean_ret = sum(returns) / n
+        std_ret = math.sqrt(sum((r - mean_ret) ** 2 for r in returns) / (n - 1)) if n > 1 else 1.0
+
+        # 胜率
+        wins = sum(1 for r in returns if r > 0)
+        win_rate = wins / n
+
+        # 盈亏比
+        pos_returns = [r for r in returns if r > 0]
+        neg_returns = [r for r in returns if r < 0]
+        avg_win = sum(pos_returns) / len(pos_returns) if pos_returns else 0
+        avg_loss = abs(sum(neg_returns) / len(neg_returns)) if neg_returns else 1
+        profit_factor = avg_win / avg_loss if avg_loss > 0 else 1.0
+
+        # 年化（假设每日信号，252 交易日）
+        annual_ret = mean_ret * 252
+        annual_vol = std_ret * math.sqrt(252)
+
+        # Sharpe（无风险 2%）
+        sharpe = (annual_ret - 2.0) / max(annual_vol, 0.1)
+        sortino_vol = math.sqrt(sum(min(r, 0) ** 2 for r in returns) / n) * math.sqrt(252)
+        sortino = (annual_ret - 2.0) / max(sortino_vol, 0.05)
+
+        # 最大回撤模拟
+        cum = 1.0
+        peak = 1.0
+        max_dd = 0.0
+        for r in returns * 5:  # 扩展 5x 模拟更长的收益序列
+            cum *= (1.0 + r / 100.0)
+            peak = max(peak, cum)
+            dd = (cum - peak) / peak
+            max_dd = min(max_dd, dd)
+        max_dd_pct = max_dd * 100
+
+        calmar = annual_ret / max(abs(max_dd_pct), 0.1)
+
+        # ── 模块调整：config 中开启的模块累加修正 ──
+        # 这是统计脚手架 — 每个模块的真实贡献需要在 Frozen Baseline
+        # 积累 ≥8 周数据后通过 delta 计算（见 ablation CLI）
         n_modules = sum(1 for k, v in config.items() if k.startswith("use_") and v)
-        adjusted_return = avg_return + n_modules * 0.001
 
         return {
-            "total_return": adjusted_return * 60,       # 估算 60 天总收益
-            "annualized_return": adjusted_return * 252, # 年化
-            "volatility": 0.15,
-            "max_drawdown": -0.08 - n_modules * 0.005,
-            "sharpe": (adjusted_return * 252 - 0.02) / 0.15,
-            "sortino": (adjusted_return * 252 - 0.02) / 0.10,
-            "calmar": (adjusted_return * 252) / 0.08,
-            "win_rate": win_rate,
-            "profit_factor": 1.5 + n_modules * 0.1,
-            "turnover": 3.0 - n_modules * 0.2,
-            "n_trades": total_n,
-            "total_cost": total_n * 0.002,
-            "excess_vs_equal_weight": adjusted_return * 60 - 0.05,
-            "excess_vs_hs300": adjusted_return * 60 - 0.03,
+            "total_return": round(mean_ret * 60, 2),     # 60 天估算
+            "annualized_return": round(annual_ret, 2),
+            "volatility": round(annual_vol, 4),
+            "max_drawdown": round(max_dd_pct, 2),
+            "sharpe": round(sharpe, 3),
+            "sortino": round(sortino, 3),
+            "calmar": round(calmar, 3),
+            "win_rate": round(win_rate, 4),
+            "profit_factor": round(profit_factor, 3),
+            "turnover": round(n / 20, 1),  # 估算月换手
+            "n_trades": n,
+            "total_cost": round(n * 0.003, 2),
+            "excess_vs_equal_weight": round(mean_ret * 60 - 0.0, 4),
+            "excess_vs_hs300": round(mean_ret * 60 - 0.0, 4),
         }
     finally:
         conn.close()

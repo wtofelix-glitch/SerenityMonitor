@@ -1,0 +1,377 @@
+{
+ "observations": [
+  {
+   "confidence": 0.5,
+   "content": "Ark Invest周三增持1660万美元SpaceX股票，减持390万美元Robinhood股票 - TradingView",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 189,
+   "signal_type": "info",
+   "source_id": "guru_cathiewood",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "ARK Invest再增持Circle 22万股，USDC链上活跃度放缓之际继续加码 - 디지털투데이",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 190,
+   "signal_type": "info",
+   "source_id": "guru_cathiewood",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "“我还在！”林园硬气回应牛市亏钱 坚持白酒是“快乐需求” 科技股买了“愁得睡不着” - 东方财富网",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 191,
+   "signal_type": "info",
+   "source_id": "guru_linyuan",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "被段永平拉黑？私募大佬但斌回应！ - 新浪网",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 192,
+   "signal_type": "info",
+   "source_id": "guru_danbin",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "李录，超200亿重仓8只票 - 东方财富网",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 193,
+   "signal_type": "info",
+   "source_id": "guru_lilu",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "巴菲特指巴郡投资Alphabet由他主导 认未更早投资是「错误」 - 星島頭條",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 194,
+   "signal_type": "info",
+   "source_id": "guru_buffett",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "巴菲特交棒前最后一次调仓披露：减持苹果、亚马逊，新建仓纽约时报 - 东方财富网",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 195,
+   "signal_type": "info",
+   "source_id": "guru_buffett",
+   "tickers": "[\"AMZN\", \"AAPL\"]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "Ark Invest周一增持2130万美元SpaceX股票和560万美元Block股票 - PANews",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 196,
+   "signal_type": "info",
+   "source_id": "guru_cathiewood",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "Warren Buffett and Bill Gates Are Still Giving Away Their Fortunes. Just Not Together. -- Update - Moomoo",
+   "fetched_at": "2026-07-16 22:00:02",
+   "id": 197,
+   "signal_type": "info",
+   "source_id": "guru_buffett",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.44999999999999996,
+   "content": "[bearish] 603986: 新闻提及 1 次 (置信45%)",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 182,
+   "signal_type": "bearish",
+   "source_id": "research_engine",
+   "tickers": "[\"603986\"]",
+   "topics": "[\"芯片\", \"半导体\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "Ark Invest 增持约 2,695 万美元 SpaceX 及 Block 股票 - CryptoRank",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 183,
+   "signal_type": "info",
+   "source_id": "guru_cathiewood",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "阿里“爆了”！多家外资巨头出手！ - 新浪网",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 184,
+   "signal_type": "info",
+   "source_id": "guru_tepper",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "百亿主观私募业绩分化，林园投资半年回撤超10% - 新浪网",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 185,
+   "signal_type": "info",
+   "source_id": "guru_linyuan",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "李录最新持仓来了！新进5家公司 - 新浪网",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 186,
+   "signal_type": "info",
+   "source_id": "guru_lilu",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  },
+  {
+   "confidence": 0.5,
+   "content": "豪华AI投研，两年狂揽146万收益_精彩视频为您呈现_36氪 - 36 Kr",
+   "fetched_at": "2026-07-15 22:00:02",
+   "id": 187,
+   "signal_type": "info",
+   "source_id": "guru_lilu",
+   "tickers": "[]",
+   "topics": "[\"news\"]"
+  }
+ ],
+ "ok": true,
+ "sources": [
+  {
+   "accuracy": 0,
+   "id": "guru_duanyongping",
+   "last_fetch": "2026-07-07 22:00:03",
+   "name": "段永平",
+   "platform": "xueqiu",
+   "quality": 5.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.09
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_buffett",
+   "last_fetch": "2026-07-16 22:00:02",
+   "name": "巴菲特",
+   "platform": "berkshire",
+   "quality": 5.0,
+   "recent_count": 3,
+   "total_predictions": 0,
+   "weight": 0.08
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_munger",
+   "last_fetch": "2026-07-15 22:00:02",
+   "name": "芒格",
+   "platform": "berkshire",
+   "quality": 4.5,
+   "recent_count": 1,
+   "total_predictions": 0,
+   "weight": 0.07
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_dalio",
+   "last_fetch": "2026-07-14 22:00:04",
+   "name": "达利欧",
+   "platform": "bridgewater",
+   "quality": 4.5,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.07
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_lilu",
+   "last_fetch": "2026-07-16 22:00:02",
+   "name": "李录",
+   "platform": "himalaya",
+   "quality": 4.0,
+   "recent_count": 3,
+   "total_predictions": 0,
+   "weight": 0.06
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_danbin",
+   "last_fetch": "2026-07-16 22:00:02",
+   "name": "但斌",
+   "platform": "weibo",
+   "quality": 3.5,
+   "recent_count": 1,
+   "total_predictions": 0,
+   "weight": 0.05
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_linyuan",
+   "last_fetch": "2026-07-16 22:00:02",
+   "name": "林园",
+   "platform": "weibo",
+   "quality": 3.5,
+   "recent_count": 2,
+   "total_predictions": 0,
+   "weight": 0.05
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_tepper",
+   "last_fetch": "2026-07-15 22:00:02",
+   "name": "泰珀",
+   "platform": "appaloosa",
+   "quality": 3.5,
+   "recent_count": 1,
+   "total_predictions": 0,
+   "weight": 0.05
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_cathiewood",
+   "last_fetch": "2026-07-16 22:00:02",
+   "name": "Cathie Wood",
+   "platform": "x_twitter",
+   "quality": 3.0,
+   "recent_count": 4,
+   "total_predictions": 0,
+   "weight": 0.05
+  },
+  {
+   "accuracy": 0,
+   "id": "li_yien",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "李一恩",
+   "platform": "douyin",
+   "quality": 4.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.045
+  },
+  {
+   "accuracy": 100.0,
+   "id": "serenity_aleabito",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "Serenity",
+   "platform": "x_twitter",
+   "quality": 5.0,
+   "recent_count": 0,
+   "total_predictions": 1,
+   "weight": 0.045
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_druckenmiller",
+   "last_fetch": "2026-07-10 07:30:05",
+   "name": "德鲁肯米勒",
+   "platform": "duquesne",
+   "quality": 4.5,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.042
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_ackman",
+   "last_fetch": "2026-07-13 22:00:03",
+   "name": "阿克曼",
+   "platform": "x_twitter",
+   "quality": 3.5,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.04
+  },
+  {
+   "accuracy": 0,
+   "id": "yuboluo",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "宇菠萝",
+   "platform": "bilibili",
+   "quality": 4.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.03
+  },
+  {
+   "accuracy": 0,
+   "id": "wushuang_yige",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "无双一哥",
+   "platform": "douyin",
+   "quality": 4.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.03
+  },
+  {
+   "accuracy": 14.3,
+   "id": "research_engine",
+   "last_fetch": "2026-07-15 22:00:02",
+   "name": "Serenity研究引擎",
+   "platform": "trendradar",
+   "quality": 4.0,
+   "recent_count": 1,
+   "total_predictions": 7,
+   "weight": 0.024
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_howardmarks",
+   "last_fetch": "2026-06-23 23:57:25",
+   "name": "霍华德·马克斯",
+   "platform": "oaktree",
+   "quality": 4.5,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.021
+  },
+  {
+   "accuracy": 0,
+   "id": "guru_burry",
+   "last_fetch": "2026-07-06 22:00:05",
+   "name": "迈克尔·巴里",
+   "platform": "x_twitter",
+   "quality": 4.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.018
+  },
+  {
+   "accuracy": 0,
+   "id": "justin_sun",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "孙宇晨",
+   "platform": "x_twitter",
+   "quality": 3.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.015
+  },
+  {
+   "accuracy": 0,
+   "id": "wanshi_tiege",
+   "last_fetch": "2026-06-23 23:01:37",
+   "name": "万石投资铁哥",
+   "platform": "douyin",
+   "quality": 2.0,
+   "recent_count": 0,
+   "total_predictions": 0,
+   "weight": 0.009
+  }
+ ]
+}

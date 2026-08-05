@@ -4,8 +4,7 @@
 """
 from datetime import date
 from typing import Optional
-
-from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS
+from config import STOCK_MAP, ALL_CODES, STOCK_DETAILS, get_stock_name
 from scorer import score_all
 from data_engine import get_all_today_snapshots
 from db import get_latest_scores
@@ -67,7 +66,7 @@ def expand_pool(
         最低总分门槛 (默认 0 = 不限制)
     max_count : int
         最多返回数量 (默认 9 = 全部)
-    tiers : list[int] | None
+    tiers : Optional[list[int]]
         仅保留指定 tier 层级，如 [1, 2]
     min_signal_strength : Optional[float]
         最低 Alpha 因子综合信号强度
@@ -162,7 +161,7 @@ def suggest_stock_to_watch(
             strength = 0.0
         signal_list.append({
             "code": code,
-            "name": STOCK_MAP.get(code, {}).get("name", code),
+            "name": get_stock_name(code),
             "signal_strength": round(strength, 4),
         })
     signal_list.sort(key=lambda x: x["signal_strength"], reverse=True)
@@ -177,7 +176,7 @@ def suggest_stock_to_watch(
             fund_sig = None
         fund_list.append({
             "code": code,
-            "name": STOCK_MAP.get(code, {}).get("name", code),
+            "name": get_stock_name(code),
             "fundamental_signal": fund_sig,
         })
     fund_list = [f for f in fund_list if f["fundamental_signal"] is not None]
@@ -269,7 +268,7 @@ def format_watch_suggestion(suggestion: dict) -> str:
     lines.append("")
     lines.append("🎯 今日重点关注（去重合并）:")
     for i, code in enumerate(suggestion["unified_watch"], 1):
-        name = STOCK_MAP.get(code, {}).get("name", code)
+        name = get_stock_name(code)
         lines.append(f"  {i}. {name}({code})")
 
     lines.append("")

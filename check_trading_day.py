@@ -14,7 +14,7 @@ A股交易日判断模块 — 供 Serenity 所有 no_agent cron 脚本调用
 交易日规则:
     1. 周末（周六/周日）→ 非交易日
     2. 上交所/深交所公布的法定节假日 → 非交易日
-    3. 调休补班（节假日前后的周末上班日）→ 交易日
+    3. 法定调休补班周末不改变证券交易所周末休市规则
 """
 
 import sys
@@ -50,7 +50,7 @@ HOLIDAYS: set[date] = {
     # 元旦
     date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3),
     # 春节
-    date(2026, 2, 17), date(2026, 2, 18), date(2026, 2, 19),
+    date(2026, 2, 16), date(2026, 2, 17), date(2026, 2, 18), date(2026, 2, 19),
     date(2026, 2, 20), date(2026, 2, 21), date(2026, 2, 22),
     date(2026, 2, 23),
     # 清明节
@@ -60,15 +60,17 @@ HOLIDAYS: set[date] = {
     date(2026, 5, 4), date(2026, 5, 5),
     # 端午节
     date(2026, 6, 19), date(2026, 6, 20), date(2026, 6, 21),
-    # 中秋节+国庆节（预计）
+    # 中秋节
+    date(2026, 9, 25), date(2026, 9, 26), date(2026, 9, 27),
+    # 国庆节
     date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 3),
     date(2026, 10, 4), date(2026, 10, 5), date(2026, 10, 6),
     date(2026, 10, 7),
 }
 
-# ── 调休补班（这些周末要上班 = 交易日） ────────────────────
+# ── 法定调休补班（证券交易所仍按周末休市） ───────────────
 # 格式：date(yyyy, m, d)
-# 调休日需要上班，所以是交易日
+# 保留此集合用于审计国家法定调休安排，不用于打开证券交易日。
 WORKDAYS: set[date] = {
     # 2025 调休补班
     date(2025, 1, 26),   # 春节前周日
@@ -85,15 +87,25 @@ WORKDAYS: set[date] = {
     date(2026, 10, 10),  # 国庆后周六
 }
 
+# Alias for test compatibility (test_trading_calendar.py imports this name)
+WEEKEND_MAKEUP_WORKDAYS = WORKDAYS
+
+def calendar_coverage_status(check_date: Optional[date] = None) -> dict:
+    """Return whether the holiday calendar covers *check_date*."""
+    d = check_date or date.today()
+    max_holiday = max(HOLIDAYS, default=date(2020, 1, 1))
+    max_workday = max(WORKDAYS, default=date(2020, 1, 1))
+    max_covered = max(max_holiday, max_workday)
+    return {"verified": d <= max_covered, "max_covered": max_covered.isoformat()}
+
 
 def is_trading_day(check_date: Optional[date] = None) -> bool:
     """判断指定日期（默认今天）是否为A股交易日"""
     d = check_date or date.today()
 
-    # 周末判断
+    # 交易所周末始终休市，国家法定调休补班不改变证券交易日。
     if d.weekday() >= 5:  # 5=周六, 6=周日
-        # 排除调休补班
-        return d in WORKDAYS  # 补班的周末算交易日
+        return False
 
     # 工作日判断：避开法定节假日
     return d not in HOLIDAYS

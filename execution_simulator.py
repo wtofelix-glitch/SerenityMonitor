@@ -135,7 +135,8 @@ class ExecutionSimulator:
     # ── 成交模拟 ──────────────────────────────────────────
 
     def simulate_fill(self, order: Order, bar: Bar,
-                      liquidity: LiquidityState) -> FillResult:
+                      liquidity: LiquidityState,
+                      execution_price: Optional[float] = None) -> FillResult:
         """模拟订单成交。
 
         策略：
@@ -159,13 +160,14 @@ class ExecutionSimulator:
             order.code, order.quantity, order.action, liquidity)
         slippage_direction = 1.0 if order.action == "buy" else -1.0
         effective_slippage = slippage * slippage_direction
-        result.fill_price = bar.close * (1.0 + effective_slippage)
+        base_price = execution_price if execution_price is not None else bar.close
+        result.fill_price = base_price * (1.0 + effective_slippage)
         result.slippage_pct = slippage
 
         # 2. 估算冲击成本
         impact = self.estimate_impact(
             order.quantity, order.price, liquidity)
-        impact_direction = 1.0 if order.action == "buy" else 1.0
+        impact_direction = 1.0 if order.action == "buy" else -1.0
         result.fill_price *= (1.0 + impact * impact_direction)
         result.impact_cost = abs(impact) * order.quantity * order.price
 
@@ -255,7 +257,7 @@ class ExecutionSimulator:
     # ── 成本计算（不模拟成交，仅计算理论成本）─────────────
 
     def compute_trading_cost(self, price: float, quantity: int,
-                             action: str, liquidity: LiquidityState | None = None) -> dict:
+                             action: str, liquidity: Optional[LiquidityState] = None) -> dict:
         """计算一笔交易的理论总成本（不模拟成交）。
 
         用于信号生成时的成本预估（§9 净期望收益计算）。
@@ -330,9 +332,23 @@ def build_liquidity_state(code: str) -> LiquidityState:
 _simulator_instance: Optional[ExecutionSimulator] = None
 
 
-def get_simulator() -> ExecutionSimulator:
-    """获取 ExecutionSimulator 单例。"""
+def get_simulator(
+    commission_rate: Optional[float] = None,
+    stamp_tax_rate: Optional[float] = None,
+    transfer_fee_rate: Optional[float] = None,
+) -> ExecutionSimulator:
+    """获取默认单例，或按指定成本参数创建独立模拟器。"""
     global _simulator_instance
+    if any(rate is not None for rate in (
+        commission_rate, stamp_tax_rate, transfer_fee_rate
+    )):
+        return ExecutionSimulator(
+            commission_rate=commission_rate if commission_rate is not None else COMMISSION_RATE,
+            stamp_tax_rate=stamp_tax_rate if stamp_tax_rate is not None else STAMP_TAX_RATE,
+            transfer_fee_rate=(
+                transfer_fee_rate if transfer_fee_rate is not None else TRANSFER_FEE_RATE
+            ),
+        )
     if _simulator_instance is None:
         _simulator_instance = ExecutionSimulator()
     return _simulator_instance

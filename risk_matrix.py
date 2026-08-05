@@ -5,7 +5,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from db import get_conn
-from config import STOCK_MAP, CAPITAL_CONFIG
+from config import STOCK_MAP, CAPITAL_CONFIG, get_stock_name
 
 def _get_weekly_returns(code, weeks=52):
     """从 daily_snapshots 计算周收益率序列"""
@@ -80,7 +80,7 @@ def compute_risk_matrix(codes=None):
     max_dd = float(np.min(dd))
 
     # 构建矩阵输出
-    names = [STOCK_MAP.get(c, {}).get("name", c) for c in common_codes]
+    names = [get_stock_name(c) for c in common_codes]
     matrix = {
         "codes": common_codes,
         "names": names,

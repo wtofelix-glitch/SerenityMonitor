@@ -8,6 +8,8 @@ import os
 import subprocess
 from unittest.mock import ANY
 
+import pytest
+
 import weight_adjuster
 from weight_adjuster import (
     load_adjusted_weights, save_adjusted_weights,
@@ -55,15 +57,15 @@ class TestLoadAdjustedWeights:
         """保存后能正确加载"""
         path = '/tmp/_test_roundtrip_weights.json'
         monkeypatch.setattr(weight_adjuster, 'ADJUSTED_WEIGHTS_PATH', path)
-        custom = {"base": 0.20, "zone": 0.10, "momentum": 0.15,
-                  "volume": 0.05, "serenity": 0.15, "factor": 0.15,
-                  "technical": 0.10, "sentiment": 0.10}
+        custom = {"zone": 0.10, "momentum": 0.15,
+                  "volume": 0.05, "serenity": 0.15, "factor": 0.20,
+                  "technical": 0.15, "moat": 0.20}
         save_adjusted_weights(custom)
         try:
             loaded = load_adjusted_weights()
-            assert loaded["base"] == 0.20
             assert loaded["zone"] == 0.10
-            assert loaded["sentiment"] == 0.10
+            assert loaded["moat"] == 0.20
+            assert loaded["factor"] == 0.20
         finally:
             os.remove(path)
 
@@ -75,16 +77,16 @@ class TestSaveAdjustedWeights:
         monkeypatch.setattr(weight_adjuster, 'ADJUSTED_WEIGHTS_PATH', path)
         weights = dict(DEFAULT_WEIGHTS)
         ic_report = {
-            "latest": {"base_score": 0.1},
-            "mean_ic": {"base_score": 0.12},
-            "n_days": {"base_score": 20},
+            "latest": {"zone_score": 0.1},
+            "mean_ic": {"zone_score": 0.12},
+            "n_days": {"zone_score": 20},
         }
         save_adjusted_weights(weights, ic_report)
         try:
             with open(path) as f:
                 data = json.load(f)
             assert "source_ic" in data
-            assert data["source_ic"]["mean_ic"]["base_score"] == 0.12
+            assert data["source_ic"]["mean_ic"]["zone_score"] == 0.12
         finally:
             os.remove(path)
 
@@ -119,29 +121,29 @@ class TestAdjustWeights:
 
     def test_positive_ic_increases_weight(self, monkeypatch):
         """正 IC → 权重上调"""
-        ic = {"base_score": 0.15, "zone_score": 0.10,
-              "momentum_score": 0.05, "volume_score": 0.02,
-              "serenity_score": 0.12, "factor_score": 0.08,
-              "technical_score": 0.03, "sentiment_score": 0.06}
+        ic = {"zone_score": 0.15, "momentum_score": 0.10,
+              "volume_score": 0.05, "serenity_score": 0.02,
+              "factor_score": 0.12, "technical_score": 0.08,
+              "moat_score": 0.03}
         result = self._run(monkeypatch, ic)
-        # base 上调: 0.15 * (1 + 0.15*1.667) / 归一化
-        assert result["base"] > DEFAULT_WEIGHTS["base"]
+        # zone 上调: 0.20 * (1 + 0.15*1.667) / 归一化
+        assert result["zone"] > DEFAULT_WEIGHTS["zone"]
 
     def test_negative_ic_decreases_weight(self, monkeypatch):
         """负 IC → 权重下调"""
-        ic = {"base_score": -0.15, "zone_score": -0.10,
-              "momentum_score": 0.05, "volume_score": 0.02,
-              "serenity_score": -0.12, "factor_score": -0.08,
-              "technical_score": 0.03, "sentiment_score": -0.06}
+        ic = {"zone_score": -0.15, "momentum_score": -0.10,
+              "volume_score": 0.05, "serenity_score": 0.02,
+              "factor_score": -0.12, "technical_score": -0.08,
+              "moat_score": 0.03}
         result = self._run(monkeypatch, ic)
-        assert result["base"] < DEFAULT_WEIGHTS["base"]
+        assert result["zone"] < DEFAULT_WEIGHTS["zone"]
 
     def test_normalized_sum_is_one(self, monkeypatch):
         """归一化后权重之和 = 1.0"""
-        ic = {"base_score": 0.20, "zone_score": -0.10,
-              "momentum_score": 0.05, "volume_score": 0.0,
-              "serenity_score": 0.15, "factor_score": -0.05,
-              "technical_score": 0.03, "sentiment_score": 0.08}
+        ic = {"zone_score": 0.20, "momentum_score": -0.10,
+              "volume_score": 0.05, "serenity_score": 0.0,
+              "factor_score": 0.15, "technical_score": -0.05,
+              "moat_score": 0.08}
         result = self._run(monkeypatch, ic)
         total = sum(result.values())
         assert abs(total - 1.0) < 0.001, f"Weights sum to {total}"
@@ -151,8 +153,8 @@ class TestAdjustWeights:
         monkeypatch.setattr(weight_adjuster, 'ADJUSTED_WEIGHTS_PATH',
                             self._tmp_path)
         ic_report = json.dumps({
-            "mean_ic": {"base_score": 0.1},
-            "n_days": {"base_score": 10},
+            "mean_ic": {"zone_score": 0.1},
+            "n_days": {"zone_score": 10},
             "latest": {},
         })
         monkeypatch.setattr(subprocess, 'run',
@@ -185,13 +187,13 @@ class TestAdjustWeights:
                             self._tmp_path)
         ic_report = json.dumps({
             "mean_ic": {k: -0.5 for k in
-                        ["base_score", "zone_score", "momentum_score",
+                        ["zone_score", "momentum_score",
                          "volume_score", "serenity_score", "factor_score",
-                         "technical_score", "sentiment_score"]},
+                         "technical_score", "moat_score"]},
             "n_days": {k: 10 for k in
-                       ["base_score", "zone_score", "momentum_score",
+                       ["zone_score", "momentum_score",
                         "volume_score", "serenity_score", "factor_score",
-                        "technical_score", "sentiment_score"]},
+                        "technical_score", "moat_score"]},
             "latest": {},
         })
         monkeypatch.setattr(subprocess, 'run',
@@ -212,7 +214,7 @@ class TestShowReset:
         show_weights()
         captured = capsys.readouterr()
         assert "动态权重" in captured.out
-        assert "base" in captured.out
+        assert "zone" in captured.out
         assert "合计" in captured.out
 
     def test_reset_weights(self, monkeypatch, capsys):
@@ -220,9 +222,9 @@ class TestShowReset:
         path = '/tmp/_test_reset.json'
         monkeypatch.setattr(weight_adjuster, 'ADJUSTED_WEIGHTS_PATH', path)
         # Save custom first
-        save_adjusted_weights({"base": 0.99, "zone": 0.01, "momentum": 0.0,
-                               "volume": 0.0, "serenity": 0.0, "factor": 0.0,
-                               "technical": 0.0, "sentiment": 0.0})
+        save_adjusted_weights({"zone": 0.99, "momentum": 0.01, "volume": 0.0,
+                               "serenity": 0.0, "factor": 0.0,
+                               "technical": 0.0, "moat": 0.0})
         reset_weights()
         captured = capsys.readouterr()
         assert "已重置" in captured.out
